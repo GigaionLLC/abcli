@@ -65,6 +65,26 @@ build_universal_abctl() {
   rm -f "$repo/bin/abctl-arm64" "$repo/bin/abctl-amd64"
 }
 
+# make_icns builds AppIcon.icns from the master PNG (macOS: sips + iconutil) into the
+# given Resources dir. No-op (with a note) if the master or the tools are missing.
+make_icns() {
+  local resources="$1"
+  local master="$GUIDIR/Resources/AppIcon.png"
+  [ -f "$master" ] || { warn "no abgui/Resources/AppIcon.png — the app will use the generic icon."; return 0; }
+  have iconutil && have sips || { warn "sips/iconutil not found — skipping the app icon."; return 0; }
+  local iconset="$repo/bin/AppIcon.iconset"
+  rm -rf "$iconset"
+  mkdir -p "$iconset"
+  local s
+  for s in 16 32 128 256 512; do
+    sips -z "$s" "$s" "$master" --out "$iconset/icon_${s}x${s}.png" >/dev/null
+    sips -z "$((s * 2))" "$((s * 2))" "$master" --out "$iconset/icon_${s}x${s}@2x.png" >/dev/null
+  done
+  iconutil -c icns "$iconset" -o "$resources/AppIcon.icns"
+  rm -rf "$iconset"
+  log "built AppIcon.icns (from Resources/AppIcon.png)"
+}
+
 # assemble builds the release app + embeds a universal abctl → bin/abgui.app.
 assemble() {
   require_macos
@@ -82,7 +102,7 @@ assemble() {
   # The embedded engine + attribution travel INSIDE the bundle. abctl is universal.
   cp "$repo/bin/abctl" "$APP/Contents/Resources/abctl"
   cp "$repo/LICENSE" "$repo/NOTICE" "$APP/Contents/Resources/"
-  [ -f "$GUIDIR/Resources/AppIcon.icns" ] && cp "$GUIDIR/Resources/AppIcon.icns" "$APP/Contents/Resources/"
+  make_icns "$APP/Contents/Resources"
   printf 'APPL????' > "$APP/Contents/PkgInfo"
 
   # Ad-hoc sign inside-out (nested binary first) — an Apple-Silicon Mach-O needs at least

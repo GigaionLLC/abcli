@@ -58,6 +58,7 @@ Sources/abgui/Models/    JSONValue · Resource · Contract (WhoamiResult, Versio
 Sources/abgui/           App · AppModel (@Observable) · ContentView
 Tests/abguiTests/        MockAbctlRunner + decode/exit-code contract tests
 Packaging/Info.plist     .app bundle template (@VERSION@ substituted at assembly)
+Resources/AppIcon.png    1024² icon master → .icns via sips/iconutil at build (build-gui.sh)
 ```
 
 ## License
