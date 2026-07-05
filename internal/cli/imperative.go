@@ -27,6 +27,7 @@ type writeFlags struct {
 	yes         bool
 	noWriteTree bool
 	force       bool
+	json        bool
 }
 
 // imp bundles the client + on-disk tree + baseline for an imperative write.
@@ -100,6 +101,32 @@ func treeNote(noWriteTree bool) string {
 	return " (git tree + baseline updated)"
 }
 
+// writeOutcome is the machine-readable result of a single imperative write (P4): a
+// GUI/script learns the new id, the archived pre-overwrite copy, and whether the git
+// tree was updated, instead of scraping the human stderr sentence. Errors surface as a
+// nonzero exit (+ stderr), so Status is always "done" when this is emitted.
+type writeOutcome struct {
+	Action          string `json:"action"` // create|replace|delete|attach|detach
+	Name            string `json:"name"`
+	ID              string `json:"id,omitempty"`
+	Status          string `json:"status"`
+	UpdatedDateTime string `json:"updatedDateTime,omitempty"` // ABM time after create/replace
+	Archive         string `json:"archive,omitempty"`         // archived pre-overwrite copy (replace/delete)
+	Blueprint       string `json:"blueprint,omitempty"`       // target blueprint (attach/detach)
+	TreeUpdated     bool   `json:"treeUpdated"`
+}
+
+// wantsMachine reports whether a machine format (the --json shorthand or a global
+// -o json/-o yaml) was requested for a write command.
+func wantsMachine(jsonShorthand bool) bool { return jsonShorthand || flagOutput != "table" }
+
+// emitWrite prints a write outcome as json/yaml on stdout (P4); the human stderr line is
+// skipped by the caller so the machine payload is the only thing on stdout.
+func emitWrite(o writeOutcome, jsonShorthand bool) error {
+	o.Status = "done"
+	return render(outFmt(jsonShorthand), o, nil, nil)
+}
+
 // --- create ---
 
 func newCreateCmd() *cobra.Command {
@@ -156,6 +183,9 @@ func runCreateConfig(name string, fl writeFlags) error {
 			return err
 		}
 	}
+	if wantsMachine(fl.json) {
+		return emitWrite(writeOutcome{Action: "create", Name: name, ID: id, UpdatedDateTime: updated, TreeUpdated: !fl.noWriteTree}, fl.json)
+	}
 	fmt.Fprintf(os.Stderr, "created %q (id %s)%s\n", name, id, treeNote(fl.noWriteTree))
 	return nil
 }
@@ -207,9 +237,10 @@ func runReplaceConfig(nameOrID string, fl writeFlags) error {
 		}
 	}
 	// archive-before-overwrite, then PATCH.
-	if _, err := i.archiver().Archive(lc.Name, "replaced", []byte(lc.XML), map[string]string{
+	arch, err := i.archiver().Archive(lc.Name, "replaced", []byte(lc.XML), map[string]string{
 		"abm_id": lc.ID, "hash": hash.Raw([]byte(lc.XML)), "updatedDateTime": lc.Updated,
-	}); err != nil {
+	})
+	if err != nil {
 		return fmt.Errorf("archive failed (PATCH skipped to keep the audit trail): %w", err)
 	}
 	updated, err := i.c.UpdateConfiguration(lc.ID, lc.Name, string(content))
@@ -224,6 +255,9 @@ func runReplaceConfig(nameOrID string, fl writeFlags) error {
 		if err := i.base.Save(i.tree.StateFile); err != nil {
 			return err
 		}
+	}
+	if wantsMachine(fl.json) {
+		return emitWrite(writeOutcome{Action: "replace", Name: lc.Name, ID: lc.ID, UpdatedDateTime: updated, Archive: arch, TreeUpdated: !fl.noWriteTree}, fl.json)
 	}
 	fmt.Fprintf(os.Stderr, "replaced %q%s\n", lc.Name, treeNote(fl.noWriteTree))
 	return nil
@@ -340,6 +374,7 @@ func newDeleteConfigCmd() *cobra.Command {
 	}
 	cmd.Flags().BoolVar(&fl.yes, "yes", false, "skip confirmation")
 	cmd.Flags().BoolVar(&fl.noWriteTree, "no-write-tree", false, "do not update the local gitops tree/baseline")
+	cmd.Flags().BoolVar(&fl.json, "json", false, "JSON output (machine-readable write outcome)")
 	return cmd
 }
 
@@ -359,9 +394,10 @@ func runDeleteConfig(nameOrID string, fl writeFlags) error {
 			return ExitError{Code: 1}
 		}
 	}
-	if _, err := i.archiver().Archive(lc.Name, "deleted", []byte(lc.XML), map[string]string{
+	arch, err := i.archiver().Archive(lc.Name, "deleted", []byte(lc.XML), map[string]string{
 		"abm_id": lc.ID, "hash": hash.Raw([]byte(lc.XML)), "updatedDateTime": lc.Updated,
-	}); err != nil {
+	})
+	if err != nil {
 		return fmt.Errorf("archive failed (DELETE skipped to keep the audit trail): %w", err)
 	}
 	if err := i.c.DeleteConfiguration(lc.ID); err != nil {
@@ -375,6 +411,9 @@ func runDeleteConfig(nameOrID string, fl writeFlags) error {
 		if err := i.base.Save(i.tree.StateFile); err != nil {
 			return err
 		}
+	}
+	if wantsMachine(fl.json) {
+		return emitWrite(writeOutcome{Action: "delete", Name: lc.Name, ID: lc.ID, Archive: arch, TreeUpdated: !fl.noWriteTree}, fl.json)
 	}
 	fmt.Fprintf(os.Stderr, "deleted %q%s\n", lc.Name, treeNote(fl.noWriteTree))
 	return nil
@@ -436,6 +475,7 @@ func addWriteFlags(cmd *cobra.Command, fl *writeFlags, needFile bool) {
 	cmd.Flags().BoolVar(&fl.yes, "yes", false, "skip confirmation (also honored: $ABCTL_APPROVE=1)")
 	cmd.Flags().BoolVar(&fl.noWriteTree, "no-write-tree", false, "do not update the local gitops tree/baseline")
 	cmd.Flags().BoolVar(&fl.force, "force", false, "skip client-side validation")
+	cmd.Flags().BoolVar(&fl.json, "json", false, "JSON output (machine-readable write outcome)")
 	if needFile {
 		_ = cmd.MarkFlagRequired("file")
 	}

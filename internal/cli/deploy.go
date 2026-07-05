@@ -40,7 +40,7 @@ func newDetachCmd() *cobra.Command { return membershipCmd("detach") }
 
 func membershipCmd(verb string) *cobra.Command {
 	var blueprint string
-	var yes, noWriteTree bool
+	var yes, noWriteTree, jsonOut bool
 	c := &cobra.Command{
 		Use:   verb + " config <name|id> --blueprint <name|id>",
 		Short: verb + " a configuration " + map[string]string{"attach": "to", "detach": "from"}[verb] + " a blueprint",
@@ -49,17 +49,18 @@ func membershipCmd(verb string) *cobra.Command {
 			if a[0] != "config" && a[0] != "configuration" {
 				return fmt.Errorf("usage: abctl %s config <name|id> --blueprint <bp>", verb)
 			}
-			return runMembership(verb, a[1], blueprint, yes, noWriteTree)
+			return runMembership(verb, a[1], blueprint, yes, noWriteTree, jsonOut)
 		},
 	}
 	c.Flags().StringVar(&blueprint, "blueprint", "", "target blueprint (name or id)")
 	c.Flags().BoolVar(&yes, "yes", false, "skip confirmation (also: $ABCTL_APPROVE=1)")
 	c.Flags().BoolVar(&noWriteTree, "no-write-tree", false, "do not update the local blueprint manifest")
+	c.Flags().BoolVar(&jsonOut, "json", false, "JSON output (machine-readable write outcome)")
 	_ = c.MarkFlagRequired("blueprint")
 	return c
 }
 
-func runMembership(verb, configArg, blueprintArg string, yes, noWriteTree bool) error {
+func runMembership(verb, configArg, blueprintArg string, yes, noWriteTree, jsonOut bool) error {
 	i, err := newImp()
 	if err != nil {
 		return err
@@ -99,6 +100,9 @@ func runMembership(verb, configArg, blueprintArg string, yes, noWriteTree bool) 
 		if err := i.syncBlueprintManifest(bpName, bp.ID, live); err != nil {
 			fmt.Fprintf(os.Stderr, "warning: membership changed on ABM but the local manifest update failed: %v\n", err)
 		}
+	}
+	if wantsMachine(jsonOut) {
+		return emitWrite(writeOutcome{Action: verb, Name: lc.Name, ID: lc.ID, Blueprint: bpName, TreeUpdated: !noWriteTree}, jsonOut)
 	}
 	fmt.Fprintf(os.Stderr, "%sed %q %s blueprint %q\n", verb, lc.Name,
 		map[string]string{"attach": "to", "detach": "from"}[verb], bpName)

@@ -96,7 +96,7 @@ func readCmd(use, short string, list func(*ab.Client) ([]ab.Resource, error), co
 			}
 			items = applyFilter(items, filters)
 			if asJSON || flagOutput != "table" {
-				return render(outFmt(asJSON), items, nil, nil)
+				return render(outFmt(asJSON), asList(items), nil, nil)
 			}
 			rows := make([][]string, 0, len(items))
 			for _, it := range items {
@@ -158,7 +158,7 @@ func getConfigurations(asJSON bool, typ string) error {
 		items = f
 	}
 	if asJSON || flagOutput != "table" {
-		return render(outFmt(asJSON), items, nil, nil)
+		return render(outFmt(asJSON), asList(items), nil, nil)
 	}
 	rows := make([][]string, 0, len(items))
 	for _, it := range items {
@@ -218,7 +218,7 @@ func getBlueprints(asJSON bool) error {
 		return err
 	}
 	if asJSON || flagOutput != "table" {
-		return render(outFmt(asJSON), items, nil, nil)
+		return render(outFmt(asJSON), asList(items), nil, nil)
 	}
 	rows := make([][]string, 0, len(items))
 	for _, it := range items {
@@ -261,7 +261,7 @@ func getDevices(asJSON bool) error {
 		return err
 	}
 	if asJSON || flagOutput != "table" {
-		return render(outFmt(asJSON), items, nil, nil)
+		return render(outFmt(asJSON), asList(items), nil, nil)
 	}
 	rows := make([][]string, 0, len(items))
 	for _, it := range items {
@@ -287,7 +287,7 @@ func getAudit(since string, asJSON bool) error {
 		return err
 	}
 	if asJSON || flagOutput != "table" {
-		return render(outFmt(asJSON), items, nil, nil)
+		return render(outFmt(asJSON), asList(items), nil, nil)
 	}
 	rows := make([][]string, 0, len(items))
 	for _, it := range items {

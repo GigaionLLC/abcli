@@ -11,19 +11,22 @@ import (
 
 // Context is one named Apple Business connection (client id + key + endpoints),
 // stored in ~/.abctl/contexts.yaml so an operator can switch between organizations/tenants.
+// The json tags mirror the yaml tags so `context get -o json|yaml` emits lowercase
+// snake_case (client_id/key/api_base/…) consistent with every other payload — not the
+// Go field names. Only the key PATH is ever surfaced, never key material.
 type Context struct {
-	ClientID string `yaml:"client_id"`
-	KeyPath  string `yaml:"key"` // path to the EC private key (resolved relative to the file if not absolute)
-	APIBase  string `yaml:"api_base,omitempty"`
-	Scope    string `yaml:"scope,omitempty"`
-	TokenURL string `yaml:"token_url,omitempty"`
-	TokenAud string `yaml:"token_aud,omitempty"`
+	ClientID string `yaml:"client_id" json:"client_id"`
+	KeyPath  string `yaml:"key" json:"key"` // path to the EC private key (resolved relative to the file if not absolute)
+	APIBase  string `yaml:"api_base,omitempty" json:"api_base,omitempty"`
+	Scope    string `yaml:"scope,omitempty" json:"scope,omitempty"`
+	TokenURL string `yaml:"token_url,omitempty" json:"token_url,omitempty"`
+	TokenAud string `yaml:"token_aud,omitempty" json:"token_aud,omitempty"`
 }
 
 // Contexts is the on-disk store: a set of named contexts + the active one.
 type Contexts struct {
-	Current  string             `yaml:"current,omitempty"`
-	Contexts map[string]Context `yaml:"contexts"`
+	Current  string             `yaml:"current,omitempty" json:"current,omitempty"`
+	Contexts map[string]Context `yaml:"contexts" json:"contexts"`
 }
 
 // ContextsPath is ~/.abctl/contexts.yaml, overridable via $ABCTL_CONTEXTS (tests/CI).

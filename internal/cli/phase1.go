@@ -51,7 +51,7 @@ func newDiffCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			if err := printFullPlan(pc, asJSON); err != nil {
+			if err := printFullPlan(pc, planFormat(asJSON)); err != nil {
 				return err
 			}
 			if exitOnDiff && pc.hasChanges() {
@@ -111,9 +111,11 @@ func runSync(fl syncFlags) error {
 	if err != nil {
 		return err
 	}
+	planFmt := planFormat(fl.asJSON) // "", "json", or "yaml" — honors -o and --json (P7)
+	machine := planFmt != ""
 
 	if !fl.apply { // dry-run: plan only
-		if err := printFullPlan(pc, fl.asJSON); err != nil {
+		if err := printFullPlan(pc, planFmt); err != nil {
 			return err
 		}
 		fmt.Fprintln(os.Stderr, "dry-run: plan only, no tenant writes (pass --apply to execute).")
@@ -125,13 +127,13 @@ func runSync(fl syncFlags) error {
 
 	// --apply path.
 	if !pc.hasChanges() { // nothing to act on (reported-only advisories, if any, still shown)
-		if fl.asJSON {
-			return printJSON(map[string]any{"configs": &reconcile.Result{Outcomes: []reconcile.Outcome{}}, "blueprints": &reconcile.BlueprintResult{Outcomes: []reconcile.BlueprintOutcome{}}})
+		if machine {
+			return render(planFmt, map[string]any{"configs": &reconcile.Result{Outcomes: []reconcile.Outcome{}}, "blueprints": &reconcile.BlueprintResult{Outcomes: []reconcile.BlueprintOutcome{}}}, nil, nil)
 		}
-		return printFullPlan(pc, false)
+		return printFullPlan(pc, "")
 	}
-	if !fl.asJSON { // show the plan as context before we write
-		_ = printFullPlan(pc, false)
+	if !machine { // show the plan as context before we write
+		_ = printFullPlan(pc, "")
 	}
 	if !fl.yes && !envApproved() {
 		ok, err := confirmApply(len(pc.plan.Items) + pc.bpPlan.ReconcilableCount())
@@ -172,8 +174,8 @@ func runSync(fl syncFlags) error {
 	bpPlan := reconcile.ComputeBlueprints(pc.bpDesired, pc.liveBPs, cfgIDByName)
 	bpRes := eng.ApplyBlueprints(bpPlan, opts, res.Writes)
 
-	if fl.asJSON {
-		if err := printJSON(map[string]any{"configs": res, "blueprints": bpRes}); err != nil {
+	if machine {
+		if err := render(planFmt, map[string]any{"configs": res, "blueprints": bpRes}, nil, nil); err != nil {
 			return err
 		}
 	} else {
@@ -497,9 +499,9 @@ func (pc *planCtx) hasChanges() bool {
 // printFullPlan renders both plans: a combined JSON object under --json, else a
 // config table followed by a blueprint table. It shows ALL items, including
 // reported-only advisories (which are useful even though sync won't apply them).
-func printFullPlan(pc *planCtx, asJSON bool) error {
-	if asJSON {
-		return printJSON(map[string]any{"configs": pc.plan.Items, "blueprints": pc.bpPlan.Items})
+func printFullPlan(pc *planCtx, format string) error {
+	if format == "json" || format == "yaml" {
+		return render(format, map[string]any{"configs": asList(pc.plan.Items), "blueprints": asList(pc.bpPlan.Items)}, nil, nil)
 	}
 	if !pc.plan.HasChanges() && !pc.bpPlan.HasChanges() {
 		fmt.Println("in sync — no changes.")

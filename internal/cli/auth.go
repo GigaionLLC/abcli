@@ -11,12 +11,14 @@ import (
 func newAuthCmd() *cobra.Command {
 	auth := &cobra.Command{Use: "auth", Short: "Authentication (ES256 client-assertion; the JWT omits kid)"}
 
+	var whoamiJSON bool
 	whoami := &cobra.Command{
 		Use:   "whoami",
 		Short: "Verify auth and print a tenant summary",
 		Args:  cobra.NoArgs,
-		RunE:  func(*cobra.Command, []string) error { return authWhoami() },
+		RunE:  func(*cobra.Command, []string) error { return authWhoami(whoamiJSON) },
 	}
+	whoami.Flags().BoolVar(&whoamiJSON, "json", false, "JSON output")
 
 	var raw bool
 	token := &cobra.Command{
@@ -31,7 +33,19 @@ func newAuthCmd() *cobra.Command {
 	return auth
 }
 
-func authWhoami() error {
+// whoamiResult is the machine-readable identity/connection summary (P1). A GUI uses
+// it as a clean "test connection": exit 0 + authenticated:true means the tenant is
+// reachable. It never carries key material or the bearer token.
+type whoamiResult struct {
+	Authenticated  bool   `json:"authenticated"`
+	ClientID       string `json:"client_id"`
+	APIBase        string `json:"api_base"`
+	TokenExpires   string `json:"token_expires"`
+	Configurations int    `json:"configurations"`
+	Blueprints     int    `json:"blueprints"`
+}
+
+func authWhoami(asJSON bool) error {
 	c, cfg, err := mustClient()
 	if err != nil {
 		return err
@@ -48,6 +62,16 @@ func authWhoami() error {
 		return err
 	}
 	exp := c.TokenSource().Expiry()
+	if asJSON || flagOutput != "table" {
+		return render(outFmt(asJSON), whoamiResult{
+			Authenticated:  true,
+			ClientID:       cfg.ClientID,
+			APIBase:        cfg.APIBase,
+			TokenExpires:   exp.Format(time.RFC3339),
+			Configurations: len(cfgs),
+			Blueprints:     len(bps),
+		}, nil, nil)
+	}
 	fmt.Println("Authenticated ✓")
 	fmt.Printf("  client_id      %s\n", cfg.ClientID)
 	fmt.Printf("  api_base       %s\n", cfg.APIBase)

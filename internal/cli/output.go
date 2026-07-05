@@ -22,6 +22,28 @@ func outFmt(jsonShorthand bool) string {
 	return flagOutput
 }
 
+// planFormat resolves the output format for the diff/sync PLAN: the per-command --json
+// shorthand OR the global -o json/-o yaml, else "" (the human tables). Without this,
+// `diff -o json` / `sync -o yaml` would silently print a table (the -o flag was ignored).
+func planFormat(jsonShorthand bool) string {
+	if jsonShorthand || flagOutput == "json" {
+		return "json"
+	}
+	if flagOutput == "yaml" {
+		return "yaml"
+	}
+	return ""
+}
+
+// asList returns s as a non-nil slice, so an empty result serializes as `[]` (not the
+// `null` a nil slice marshals to) — GUIs and `jq` pipelines then never special-case null.
+func asList[T any](s []T) []T {
+	if s == nil {
+		return []T{}
+	}
+	return s
+}
+
 // render prints data in the resolved format: a table (headers+rows) by default,
 // or the structured value as JSON/YAML.
 func render(format string, data any, headers []string, rows [][]string) error {
