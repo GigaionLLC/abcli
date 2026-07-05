@@ -85,7 +85,8 @@ final class ContractTests: XCTestCase {
         for token in ["create", "config", "WiFi", "-f", "-", "--yes", "--json"] {
             XCTAssertTrue(args.contains(token), "missing \(token) in \(args)")
         }
-        XCTAssertEqual(await recorder.stdin, Data("<plist/>".utf8))
+        let recordedStdin = await recorder.stdin
+        XCTAssertEqual(recordedStdin, Data("<plist/>".utf8))
     }
 
     func testDeleteOutcomeDecodesArchive() async throws {
