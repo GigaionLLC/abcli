@@ -58,7 +58,8 @@ final class ContractTests: XCTestCase {
 
     func testEmptyPlanIsInSync() async throws {
         let client = AbctlClient(runner: MockAbctlRunner(responses: ["diff": MockAbctlRunner.ok(#"{"configs":[],"blueprints":[]}"#)]))
-        XCTAssertTrue(try await client.plan().isEmpty)
+        let plan = try await client.plan()
+        XCTAssertTrue(plan.isEmpty)
     }
 
     func testExitCodeMapping() throws {
