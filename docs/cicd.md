@@ -1,10 +1,15 @@
 # CI/CD — GitOps delivery for abctl
 
-abctl ships three GitHub Actions workflows that turn a git repo into the control plane
-for your Apple Business tenant: **plan on PR**, **gated apply on merge**, and a
-**scheduled drift check**. This guide is the setup + operations reference.
+abctl turns a git repo into the control plane for your Apple Business tenant:
+**plan on PR/MR**, **gated apply on merge**, and a **scheduled drift check**. It ships
+the same pipeline for **both** providers — GitHub Actions
+([`.github/workflows/`](../.github/workflows/)) and GitLab CI
+([`.gitlab-ci.yml`](../.gitlab-ci.yml)) — because `abctl` itself is CI-agnostic (reads
+`AB_*` from the environment, signals via exit codes). Pick the provider you host on;
+the setup below is written for GitHub, and [the GitLab section](#gitlab-ci) maps every
+step across.
 
-> All three **self-skip** when the API secrets aren't configured, so forks and
+> Every live job **self-skips** when the API secrets aren't configured, so forks and
 > secret-less repos stay green. Nothing runs against your tenant until you opt in.
 
 ## The pipeline at a glance
@@ -84,6 +89,56 @@ reconcile still happened, but you'd re-see the drift until the baseline is commi
   `abctl diff` locally (or re-run **Drift**) to see it, then either `abctl seed` to adopt
   the console edit into git, or merge/apply the pending git change.
 - **Exit codes:** `0` ok · `1` error · `2` usage · `3` changes pending (`--exit-on-diff`).
+
+<a name="gitlab-ci"></a>
+## GitLab CI
+
+The same flow runs on GitLab via [`.gitlab-ci.yml`](../.gitlab-ci.yml) — one pipeline,
+stages `test → plan → deploy → release`. Nothing GitHub-specific leaks in: GoReleaser
+auto-detects the SCM from the git remote, so the shared [`.goreleaser.yaml`](../.goreleaser.yaml)
+cuts releases on either host.
+
+| GitLab job | Trigger | GitHub equivalent | Writes? |
+|---|---|---|---|
+| `build-test` / `lint` | MR + branch pipelines | `ci.yml` | ❌ |
+| `integration` | default branch / manual (live, read-only) | the gated test job in `ci.yml` | ❌ read-only |
+| `plan` | MR touching `gitops/**` | `cd-plan.yml` | ❌ read-only |
+| `apply` | manual, on the default branch, `production` environment | `cd-apply.yml` | ✅ **gated** |
+| `drift` | pipeline schedule | `cd-drift.yml` | ❌ read-only |
+| `release` | `v*` tag | `release.yml` | — |
+
+Map the four GitHub setup steps across:
+
+1. **Adopt `gitops/`** — identical (un-ignore the tree and commit it). The `plan`/`apply`
+   jobs use `rules: changes: [gitops/**/*]`, so they stay dormant until it's committed.
+2. **CI/CD variables** (Settings → CI/CD → Variables) — add `AB_CLIENT_ID` and
+   `AB_PRIVATE_KEY_PEM` as **masked + protected**. The shared `.abctl_key` job writes the
+   PEM to a `umask 077` file and self-skips when they're unset. (Protected variables reach
+   only protected branches/tags — that's why `integration` runs on the default branch, not
+   on fork MRs.)
+3. **Protected `production` environment** (Settings → CI/CD → Protected environments) —
+   add **deployment approvals**. The `apply` job declares `environment: production` and is
+   `when: manual`, so it waits for a human before any write, with `ABCTL_APPROVE=1` passing
+   abctl's own confirm.
+4. **Baseline commit-back** — add a **project access token** `GITLAB_TOKEN` (scopes:
+   `api` for MR notes, `write_repository` for the push). `apply` stages **only**
+   `gitops/state gitops/lib gitops/blueprints`, commits with `[skip ci]`, and pushes to the
+   default branch. As on GitHub, **`gitops/archive/` is never committed** — it's uploaded as
+   a 90-day pipeline artifact instead, keeping pre-overwrite live bodies (possible secrets)
+   out of history.
+
+Two more GitLab-only wires:
+
+- **Drift schedule** — create a **pipeline schedule** (Settings → CI/CD → Pipeline
+  schedules, e.g. daily). Only the `drift` job runs on `$CI_PIPELINE_SOURCE == "schedule"`,
+  and it exits `3` on divergence so the standard failed-pipeline notification is the alert.
+- **Release signing** — the `release` job requests a GitLab OIDC `id_token`
+  (`SIGSTORE_ID_TOKEN`, `aud: sigstore`) so cosign signs keyless with no stored key, and
+  sets `GITLAB_TOKEN=$CI_JOB_TOKEN` for the release upload. `--prune` on apply is opt-in:
+  run a pipeline with a `PRUNE=true` variable.
+
+Everything else — exit-code contract, read-only default, archive-before-overwrite — is the
+same engine; only the YAML dialect differs.
 
 ## Safety recap
 

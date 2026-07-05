@@ -56,7 +56,7 @@ snapshot:
 
 changelog:
   sort: asc
-  use: github
+  use: git # SCM-agnostic (works on both GitHub and GitLab)
   filters:
     exclude:
       - "^docs:"
@@ -64,11 +64,10 @@ changelog:
       - "^chore:"
       - "^ci:"
 
+# No explicit github:/gitlab: block — GoReleaser auto-detects the SCM (owner/name)
+# from the git remote, so this same config releases on GitHub Actions and GitLab CI.
 release:
-  github:
-    owner: GigaionLLC
-    name: abcli
-  prerelease: auto # a -rc/-beta tag → GitHub pre-release
+  prerelease: auto # a -rc/-beta tag → pre-release
   footer: |
     ---
     🤖 abctl is AI-authored under Gigaion, LLC's direction. Verify a download:

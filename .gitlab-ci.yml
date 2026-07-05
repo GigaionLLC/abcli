@@ -1,0 +1,209 @@
+# GitLab CI/CD — mirrors the GitHub Actions pipelines (see .github/workflows/ + docs/cicd.md).
+# abctl is CI-agnostic (reads AB_* from env, speaks exit codes), so this drives the same
+# read → plan → gated-apply → drift → release flow on GitLab.
+#
+# All live jobs SELF-SKIP when the AB_* variables are unset (forks / unconfigured projects
+# stay green). Set up: project CI/CD variables AB_CLIENT_ID + AB_PRIVATE_KEY_PEM (masked,
+# protected); a protected `production` environment with deployment approvals for `apply`;
+# a project access token GITLAB_TOKEN (api + write_repository) for MR notes + the baseline
+# commit-back; and a pipeline schedule for `drift`. Details in docs/cicd.md.
+
+stages:
+  - test
+  - plan
+  - deploy
+  - release
+
+default:
+  image: golang:1.26
+  cache:
+    key: go-mod
+    paths:
+      - .gomodcache/
+  before_script:
+    - export GOMODCACHE="$CI_PROJECT_DIR/.gomodcache"
+
+variables:
+  GIT_DEPTH: "0" # full history for the changelog / version stamp
+
+# ---------- CI ----------
+
+build-test:
+  stage: test
+  script:
+    - test -z "$(gofmt -l .)" || { echo 'not gofmt-clean:'; gofmt -l .; exit 1; }
+    - go vet ./...
+    - go build ./...
+    - go test -race ./... # golang image ships gcc → CGO race detector works
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH
+    - if: $CI_PIPELINE_SOURCE == "web"
+
+lint:
+  stage: test
+  variables:
+    # golangci-lint's module pins an older toolchain; build it with the project's Go.
+    GOTOOLCHAIN: local
+  script:
+    - go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.2
+    - golangci-lint run ./...
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH
+
+# Live READ-ONLY smoke test — self-skips without secrets. Runs on the default branch /
+# manual only (protected variables aren't exposed to MRs from forks).
+integration:
+  stage: test
+  script:
+    - !reference [.abctl_key, script]
+    - go test -tags=integration -run TestLiveReadOnly -v ./internal/ab/
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+    - if: $CI_PIPELINE_SOURCE == "web"
+
+# ---------- shared: self-skip + write the AB key ----------
+# `!reference`d into live jobs. The `exit 0` on missing secrets skips the whole job body;
+# exports persist to later script lines (same shell). Does NOT build — jobs add `make build`.
+.abctl_key:
+  script:
+    - |
+      if [ -z "$AB_CLIENT_ID" ] || [ -z "$AB_PRIVATE_KEY_PEM" ]; then
+        echo "AB_* variables not set — skipping (configure them to enable live jobs)."; exit 0
+      fi
+      umask 077
+      printf '%s\n' "$AB_PRIVATE_KEY_PEM" > "$CI_PROJECT_DIR/.abctl-key.pem"
+      export AB_PRIVATE_KEY="$CI_PROJECT_DIR/.abctl-key.pem"
+
+# ---------- CD: plan on MR ----------
+
+plan:
+  stage: plan
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+      changes:
+        - gitops/**/*
+  script:
+    - !reference [.abctl_key, script]
+    - make build
+    - ./bin/abctl validate || true
+    - |
+      set +e
+      ./bin/abctl sync --dry-run --exit-on-diff > plan.out 2> plan.err
+      code=$?
+      set -e
+      cat plan.out; cat plan.err
+      if [ "$code" != "0" ] && [ "$code" != "3" ]; then echo "plan failed ($code)"; exit "$code"; fi
+      # exit 3 (changes pending) is expected on a desired-state MR — do not fail.
+    - |
+      # Post the plan as an MR note (best-effort; needs GITLAB_TOKEN with api scope).
+      if [ -n "$GITLAB_TOKEN" ] && [ -n "$CI_MERGE_REQUEST_IID" ]; then
+        note=$(printf '### abctl plan — `sync --dry-run` (no writes)\n\n```\n%s\n%s\n```\n' "$(cat plan.out)" "$(cat plan.err)")
+        curl -sf --request POST --header "PRIVATE-TOKEN: $GITLAB_TOKEN" \
+          --data-urlencode "body=${note}" \
+          "$CI_API_V4_URL/projects/$CI_PROJECT_ID/merge_requests/$CI_MERGE_REQUEST_IID/notes" > /dev/null \
+          || echo "MR-note post failed (check GITLAB_TOKEN scope)"
+      fi
+  artifacts:
+    paths: [plan.out, plan.err]
+    when: always
+    expire_in: 7 days
+
+# ---------- CD: gated apply on merge to the default branch ----------
+# GATES: a manual trigger + a protected `production` environment (configure deployment
+# approvals in Settings → CI/CD → Protected environments). Self-skips without secrets.
+# `--prune` only when you set the PRUNE variable to "true" (e.g. run pipeline with a var).
+apply:
+  stage: deploy
+  environment:
+    name: production
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+      changes:
+        - gitops/**/*
+      when: manual
+    - if: $CI_PIPELINE_SOURCE == "web"
+      when: manual
+  # allow_failure defaults to false here (rules + manual): an un-played apply leaves the
+  # pipeline "blocked" (a neutral awaiting-approval state, not a failure), while a played
+  # apply that errors DOES fail — so real reconcile failures surface.
+  script:
+    - !reference [.abctl_key, script]
+    - make build
+    - |
+      export ABCTL_APPROVE=1 # CI escape past abctl's own interactive confirm
+      FLAGS=""
+      [ "$PRUNE" = "true" ] && FLAGS="--prune"
+      set +e
+      ./bin/abctl sync --apply $FLAGS > apply.out 2> apply.err
+      code=$?
+      set -e
+      cat apply.out; cat apply.err
+    - |
+      # Commit the reconciled baseline back — ONLY desired-state paths, NEVER gitops/archive/
+      # (pre-overwrite live bodies can carry secrets; it's gitignored + kept as an artifact).
+      git config user.name "abctl-bot"
+      git config user.email "abctl-bot@users.noreply.gitlab.com"
+      for p in gitops/state gitops/lib gitops/blueprints; do [ -e "$p" ] && git add "$p"; done
+      if git diff --cached --quiet; then
+        echo "no baseline / pulled-file changes to commit."
+      elif [ -n "$GITLAB_TOKEN" ]; then
+        git commit -m "chore(abctl): reconcile baseline after apply [skip ci]"
+        git push "https://oauth2:${GITLAB_TOKEN}@${CI_SERVER_HOST}/${CI_PROJECT_PATH}.git" "HEAD:${CI_DEFAULT_BRANCH}"
+      else
+        echo "baseline changed but GITLAB_TOKEN is unset — commit gitops/state + gitops/lib manually."
+      fi
+    - '[ "$code" = "0" ] || { echo "apply reported errors ($code)"; exit "$code"; }'
+  artifacts:
+    paths: [gitops/archive/] # audit trail retained as an artifact, NOT committed
+    when: always
+    expire_in: 90 days
+
+# ---------- CD: scheduled drift check ----------
+# Create a pipeline schedule (Settings → CI/CD → Pipeline schedules). exit 3 (drift) fails
+# the scheduled pipeline so the standard failure notification is the alert.
+drift:
+  stage: plan
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "schedule"
+  script:
+    - !reference [.abctl_key, script]
+    - make build
+    - |
+      set +e
+      ./bin/abctl sync --dry-run --exit-on-diff > drift.out 2> drift.err
+      code=$?
+      set -e
+      cat drift.out; cat drift.err
+      if [ "$code" = "3" ]; then echo "DRIFT: git and the tenant diverge — reconcile."; exit 3; fi
+      [ "$code" = "0" ] || exit "$code"
+      echo "in sync — no drift."
+  artifacts:
+    paths: [drift.out]
+    when: always
+
+# ---------- Release on a v* tag ----------
+# GoReleaser auto-detects GitLab from the remote (shared .goreleaser.yaml). cosign keyless
+# uses the GitLab OIDC id_token below. GITLAB_TOKEN=$CI_JOB_TOKEN creates the release;
+# a project access token may be needed for full package-registry uploads.
+release:
+  stage: release
+  rules:
+    - if: $CI_COMMIT_TAG =~ /^v\d/
+  id_tokens:
+    SIGSTORE_ID_TOKEN: # cosign reads $SIGSTORE_ID_TOKEN for keyless signing
+      aud: sigstore
+  variables:
+    GITLAB_TOKEN: $CI_JOB_TOKEN
+  before_script:
+    - export GOMODCACHE="$CI_PROJECT_DIR/.gomodcache"
+    - apt-get update -qq && apt-get install -y -qq --no-install-recommends curl ca-certificates
+    - go install github.com/goreleaser/goreleaser/v2@latest
+    - curl -sSfL "https://github.com/sigstore/cosign/releases/latest/download/cosign-linux-amd64" -o /usr/local/bin/cosign && chmod +x /usr/local/bin/cosign
+    - curl -sSfL "https://raw.githubusercontent.com/anchore/syft/main/install.sh" | sh -s -- -b /usr/local/bin
+  script:
+    - goreleaser release --clean
+  artifacts:
+    paths: [dist/]
+    expire_in: 30 days
