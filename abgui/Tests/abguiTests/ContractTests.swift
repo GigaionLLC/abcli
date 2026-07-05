@@ -1,0 +1,110 @@
+// Copyright 2026 Gigaion, LLC
+// SPDX-License-Identifier: AGPL-3.0-or-later
+import XCTest
+@testable import abgui
+
+/// Decode + exit-code tests against golden JSON captured from real `abctl … -o json`,
+/// run through the SAME decoder the app uses — so an abctl/Apple schema change breaks a
+/// test, not the UI.
+final class ContractTests: XCTestCase {
+
+    func testVersionDecodesAndReadsCapabilities() async throws {
+        let json = #"{"version":"1.2.3","commit":"abc123","buildTime":"2026-01-02T03:04:05Z","goVersion":"go1.26","capabilities":["write-json","plan-json"]}"#
+        let client = AbctlClient(runner: MockAbctlRunner(responses: ["version": MockAbctlRunner.ok(json)]))
+        let version = try await client.version()
+        XCTAssertEqual(version.version, "1.2.3")
+        XCTAssertTrue(version.has("write-json"))
+        XCTAssertFalse(version.has("nope"))
+    }
+
+    func testWhoamiDecodesSnakeCaseKeys() async throws {
+        let json = #"{"authenticated":true,"client_id":"BUSINESSAPI.x","api_base":"https://api","token_expires":"2026-01-01T00:00:00Z","configurations":3,"blueprints":2}"#
+        let client = AbctlClient(runner: MockAbctlRunner(responses: ["auth whoami": MockAbctlRunner.ok(json)]))
+        let who = try await client.whoami()
+        XCTAssertEqual(who.clientID, "BUSINESSAPI.x")
+        XCTAssertEqual(who.apiBase, "https://api")
+        XCTAssertEqual(who.configurations, 3)
+    }
+
+    func testEmptyListDecodesToEmptyArray() async throws {
+        let client = AbctlClient(runner: MockAbctlRunner(responses: ["get configurations": MockAbctlRunner.ok("[]")]))
+        let list = try await client.configurations()
+        XCTAssertTrue(list.isEmpty)
+    }
+
+    func testResourceAttributesDecode() async throws {
+        let json = #"[{"type":"configurations","id":"id1","attributes":{"name":"WiFi-Corp","type":"CUSTOM_SETTING"}}]"#
+        let client = AbctlClient(runner: MockAbctlRunner(responses: ["get configurations": MockAbctlRunner.ok(json)]))
+        let list = try await client.configurations()
+        XCTAssertEqual(list.count, 1)
+        XCTAssertEqual(list.first?.attr("name"), "WiFi-Corp")
+        XCTAssertEqual(list.first?.attr("type"), "CUSTOM_SETTING")
+        XCTAssertNil(list.first?.attr("missing"))
+    }
+
+    func testExitCodeMapping() throws {
+        // exit 3 is a normal "changes pending", not an error.
+        XCTAssertThrowsError(try AbctlClient.checkExit(AbctlResult(stdout: Data(), stderr: "", code: 3))) { error in
+            XCTAssertEqual(error as? AbctlError, .changesPending)
+        }
+        // exit 1 surfaces stderr.
+        XCTAssertThrowsError(try AbctlClient.checkExit(AbctlResult(stdout: Data(), stderr: "API 403 (grant View)", code: 1))) { error in
+            guard case AbctlError.cli(let msg)? = error as? AbctlError else { return XCTFail("want .cli") }
+            XCTAssertTrue(msg.contains("403"))
+        }
+        // exit 0 is success.
+        XCTAssertNoThrow(try AbctlClient.checkExit(AbctlResult(stdout: Data("{}".utf8), stderr: "", code: 0)))
+    }
+
+    func testCliErrorPropagatesThroughClient() async throws {
+        let client = AbctlClient(runner: MockAbctlRunner(responses: ["auth whoami": AbctlResult(stdout: Data(), stderr: "boom", code: 1)]))
+        do {
+            _ = try await client.whoami()
+            XCTFail("expected an error")
+        } catch let AbctlError.cli(message) {
+            XCTAssertEqual(message, "boom")
+        }
+    }
+
+    func testProcessRunnerEnforcesTimeout() async throws {
+        // A real child that would run for 5s is terminated by the 150ms watchdog.
+        let runner = ProcessRunner(executable: URL(fileURLWithPath: "/bin/sleep"))
+        do {
+            _ = try await runner.run(["5"], cwd: nil, stdin: nil, timeout: .milliseconds(150))
+            XCTFail("expected a timeout")
+        } catch AbctlError.timedOut {
+            // expected
+        }
+    }
+
+    func testContextIsThreadedAsFlag() async throws {
+        // A recording runner asserts --context is appended when set.
+        actor Recorder { var last: [String] = []; func set(_ a: [String]) { last = a } }
+        struct RecordingRunner: AbctlRunner {
+            let recorder: Recorder
+            func run(_ args: [String], cwd: URL?, stdin: Data?, timeout: Duration) async throws -> AbctlResult {
+                await recorder.set(args)
+                return MockAbctlRunner.ok(#"{"version":"x","goVersion":"go1.26","capabilities":[]}"#)
+            }
+        }
+        let recorder = Recorder()
+        var client = AbctlClient(runner: RecordingRunner(recorder: recorder))
+        client.context = "prod"
+        _ = try await client.version()
+        let args = await recorder.last
+        XCTAssertEqual(args.suffix(2), ["--context", "prod"])
+    }
+}
+
+extension AbctlError: Equatable {
+    public static func == (lhs: AbctlError, rhs: AbctlError) -> Bool {
+        switch (lhs, rhs) {
+        case (.changesPending, .changesPending): return true
+        case (.timedOut, .timedOut): return true
+        case (.cli(let a), .cli(let b)): return a == b
+        case (.usage(let a), .usage(let b)): return a == b
+        case (.decode, .decode): return true
+        default: return false
+        }
+    }
+}

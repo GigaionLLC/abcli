@@ -1,0 +1,49 @@
+# CI for abgui — the macOS Swift GUI. Runs on a macOS runner (has Swift + the SDK),
+# gated so it only fires on GUI changes (mirrors how CD gates on gitops/**). A GUI app
+# can't fully launch headless, so the smoke test is: swift test (decode + exit-code
+# logic), prove the bundle is universal, and prove the EMBEDDED abctl execs. Keep this
+# job non-required — a paths-filtered job that doesn't run can leave a required check
+# pending forever.
+name: GUI
+
+on:
+  pull_request:
+    paths: ['abgui/**', 'scripts/build-gui.sh', '.github/workflows/gui.yml']
+  push:
+    branches: [main]
+    paths: ['abgui/**', 'scripts/build-gui.sh', '.github/workflows/gui.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-gui:
+    name: build + test abgui (macOS)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # full history → a matching `git describe` version
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true # to compile the embedded abctl
+
+      - name: swift test
+        run: make gui-test
+
+      - name: assemble unsigned .app (embeds universal abctl)
+        run: make gui-app
+
+      - name: verify the bundle is universal and the embedded abctl execs
+        run: |
+          lipo -info bin/abgui.app/Contents/MacOS/abgui      # expect: arm64 x86_64
+          lipo -info bin/abgui.app/Contents/Resources/abctl  # expect: arm64 x86_64
+          bin/abgui.app/Contents/Resources/abctl --version   # embedded CLI runs, exit 0
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: abgui-app
+          path: bin/abgui.app
+          if-no-files-found: error

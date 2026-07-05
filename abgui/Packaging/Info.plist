@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Template for the hand-assembled .app bundle. @VERSION@ is substituted by
+     scripts/build-gui.sh. Deliberately NO com.apple.security.app-sandbox: abgui must
+     spawn the embedded abctl and read ~/.abctl (see docs/abgui-design.md §6.4). -->
+<plist version="1.0">
+<dict>
+    <key>CFBundleName</key>
+    <string>abgui</string>
+    <key>CFBundleDisplayName</key>
+    <string>abgui</string>
+    <key>CFBundleIdentifier</key>
+    <string>com.gigaion.abgui</string>
+    <key>CFBundleExecutable</key>
+    <string>abgui</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleShortVersionString</key>
+    <string>@VERSION@</string>
+    <key>CFBundleVersion</key>
+    <string>@VERSION@</string>
+    <key>LSMinimumSystemVersion</key>
+    <string>14.0</string>
+    <key>NSHighResolutionCapable</key>
+    <true/>
+    <key>LSApplicationCategoryType</key>
+    <string>public.app-category.developer-tools</string>
+    <key>GIEmbeddedAbctlVersion</key>
+    <string>@VERSION@</string>
+</dict>
+</plist>

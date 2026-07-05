@@ -114,6 +114,29 @@ func TestWhoamiResultJSONShape(t *testing.T) {
 	}
 }
 
+// TestVersionInfoCapabilities covers P2: `version --json` advertises version + the
+// shipped capability tokens a GUI gates on.
+func TestVersionInfoCapabilities(t *testing.T) {
+	vi := buildVersionInfo()
+	if vi.Version == "" || vi.GoVersion == "" {
+		t.Errorf("versionInfo missing version/goVersion: %+v", vi)
+	}
+	need := map[string]bool{
+		"auth-whoami-json": true, "write-json": true, "context-json": true, "plan-json": true,
+		"list-empty-array": true, "version-json": true, "blueprint-counts-json": true,
+	}
+	for _, c := range vi.Capabilities {
+		delete(need, c)
+	}
+	if len(need) != 0 {
+		t.Errorf("missing capability tokens: %v", need)
+	}
+	b, _ := json.Marshal(vi)
+	if !strings.Contains(string(b), `"capabilities"`) || !strings.Contains(string(b), `"goVersion"`) {
+		t.Errorf("versionInfo JSON shape wrong: %s", b)
+	}
+}
+
 // captureStdout redirects os.Stdout for the duration of fn and returns what it wrote.
 func captureStdout(t *testing.T, fn func() error) string {
 	t.Helper()

@@ -42,7 +42,7 @@ func newRoot() *cobra.Command {
 	root.PersistentFlags().StringVarP(&flagOutput, "output", "o", "table", "output format: table|json|yaml")
 	root.PersistentFlags().StringVar(&flagContext, "context", "", "connection context (see `abctl context`); else $ABCTL_CONTEXT / .env")
 	root.AddCommand(
-		newAuthCmd(), newGetCmd(), newContextCmd(),
+		newAuthCmd(), newGetCmd(), newContextCmd(), newVersionCmd(),
 		newSeedCmd(), newValidateCmd(), newDiffCmd(), newSyncCmd(),
 		newCreateCmd(), newReplaceCmd(), newEditCmd(), newDeleteCmd(),
 		newApplyCmd(), newPullCmd(), newAttachCmd(), newDetachCmd(), newStatusCmd(),

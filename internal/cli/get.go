@@ -238,11 +238,14 @@ func getBlueprint(nameOrID string, asJSON bool) error {
 	if err != nil {
 		return err
 	}
-	if asJSON || flagOutput != "table" {
-		return render(outFmt(asJSON), r, nil, nil)
-	}
 	configs, _ := c.BlueprintRelationship(r.ID, "configurations")
 	devices, _ := c.BlueprintRelationship(r.ID, "orgDevices")
+	if asJSON || flagOutput != "table" {
+		// P6: a JSON-driven detail screen needs the member counts the table shows.
+		return render(outFmt(asJSON), map[string]any{
+			"blueprint": r, "configs": len(configs), "devices": len(devices),
+		}, nil, nil)
+	}
 	fmt.Printf("name     %s\n", r.AttrStr("name"))
 	fmt.Printf("id       %s\n", r.ID)
 	fmt.Printf("status   %s\n", r.AttrStr("status"))
