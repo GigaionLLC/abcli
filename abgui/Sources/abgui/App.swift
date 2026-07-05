@@ -7,11 +7,11 @@ struct ABGUIApp: App {
     @State private var model = AppModel()
 
     var body: some Scene {
-        WindowGroup("abgui") {
-            ContentView()
+        WindowGroup {
+            RootView()
                 .environment(model)
-                .frame(minWidth: 720, minHeight: 480)
+                .frame(minWidth: 820, minHeight: 520)
         }
-        .defaultSize(width: 900, height: 600)
+        .defaultSize(width: 1040, height: 680)
     }
 }

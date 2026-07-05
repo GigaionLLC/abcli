@@ -42,6 +42,25 @@ final class ContractTests: XCTestCase {
         XCTAssertNil(list.first?.attr("missing"))
     }
 
+    func testPlanDecodes() async throws {
+        let json = """
+        {"configs":[{"name":"WiFi-Corp.mobileconfig","action":"update-abm","detail":"changed in git"}],
+         "blueprints":[{"blueprint":"Fleet-A","bp_id":"b1","action":"attach-config","config":"WiFi-Corp.mobileconfig","config_id":"c1","detail":"attach"}]}
+        """
+        let client = AbctlClient(runner: MockAbctlRunner(responses: ["diff": MockAbctlRunner.ok(json)]))
+        let plan = try await client.plan()
+        XCTAssertFalse(plan.isEmpty)
+        XCTAssertEqual(plan.changeCount, 2)
+        XCTAssertEqual(plan.configs.first?.action, "update-abm")
+        XCTAssertEqual(plan.blueprints.first?.bpID, "b1")
+        XCTAssertEqual(plan.blueprints.first?.config, "WiFi-Corp.mobileconfig")
+    }
+
+    func testEmptyPlanIsInSync() async throws {
+        let client = AbctlClient(runner: MockAbctlRunner(responses: ["diff": MockAbctlRunner.ok(#"{"configs":[],"blueprints":[]}"#)]))
+        XCTAssertTrue(try await client.plan().isEmpty)
+    }
+
     func testExitCodeMapping() throws {
         // exit 3 is a normal "changes pending", not an error.
         XCTAssertThrowsError(try AbctlClient.checkExit(AbctlResult(stdout: Data(), stderr: "", code: 3))) { error in

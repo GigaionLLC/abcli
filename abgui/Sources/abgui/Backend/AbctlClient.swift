@@ -53,6 +53,19 @@ struct AbctlClient {
         try await decodeJSON([Resource].self, ["get", "devices", "-o", "json"])
     }
 
+    /// The 3-way plan. `diff --json` prints it and exits 0 — drift is a non-empty plan.
+    func plan() async throws -> Plan {
+        try await decodeJSON(Plan.self, ["diff", "--json"])
+    }
+
+    /// The raw `.mobileconfig` XML for a config (stdout is XML, not JSON).
+    func configurationProfile(_ id: String) async throws -> String {
+        let result = try await runner.run(argv(["get", "configuration", id, "--profile"]),
+                                          cwd: nil, stdin: nil, timeout: .seconds(60))
+        try Self.checkExit(result)
+        return String(decoding: result.stdout, as: UTF8.self)
+    }
+
     // MARK: plumbing
 
     private func argv(_ base: [String]) -> [String] {
