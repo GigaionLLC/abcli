@@ -6,9 +6,10 @@ import SwiftUI
 /// a detail pane, and a live connection footer.
 struct RootView: View {
     @Environment(AppModel.self) private var model
-    @State private var section: Section? = .configurations
+    @State private var selection: SidebarItem? = .configurations
 
-    enum Section: String, CaseIterable, Identifiable, Hashable {
+    /// A sidebar entry. (Named SidebarItem, not Section, to avoid shadowing SwiftUI.Section.)
+    enum SidebarItem: String, CaseIterable, Identifiable, Hashable {
         // GitOps — write-capable
         case configurations, blueprints, diff, archive
         // Read-only — live views abgui never mutates
@@ -52,20 +53,20 @@ struct RootView: View {
             }
         }
 
-        static let gitopsSections: [Section] = [.configurations, .blueprints, .diff, .archive]
-        static let readOnlySections: [Section] = [.devices, .users, .userGroups, .apps, .packages, .mdmServers, .audit]
+        static let gitopsItems: [SidebarItem] = [.configurations, .blueprints, .diff, .archive]
+        static let readOnlyItems: [SidebarItem] = [.devices, .users, .userGroups, .apps, .packages, .mdmServers, .audit]
     }
 
     var body: some View {
         NavigationSplitView {
-            List(selection: $section) {
+            List(selection: $selection) {
                 Section("GitOps") {
-                    ForEach(Section.gitopsSections) { item in
+                    ForEach(SidebarItem.gitopsItems) { item in
                         Label(item.title, systemImage: item.symbol).tag(item)
                     }
                 }
                 Section("Read-only") {
-                    ForEach(Section.readOnlySections) { item in
+                    ForEach(SidebarItem.readOnlyItems) { item in
                         Label(item.title, systemImage: item.symbol).tag(item)
                     }
                 }
@@ -82,10 +83,10 @@ struct RootView: View {
     }
 
     @ViewBuilder private var detail: some View {
-        if let kind = section?.readOnly {
+        if let kind = selection?.readOnly {
             ReadOnlyListView(kind: kind)
         } else {
-            switch section {
+            switch selection {
             case .configurations: ConfigurationsView()
             case .blueprints: BlueprintsView()
             case .diff: DiffView()

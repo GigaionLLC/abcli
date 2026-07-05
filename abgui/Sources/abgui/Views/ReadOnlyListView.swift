@@ -27,16 +27,19 @@ struct ReadOnlyListView: View {
         @Bindable var model = model
         VStack(spacing: 0) {
             banner
-            Table(of: Resource.self, selection: $selection) {
-                TableColumnForEach(kind.columns) { column in
-                    TableColumn(column.header) { (row: Resource) in Text(column.value(row)) }
+            columnHeader
+            Divider()
+            // A List (not a dynamic Table) so it builds on macOS 14.0 — TableColumnForEach
+            // needs 14.4. Even-width columns via ForEach keep it grid-like and read-only.
+            List(model.readItems(kind), selection: $selection) { row in
+                HStack(spacing: 12) {
+                    ForEach(kind.columns) { column in
+                        Text(column.value(row))
+                            .lineLimit(1)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
                 }
-            } rows: {
-                ForEach(model.readItems(kind)) { TableRow($0) }
-            }
-            .contextMenu(forSelectionType: Resource.ID.self) { _ in
-            } primaryAction: { ids in
-                openDetail(ids.first)
+                .contentShape(Rectangle())
             }
             .overlay {
                 ListStateOverlay(isLoading: model.isLoading, error: model.loadError,
@@ -67,6 +70,20 @@ struct ReadOnlyListView: View {
 
     // Re-run the load when the resource changes, or (for audit) the since-window changes.
     private var taskID: String { kind == .audit ? "\(kind.id):\(model.auditSince)" : kind.id }
+
+    private var columnHeader: some View {
+        HStack(spacing: 12) {
+            ForEach(kind.columns) { column in
+                Text(column.header.uppercased())
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+        }
+        .padding(.horizontal, 20)
+        .padding(.top, 6)
+        .padding(.bottom, 4)
+    }
 
     private var banner: some View {
         HStack(spacing: 8) {
