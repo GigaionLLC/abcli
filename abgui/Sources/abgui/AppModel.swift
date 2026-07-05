@@ -29,6 +29,7 @@ final class AppModel {
     // GitOps workspace (the dir containing gitops/) — required for diff / sync / archive.
     var repoRoot: URL?
     var applyResult: ApplyResult?
+    var archiveEntries: [ArchiveEntry] = []
 
     // Per-screen UI state
     var isLoading = false
@@ -52,6 +53,24 @@ final class AppModel {
         repoRoot = url
         plan = nil
         applyResult = nil
+        archiveEntries = []
+    }
+
+    /// Scan the workspace's gitops/archive/ tree (pure filesystem — no abctl).
+    func loadArchive() {
+        guard let root = repoRoot else { archiveEntries = []; return }
+        archiveEntries = ArchiveScanner.scan(root: root)
+    }
+
+    /// Roll back: restore an archived live version by replacing the live config with it
+    /// (which archives the CURRENT live version first — a reversible undo).
+    func restore(_ entry: ArchiveEntry) async -> Bool {
+        guard let data = try? Data(contentsOf: entry.fileURL),
+              let xml = String(data: data, encoding: .utf8) else {
+            lastWriteError = "couldn't read the archived profile at \(entry.fileURL.lastPathComponent)."
+            return false
+        }
+        return await replaceConfiguration(id: entry.configName, xml: xml)
     }
 
     /// Reconcile the tenant to the workspace git state. Returns true on a clean apply.

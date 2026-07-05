@@ -12,6 +12,7 @@ struct RootView: View {
         case blueprints = "Blueprints"
         case devices = "Devices"
         case diff = "Diff / Drift"
+        case archive = "Archive"
 
         var id: String { rawValue }
         var symbol: String {
@@ -20,6 +21,7 @@ struct RootView: View {
             case .blueprints: return "square.stack.3d.up"
             case .devices: return "laptopcomputer"
             case .diff: return "arrow.triangle.branch"
+            case .archive: return "clock.arrow.circlepath"
             }
         }
     }
@@ -48,6 +50,7 @@ struct RootView: View {
         case .blueprints: BlueprintsView()
         case .devices: DevicesView()
         case .diff: DiffView()
+        case .archive: ArchiveView()
         case nil: ContentUnavailableView("Select a section", systemImage: "sidebar.left")
         }
     }

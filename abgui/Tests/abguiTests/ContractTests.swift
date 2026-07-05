@@ -132,6 +132,48 @@ final class ContractTests: XCTestCase {
         }
     }
 
+    func testArchiveScannerParsesTree() throws {
+        let fm = FileManager.default
+        let root = fm.temporaryDirectory.appendingPathComponent("abgui-arch-\(UUID().uuidString)")
+        let dir = root.appendingPathComponent("gitops/archive/WiFi-Corp")
+        try fm.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: root) }
+
+        let stem = "20260101T000000Z--replaced"
+        try Data("<plist/>".utf8).write(to: dir.appendingPathComponent("\(stem).mobileconfig"))
+        let sidecar = #"{"name":"WiFi-Corp.mobileconfig","reason":"replaced","archivedAt":"2026-01-01T00:00:00Z","file":"\#(stem).mobileconfig"}"#
+        try Data(sidecar.utf8).write(to: dir.appendingPathComponent("\(stem).json"))
+
+        let entries = ArchiveScanner.scan(root: root)
+        XCTAssertEqual(entries.count, 1)
+        XCTAssertEqual(entries.first?.configName, "WiFi-Corp.mobileconfig")
+        XCTAssertEqual(entries.first?.reason, "replaced")
+    }
+
+    func testReplaceSendsGatedJSONWithStdin() async throws {
+        actor Recorder {
+            var args: [String] = []
+            var stdin: Data?
+            func record(_ a: [String], _ s: Data?) { args = a; stdin = s }
+        }
+        struct RecordingRunner: AbctlRunner {
+            let recorder: Recorder
+            func run(_ args: [String], cwd: URL?, stdin: Data?, timeout: Duration) async throws -> AbctlResult {
+                await recorder.record(args, stdin)
+                return MockAbctlRunner.ok(#"{"action":"replace","name":"WiFi.mobileconfig","id":"id-1","status":"done","treeUpdated":true}"#)
+            }
+        }
+        let recorder = Recorder()
+        let client = AbctlClient(runner: RecordingRunner(recorder: recorder))
+        _ = try await client.replaceConfiguration(id: "id-1", xml: Data("<x/>".utf8))
+        let args = await recorder.args
+        for token in ["replace", "config", "id-1", "-f", "-", "--yes", "--json"] {
+            XCTAssertTrue(args.contains(token), "missing \(token) in \(args)")
+        }
+        let recordedStdin = await recorder.stdin
+        XCTAssertEqual(recordedStdin, Data("<x/>".utf8))
+    }
+
     func testExitCodeMapping() throws {
         // exit 3 is a normal "changes pending", not an error.
         XCTAssertThrowsError(try AbctlClient.checkExit(AbctlResult(stdout: Data(), stderr: "", code: 3))) { error in
