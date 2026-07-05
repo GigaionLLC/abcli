@@ -200,6 +200,18 @@ On GitLab the same three run as the `plan` / `apply` / `drift` jobs in `.gitlab-
 protected `production` environment / pipeline schedule). In CI either way, `abctl` reads config from the
 environment (`AB_CLIENT_ID` + `AB_PRIVATE_KEY`) — no `.env` needed.
 
+**Run it locally too.** [`scripts/pipeline.sh`](scripts/pipeline.sh) drives the identical stages on your
+own machine — no CI required — so you can plan/apply/drift against the current branch by hand:
+
+```sh
+./scripts/pipeline.sh ci      # build + gofmt + vet + test (+ lint) — no secrets
+./scripts/pipeline.sh plan    # READ-ONLY: what `apply` would change
+./scripts/pipeline.sh drift   # READ-ONLY: exit 3 if git and the tenant diverge
+./scripts/pipeline.sh apply   # LIVE, gated writes (--commit to mirror CI's baseline commit-back)
+```
+
+It's the same logic the workflows run, so local and CI never disagree.
+
 ## Verified API facts (from live testing — trust these)
 
 - Auth omits `kid`; `aud = …/oauth2/v2/token`; bearer TTL 60 min.

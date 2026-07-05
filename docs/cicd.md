@@ -24,6 +24,36 @@ The loop: open a PR editing `gitops/` → **Plan** comments what will change →
 **Apply** reconciles the tenant (behind a human approval) and commits the new baseline →
 **Drift** catches anyone who edits the console out-of-band.
 
+## Run the pipeline locally (no CI required)
+
+You don't have to wait on CI to use the same flow — [`scripts/pipeline.sh`](../scripts/pipeline.sh)
+runs each stage on your machine, against the current branch, with the **same logic** the
+workflows use (it's written to be callable both ways, so local and CI never diverge):
+
+```sh
+./scripts/pipeline.sh ci      # build + gofmt + vet + test (+ golangci-lint) — no secrets
+./scripts/pipeline.sh plan    # READ-ONLY: show what `apply` would change
+./scripts/pipeline.sh drift   # READ-ONLY: exit 3 if git and the tenant have diverged
+./scripts/pipeline.sh apply   # LIVE, gated writes (abctl still asks you to type 'yes')
+./scripts/pipeline.sh release # local GoReleaser snapshot (no publish)
+```
+
+- **Credentials** resolve exactly as `abctl` does — an [abctl context](../README.md), a
+  `.env`, or `AB_CLIENT_ID` + `AB_PRIVATE_KEY` in your environment. Nothing extra to set
+  up. (If you keep the key inline as `AB_PRIVATE_KEY_PEM`, the script writes it to a
+  private temp file and deletes it on exit, just like CI.)
+- **`plan`** is read-only and never fails on pending changes (add `--strict` to make it
+  exit 3 for scripting). **`drift`** exits 3 when git and the tenant disagree.
+- **`apply`** is gated by `abctl` itself — you type `yes` (or pass `--yes`). It does **not**
+  commit the reconciled baseline unless you ask: add `--commit` (and `--push`) to mirror
+  what CI does. `--prune` (deletes/detaches) stays off unless you pass it. As always,
+  `gitops/archive/` is **never** committed.
+- Any extra flags pass straight through to `abctl`:
+  `./scripts/pipeline.sh apply --prune --limit-writes 5`.
+
+In short: `pipeline.sh` **is** the pipeline. CI just calls the same stages on a schedule
+and behind a protected environment; locally you drive them by hand.
+
 ## Setup
 
 ### 1. Adopt the `gitops/` tree (required)
