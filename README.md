@@ -186,6 +186,8 @@ In CI, `abctl` reads config from the environment (`AB_CLIENT_ID` + `AB_PRIVATE_K
 ## Docs
 
 - **[docs/design-abctl.md](docs/design-abctl.md)** — architecture: bidirectional sync, newest-wins, archive-on-overwrite, blueprint membership.
+- **[docs/cicd.md](docs/cicd.md)** — the GitOps CI/CD pipelines (plan / apply / drift) and how to set them up.
+- **[docs/fleetctl-parity.md](docs/fleetctl-parity.md)** — roadmap for the imperative CLI + signed binary release (fleetctl-style).
 - **[docs/auth.md](docs/auth.md)** + **[docs/endpoints/](docs/endpoints/)** — the *live-verified* Apple Business API reference.
 - **[HANDOFF.md](HANDOFF.md)** / **[TODO.md](TODO.md)** — current state and roadmap.
 - **[AGENT.md](AGENT.md)** — instructions for AI agents working in this repo.
