@@ -68,34 +68,31 @@ design: [docs/design-abctl.md](docs/design-abctl.md).
   (the drift check *detects* it read-only; auto-committing the pulled edits back needs `abctl` to run
   `git add/commit` itself — still future; the merge-apply job commits the baseline back but not on a schedule).
 
-## Imperative CLI + binary release (fleetctl parity) — determined 2026-07-05
-Full determination + parity map + reconciliation model in **[docs/fleetctl-parity.md](docs/fleetctl-parity.md)**.
-Same binary, two planes (GitOps + a fleetctl-style imperative plane); full parity on the
-authoring/deploy/assignment plane the API exposes; live-query / per-device mdm-command /
-on-device install-verification are architecturally impossible and are scoped out honestly.
-- [ ] **Phase 0 — ship the binary + foundation (HIGH, no new Apple writes):** GoReleaser v2 on `v*`
-  (`.goreleaser.yaml` + `release.yml`; ldflags target `internal/cli.version`, cosign + provenance,
-  brew/scoop/install.sh) → cut **v0.1.0** from the current feature set; kubeconfig-style **contexts**
+## Imperative CLI + binary release — determined + built 2026-07-05
+Full design + capability map + reconciliation model in **[docs/imperative-cli.md](docs/imperative-cli.md)**.
+Same binary, two planes (GitOps + an imperative plane); full capability on the authoring/deploy/
+assignment plane the API exposes; live device query / per-device MDM command / on-device install
+verification are architecturally impossible and are scoped out honestly (no agent, no command channel).
+- [x] **Phase 0 — foundation:** global `-o/--output json|yaml|table`; named-connection **contexts**
   (`abctl context …`, `~/.abctl/contexts.yaml`, `--context`/`$ABCTL_CONTEXT`, `.env` stays the CI
-  path); global **`--output json|yaml|table`**; extend `api` to write-gated `-X/-F/-H`.
-- [ ] **Phase 1 — imperative config authoring (HIGH → v0.2.0):** `create|replace|edit|delete config`
-  (reuse client + archive engine, inline tree+baseline mutation, `--no-write-tree` escape);
-  `apply -f`/`delete -f` (incremental, versioned `abctl/v1` spec); `pull [config <name>]` for
-  console-edit adoption.
-- [ ] **Phase 2 — deploy + assignment (MEDIUM → v0.3.0):** `attach|detach config --blueprint`; NEW
-  `orgDeviceActivities` client method + `assign|unassign` + `status activity`; `status config`
-  (coverage) + `status audit` (both labeled desired-state/changelog, never install-verified).
-  **Blocked on a live test device** (orgDeviceActivities body shape + one-blueprint-per-device).
-- [ ] **Phase 3 — parity glue + distribution + 1.0 (MEDIUM→LOW):** `get apps|users|usergroups|
-  mdmservers|activities`; client-side `--filter` (honest "query" proxy); completions/man pages;
-  Homebrew/Scoop live; explicit `--help` scope-out of the impossible trio; **v1.0.0** once the write
-  verbs are live-proven.
+  path); `api` extended to write-gated `-X/-F/--input`; GoReleaser v2 (`.goreleaser.yaml` +
+  `release.yml`, ldflags → `internal/cli.version`, cosign + provenance + SBOM). Cut **v0.1.0** to ship.
+- [x] **Phase 1 — imperative config authoring:** `create|replace|edit|delete config` (reuse client +
+  archive engine, inline tree+baseline mutation, `--no-write-tree` escape); `apply -f`/`delete -f`
+  (incremental, versioned `abctl/v1` spec); `pull [config <name>]` for console-edit adoption.
+- [~] **Phase 2 — deploy + assignment:** `attach|detach config --blueprint` (done); `status config`
+  (coverage) + `status audit` (done — labeled desired-state/changelog, never install-verified).
+  **Remaining, blocked on a live test device:** a `orgDeviceActivities` client method +
+  `assign|unassign` + `status activity` (body shape + one-blueprint-per-device still unconfirmed).
+- [~] **Phase 3 — glue + distribution + 1.0:** `get users|usergroups|apps|mdmservers` + client-side
+  `--filter` (done). Remaining: completions/man pages; Homebrew Cask + Scoop live (need the tap/bucket
+  repos + a token secret — templates in `.goreleaser.yaml`); **v1.0.0** once the write verbs are
+  live-proven against the tenant.
 
 ## Later — enterprise polish
 - [ ] **`--platform business|school`** (Apple School Manager uses `api-school` + `school.api`).
 - [ ] `log/slog` structured logging + `--verbose`.
 - [ ] macOS **Keychain** option for the key (not only a file path).
-- [ ] *(kubeconfig-style multi-tenant contexts moved into Phase 0 above.)*
 
 ## Guardrails (every task)
 Read-only by default · writes gated behind `--apply` + confirm · `--prune` off by default · dry-run first ·

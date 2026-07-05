@@ -122,10 +122,10 @@ in the console; `abctl` reports but doesn't act on them.
 
 ## Command reference
 
-`abctl` has two modes — a **GitOps** engine and **fleetctl-style imperative** commands — in one binary.
+`abctl` has two modes — a **GitOps** engine and **imperative** commands — in one binary.
 Global flags: `-o/--output table|json|yaml`, `--context <name>` (see `abctl context`). Every write is gated
 (confirm unless `--yes`/`$ABCTL_APPROVE`); imperative writes also update the local `gitops/` tree + baseline
-inline (`--no-write-tree` to skip). Full design: **[docs/fleetctl-parity.md](docs/fleetctl-parity.md)**.
+inline (`--no-write-tree` to skip). Full design: **[docs/imperative-cli.md](docs/imperative-cli.md)**.
 
 ```
 # read
@@ -139,7 +139,7 @@ abctl validate                                      # validate lib/ profiles
 abctl diff | sync [--exit-on-diff]                  # 3-way plan (configs + blueprint membership)
 abctl sync --apply [--prune] [--yes] [--limit-writes N]   # gated execute
 
-# imperative (fleetctl-style, one resource at a time)
+# imperative (one resource at a time)
 abctl create  config <name> -f profile.mobileconfig # POST a new CUSTOM_SETTING config
 abctl replace config <name|id> -f profile.mobileconfig   # archive live, then PATCH
 abctl edit    config <name|id>                      # fetch → $EDITOR → PATCH on save
@@ -153,7 +153,7 @@ abctl status config <name>                          # which blueprints carry it 
 abctl status audit [--since 24h --type … --actor …] # config/device change history
 
 # contexts + escape hatch
-abctl context set|use|get|list|current              # kubeconfig-style tenants (~/.abctl/contexts.yaml)
+abctl context set|use|get|list|current              # named-connection tenants (~/.abctl/contexts.yaml)
 abctl api <path> [-X POST -F k=v --input body.json] # raw request (non-GET is gated)
 abctl version | completion | help
 ```
@@ -209,7 +209,7 @@ In CI, `abctl` reads config from the environment (`AB_CLIENT_ID` + `AB_PRIVATE_K
 
 - **[docs/design-abctl.md](docs/design-abctl.md)** — architecture: bidirectional sync, newest-wins, archive-on-overwrite, blueprint membership.
 - **[docs/cicd.md](docs/cicd.md)** — the GitOps CI/CD pipelines (plan / apply / drift) and how to set them up.
-- **[docs/fleetctl-parity.md](docs/fleetctl-parity.md)** — roadmap for the imperative CLI + signed binary release (fleetctl-style).
+- **[docs/imperative-cli.md](docs/imperative-cli.md)** — design + roadmap for the imperative CLI + signed binary release.
 - **[docs/auth.md](docs/auth.md)** + **[docs/endpoints/](docs/endpoints/)** — the *live-verified* Apple Business API reference.
 - **[HANDOFF.md](HANDOFF.md)** / **[TODO.md](TODO.md)** — current state and roadmap.
 - **[AGENT.md](AGENT.md)** — instructions for AI agents working in this repo.

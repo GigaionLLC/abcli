@@ -51,7 +51,7 @@ func newApplyCmd() *cobra.Command {
 	var dryRun bool
 	c := &cobra.Command{
 		Use:   "apply -f <file.yml> [-f …]",
-		Short: "Apply abctl/v1 resource specs (upsert; incremental, never deletes) — fleetctl-style",
+		Short: "Apply abctl/v1 resource specs (upsert; incremental, never deletes)",
 		Long: "apply upserts each Configuration/Blueprint doc in the given spec file(s): creates or\n" +
 			"replaces configs, attaches listed configs to blueprints. It NEVER deletes resources\n" +
 			"absent from the file (that is `sync --prune` or `delete -f`). Multi-doc `---` files and\n" +

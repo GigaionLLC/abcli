@@ -13,7 +13,7 @@ func newContextCmd() *cobra.Command {
 	c := &cobra.Command{
 		Use:     "context",
 		Aliases: []string{"ctx"},
-		Short:   "Manage connection contexts (kubeconfig-style; ~/.abctl/contexts.yaml)",
+		Short:   "Manage connection contexts (~/.abctl/contexts.yaml)",
 		Long: "A context is a named Apple Business connection (client id + key + endpoints).\n" +
 			"Switch tenants with `abctl context use <name>` or the global --context/$ABCTL_CONTEXT.\n" +
 			"With no context selected, abctl falls back to .env / the AB_* process environment.",

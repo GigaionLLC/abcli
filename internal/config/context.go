@@ -9,8 +9,8 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// Context is one named Apple Business connection (kubeconfig-style). Stored in
-// ~/.abctl/contexts.yaml so an operator can switch between organizations/tenants.
+// Context is one named Apple Business connection (client id + key + endpoints),
+// stored in ~/.abctl/contexts.yaml so an operator can switch between organizations/tenants.
 type Context struct {
 	ClientID string `yaml:"client_id"`
 	KeyPath  string `yaml:"key"` // path to the EC private key (resolved relative to the file if not absolute)

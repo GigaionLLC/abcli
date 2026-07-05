@@ -30,7 +30,7 @@ func newRoot() *cobra.Command {
 		Use:   "abctl",
 		Short: "CLI for the Apple Business API — GitOps sync + imperative config management",
 		Long: "abctl manages Apple Business built-in-MDM CUSTOM_SETTING profiles and Blueprints:\n" +
-			"a git-declarative sync engine (seed/diff/sync) plus fleetctl-style imperative commands\n" +
+			"a git-declarative sync engine (seed/diff/sync) plus imperative commands\n" +
 			"(get/create/edit/delete/apply). Read-only by default; every write is gated.",
 		Version:       version,
 		SilenceErrors: true, // main prints errors + maps ExitError to an exit code

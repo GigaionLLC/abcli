@@ -19,7 +19,7 @@ import (
 
 // writeFlags are the common flags for imperative write commands. Every write is
 // gated (confirm unless --yes/$ABCTL_APPROVE) and, by default, mutates the local
-// gitops tree + baseline inline so no drift window opens (see docs/fleetctl-parity.md).
+// gitops tree + baseline inline so no drift window opens (see docs/imperative-cli.md).
 type writeFlags struct {
 	file        string
 	platforms   string
