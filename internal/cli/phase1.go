@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bufio"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -289,14 +290,23 @@ func parsePlatforms(s string) []string {
 }
 
 func newAPICmd() *cobra.Command {
-	var method string
+	var method, input string
+	var fields []string
+	var yes bool
 	c := &cobra.Command{
 		Use:   "api <path>",
-		Short: "Raw authenticated request (read-only: GET only)",
-		Args:  cobra.ExactArgs(1),
-		RunE:  func(_ *cobra.Command, a []string) error { return runAPI(method, a[0]) },
+		Short: "Raw authenticated request (GET by default; non-GET writes are gated)",
+		Long: "api is the escape hatch to the Apple Business API. GET is read-only and unrestricted;\n" +
+			"any other method is a WRITE, gated behind --yes/$ABCTL_APPROVE. Build a JSON body with\n" +
+			"repeated -F key=value (@file reads the value from a file), or send a whole body file with\n" +
+			"--input (or '-' for stdin). The leading /v1/ is optional.",
+		Args: cobra.ExactArgs(1),
+		RunE: func(_ *cobra.Command, a []string) error { return runAPI(method, a[0], fields, input, yes) },
 	}
-	c.Flags().StringVar(&method, "method", "GET", "HTTP method (GET only)")
+	c.Flags().StringVarP(&method, "method", "X", "GET", "HTTP method")
+	c.Flags().StringArrayVarP(&fields, "field", "F", nil, "body field key=value (@file for value-from-file); builds a flat JSON body")
+	c.Flags().StringVar(&input, "input", "", "send this file as the raw request body ('-' = stdin); overrides -F")
+	c.Flags().BoolVar(&yes, "yes", false, "confirm a non-GET (write) request (also: $ABCTL_APPROVE=1)")
 	return c
 }
 
@@ -516,10 +526,8 @@ func printFullPlan(pc *planCtx, asJSON bool) error {
 	return nil
 }
 
-func runAPI(method, path string) error {
-	if strings.ToUpper(method) != "GET" {
-		return fmt.Errorf("read-only: only --method GET is allowed")
-	}
+func runAPI(method, path string, fields []string, input string, yes bool) error {
+	method = strings.ToUpper(method)
 	c, _, err := mustClient()
 	if err != nil {
 		return err
@@ -527,7 +535,25 @@ func runAPI(method, path string) error {
 	// The API base already includes the version segment (…/v1/), so accept a path
 	// with or without a leading "/v1/": `abctl api /v1/users` and `abctl api users` both work.
 	path = strings.TrimPrefix(strings.TrimLeft(path, "/"), "v1/")
-	st, b, err := c.Raw("GET", path, nil)
+
+	var st int
+	var b []byte
+	if method == "GET" {
+		st, b, err = c.Raw("GET", path, nil)
+	} else {
+		if !yes && !envApproved() {
+			ok, cErr := confirmWrite(method + " /v1/" + path)
+			if cErr != nil || !ok {
+				fmt.Fprintln(os.Stderr, "aborted.")
+				return ExitError{Code: 1}
+			}
+		}
+		payload, pErr := apiBody(fields, input)
+		if pErr != nil {
+			return pErr
+		}
+		st, b, err = c.APIWrite(method, path, payload)
+	}
 	if err != nil {
 		return err
 	}
@@ -537,6 +563,37 @@ func runAPI(method, path string) error {
 		return ExitError{Code: 1}
 	}
 	return nil
+}
+
+// apiBody builds the request body for `api`: the raw --input file (as-is JSON), or
+// a flat JSON object from -F key=value pairs (@file reads the value from a file).
+func apiBody(fields []string, input string) (any, error) {
+	if input != "" {
+		raw, err := readFileArg(input)
+		if err != nil {
+			return nil, err
+		}
+		return json.RawMessage(raw), nil
+	}
+	if len(fields) == 0 {
+		return nil, nil
+	}
+	m := map[string]any{}
+	for _, f := range fields {
+		k, v, ok := strings.Cut(f, "=")
+		if !ok {
+			return nil, fmt.Errorf("bad -F %q (want key=value)", f)
+		}
+		if strings.HasPrefix(v, "@") {
+			raw, err := os.ReadFile(v[1:])
+			if err != nil {
+				return nil, err
+			}
+			v = string(raw)
+		}
+		m[k] = v
+	}
+	return m, nil
 }
 
 func rel(p string) string {

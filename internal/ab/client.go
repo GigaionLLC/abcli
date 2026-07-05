@@ -251,6 +251,18 @@ func (c *Client) FetchBlueprints(configNameByID map[string]string) ([]LiveBluepr
 // ListDevices returns the organization's devices (orgDevices).
 func (c *Client) ListDevices() ([]Resource, error) { return c.list("orgDevices?limit=1000") }
 
+// ListUsers returns the organization's users (read-only; identity is not API-writable).
+func (c *Client) ListUsers() ([]Resource, error) { return c.list("users?limit=1000") }
+
+// ListUserGroups returns the organization's user groups (read-only).
+func (c *Client) ListUserGroups() ([]Resource, error) { return c.list("userGroups?limit=1000") }
+
+// ListApps returns the organization's apps (Apps & Books; read-only).
+func (c *Client) ListApps() ([]Resource, error) { return c.list("apps?limit=1000") }
+
+// ListMDMServers returns the organization's MDM servers (read-only).
+func (c *Client) ListMDMServers() ([]Resource, error) { return c.list("mdmServers?limit=1000") }
+
 // AuditEvents returns audit events between the start and end timestamps (ISO 8601).
 func (c *Client) AuditEvents(start, end string) ([]Resource, error) {
 	return c.list(fmt.Sprintf("auditEvents?filter[startTimestamp]=%s&filter[endTimestamp]=%s&limit=1000",
@@ -384,6 +396,13 @@ func (c *Client) rawWrite(method, path string, payload any) (int, []byte, error)
 		}
 		return resp.StatusCode, rb, nil
 	}
+}
+
+// APIWrite issues an authenticated non-GET request with a JSON body (used by the
+// gated `api` passthrough). A nil payload sends no body. It retries 401 (re-mint)
+// and 429, never 5xx (a write may have partially applied).
+func (c *Client) APIWrite(method, path string, payload any) (int, []byte, error) {
+	return c.rawWrite(method, path, payload)
 }
 
 // CreateConfiguration POSTs a CUSTOM_SETTING config with the raw .mobileconfig XML.

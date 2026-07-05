@@ -17,14 +17,32 @@ type Config struct {
 	TokenURL string
 	TokenAud string
 	APIBase  string
-	EnvDir   string // directory containing the .env (secrets/ paths resolve against it)
+	EnvDir   string // base dir the gitops tree + secrets/ paths resolve against
 }
 
-// Load resolves the Apple Business config. Search order: $ABCTL_ENV, then the
-// nearest .env found by walking up from the current working directory; if none is
-// found it falls back to the process environment (AB_* variables) — the 12-factor
-// path used in CI/CD, where secrets come from the runner environment, not a file.
-func Load() (*Config, error) {
+// Default Apple Business endpoints/scope (used when unset in a context/.env/env).
+const (
+	DefaultScope    = "business.api"
+	DefaultTokenURL = "https://account.apple.com/auth/oauth2/token"
+	DefaultTokenAud = "https://account.apple.com/auth/oauth2/v2/token"
+	DefaultAPIBase  = "https://api-business.apple.com/v1/"
+)
+
+// Load resolves config with no explicit context selector.
+func Load() (*Config, error) { return Resolve("") }
+
+// Resolve resolves the Apple Business config. Precedence: (1) a named connection
+// context — the explicit selector, else $ABCTL_CONTEXT, else the active context in
+// ~/.abctl/contexts.yaml; then (2) $ABCTL_ENV / the nearest .env walking up from the
+// cwd; then (3) the process environment (AB_* — the 12-factor CI path).
+func Resolve(explicitContext string) (*Config, error) {
+	if cfg, used, err := loadFromContext(explicitContext); used || err != nil {
+		return cfg, err
+	}
+	return loadFromEnv()
+}
+
+func loadFromEnv() (*Config, error) {
 	path, err := findEnv()
 	if err != nil {
 		// No .env file — read AB_* from the process environment. Relative key paths
@@ -45,10 +63,10 @@ func Load() (*Config, error) {
 func build(get func(string) string, dir, src string) (*Config, error) {
 	c := &Config{
 		ClientID: get("AB_CLIENT_ID"),
-		Scope:    orDefault(get("AB_SCOPE"), "business.api"),
-		TokenURL: orDefault(get("AB_TOKEN_URL"), "https://account.apple.com/auth/oauth2/token"),
-		TokenAud: orDefault(get("AB_TOKEN_AUD"), "https://account.apple.com/auth/oauth2/v2/token"),
-		APIBase:  orDefault(get("AB_API_BASE"), "https://api-business.apple.com/v1/"),
+		Scope:    orDefault(get("AB_SCOPE"), DefaultScope),
+		TokenURL: orDefault(get("AB_TOKEN_URL"), DefaultTokenURL),
+		TokenAud: orDefault(get("AB_TOKEN_AUD"), DefaultTokenAud),
+		APIBase:  orDefault(get("AB_API_BASE"), DefaultAPIBase),
 		EnvDir:   dir,
 	}
 	if c.ClientID == "" {

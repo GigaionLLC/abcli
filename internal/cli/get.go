@@ -8,6 +8,8 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+
+	"github.com/GigaionLLC/abcli/internal/ab"
 )
 
 func newGetCmd() *cobra.Command {
@@ -53,7 +55,88 @@ func newGetCmd() *cobra.Command {
 	aud.Flags().StringVar(&since, "since", "24h", "look-back window (e.g. 24h, 7d, 90d)")
 
 	get.AddCommand(configs, oneCfg, bps, bp, dev, aud)
+	get.AddCommand(
+		readCmd("users", "List users", (*ab.Client).ListUsers,
+			[]string{"NAME", "EMAIL", "ROLES"}, func(r ab.Resource) []string {
+				a := r.Attr()
+				name := strings.TrimSpace(fmt.Sprintf("%v %v", a["firstName"], a["lastName"]))
+				return []string{name, r.AttrStr("email"), fmt.Sprintf("%v", a["roles"])}
+			}),
+		readCmd("usergroups", "List user groups", (*ab.Client).ListUserGroups,
+			[]string{"NAME", "ID", "MEMBERS"}, func(r ab.Resource) []string {
+				return []string{r.AttrStr("name"), r.ID, fmt.Sprintf("%v", r.Attr()["totalMemberCount"])}
+			}),
+		readCmd("apps", "List apps (Apps & Books)", (*ab.Client).ListApps,
+			[]string{"NAME", "BUNDLE_ID", "ID"}, func(r ab.Resource) []string {
+				return []string{r.AttrStr("name"), r.AttrStr("bundleId"), r.ID}
+			}),
+		readCmd("mdmservers", "List MDM servers", (*ab.Client).ListMDMServers,
+			[]string{"NAME", "TYPE", "ID"}, func(r ab.Resource) []string {
+				return []string{r.AttrStr("serverName"), r.AttrStr("serverType"), r.ID}
+			}),
+	)
 	return get
+}
+
+// readCmd builds a read-only `get <resource>` subcommand: fetch, optional
+// --filter (attribute substring), then render as table/json/yaml.
+func readCmd(use, short string, list func(*ab.Client) ([]ab.Resource, error), cols []string, row func(ab.Resource) []string) *cobra.Command {
+	var asJSON bool
+	var filters []string
+	c := &cobra.Command{
+		Use: use, Short: short, Args: cobra.NoArgs,
+		RunE: func(*cobra.Command, []string) error {
+			cl, _, err := mustClient()
+			if err != nil {
+				return err
+			}
+			items, err := list(cl)
+			if err != nil {
+				return err
+			}
+			items = applyFilter(items, filters)
+			if asJSON || flagOutput != "table" {
+				return render(outFmt(asJSON), items, nil, nil)
+			}
+			rows := make([][]string, 0, len(items))
+			for _, it := range items {
+				rows = append(rows, row(it))
+			}
+			printTable(cols, rows)
+			fmt.Fprintf(os.Stderr, "%d %s\n", len(items), use)
+			return nil
+		},
+	}
+	c.Flags().BoolVar(&asJSON, "json", false, "JSON output")
+	c.Flags().StringArrayVar(&filters, "filter", nil, "keep items whose attribute contains a value: key=substr (repeatable, AND)")
+	return c
+}
+
+// applyFilter keeps resources whose string attribute for key contains the value
+// (case-insensitive). Multiple filters are ANDed. This is client-side inventory
+// filtering — NOT a live query (the Apple Business API has no query engine).
+func applyFilter(items []ab.Resource, filters []string) []ab.Resource {
+	if len(filters) == 0 {
+		return items
+	}
+	out := items[:0:0]
+	for _, it := range items {
+		keep := true
+		for _, f := range filters {
+			k, v, ok := strings.Cut(f, "=")
+			if !ok {
+				continue
+			}
+			if !strings.Contains(strings.ToLower(fmt.Sprintf("%v", it.Attr()[k])), strings.ToLower(v)) {
+				keep = false
+				break
+			}
+		}
+		if keep {
+			out = append(out, it)
+		}
+	}
+	return out
 }
 
 func getConfigurations(asJSON bool, typ string) error {

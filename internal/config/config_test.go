@@ -49,8 +49,9 @@ func TestLoadMissingClientID(t *testing.T) {
 // TestLoadFromEnvVars: with no .env in scope, Load falls back to the process
 // environment (the CI/CD path).
 func TestLoadFromEnvVars(t *testing.T) {
-	t.Chdir(t.TempDir())      // a dir with no .env up the tree
-	t.Setenv("ABCTL_ENV", "") // and no explicit override
+	t.Setenv("ABCTL_CONTEXTS", filepath.Join(t.TempDir(), "none.yaml")) // no context in play
+	t.Chdir(t.TempDir())                                                // a dir with no .env up the tree
+	t.Setenv("ABCTL_ENV", "")                                           // and no explicit override
 	absKey := filepath.Join(t.TempDir(), "abs-key.pem")
 	t.Setenv("AB_CLIENT_ID", "BUSINESSAPI.env")
 	t.Setenv("AB_PRIVATE_KEY", absKey)
@@ -75,6 +76,7 @@ func TestLoadFromEnvVars(t *testing.T) {
 
 // TestLoadFromEnvVarsRelativeKey: a relative key path resolves against the cwd.
 func TestLoadFromEnvVarsRelativeKey(t *testing.T) {
+	t.Setenv("ABCTL_CONTEXTS", filepath.Join(t.TempDir(), "none.yaml"))
 	t.Chdir(t.TempDir())
 	t.Setenv("ABCTL_ENV", "")
 	t.Setenv("AB_CLIENT_ID", "BUSINESSAPI.env")

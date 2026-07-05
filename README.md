@@ -122,17 +122,39 @@ in the console; `abctl` reports but doesn't act on them.
 
 ## Command reference
 
+`abctl` has two modes — a **GitOps** engine and **fleetctl-style imperative** commands — in one binary.
+Global flags: `-o/--output table|json|yaml`, `--context <name>` (see `abctl context`). Every write is gated
+(confirm unless `--yes`/`$ABCTL_APPROVE`); imperative writes also update the local `gitops/` tree + baseline
+inline (`--no-write-tree` to skip). Full design: **[docs/fleetctl-parity.md](docs/fleetctl-parity.md)**.
+
 ```
-abctl auth whoami                          # mint a token + a cheap read (verify auth + reachability)
-abctl get configurations|configuration <name|id> [--profile]   # list / show (--profile dumps raw XML)
-abctl get blueprints|blueprint <name|id>   # list / show blueprint (with member counts)
-abctl get devices|audit                    # org devices · CONFIG_SETTINGS_* audit events
-abctl seed                                 # live tenant → gitops/ tree + committed baseline
-abctl validate                             # validate lib/ profiles ($ABCTL_VALIDATOR, else a built-in check)
-abctl diff  [--json] [--exit-on-diff]      # 3-way plan (configs + blueprint membership); exit 3 if pending
-abctl sync  [--json] [--exit-on-diff]      # dry-run plan (default)
-abctl sync --apply [--prune] [--yes] [--limit-writes N] [--platforms macos,ios]   # gated execute
-abctl api <path>                           # raw authenticated GET (escape hatch)
+# read
+abctl auth whoami                                   # verify auth + reachability
+abctl get configurations|blueprints|devices|audit   # + users|usergroups|apps|mdmservers  (--filter key=substr)
+abctl get configuration <name|id> [--profile]       # show one (--profile dumps raw .mobileconfig XML)
+
+# GitOps (declarative, whole-tree)
+abctl seed                                          # live tenant → gitops/ tree + baseline
+abctl validate                                      # validate lib/ profiles
+abctl diff | sync [--exit-on-diff]                  # 3-way plan (configs + blueprint membership)
+abctl sync --apply [--prune] [--yes] [--limit-writes N]   # gated execute
+
+# imperative (fleetctl-style, one resource at a time)
+abctl create  config <name> -f profile.mobileconfig # POST a new CUSTOM_SETTING config
+abctl replace config <name|id> -f profile.mobileconfig   # archive live, then PATCH
+abctl edit    config <name|id>                      # fetch → $EDITOR → PATCH on save
+abctl delete  config <name|id> [--yes]              # archive live, then DELETE
+abctl apply -f a.yml [-f b.yml] [--dry-run]         # upsert abctl/v1 Configuration|Blueprint specs (bulk)
+abctl attach|detach config <name> --blueprint <bp>  # add/remove a config from a blueprint
+abctl pull [config <name>]                          # adopt a console edit into git (scoped seed)
+
+# status (honest proxies — NOT on-device install verification)
+abctl status config <name>                          # which blueprints carry it + devices targeted
+abctl status audit [--since 24h --type … --actor …] # config/device change history
+
+# contexts + escape hatch
+abctl context set|use|get|list|current              # kubeconfig-style tenants (~/.abctl/contexts.yaml)
+abctl api <path> [-X POST -F k=v --input body.json] # raw request (non-GET is gated)
 abctl version | completion | help
 ```
 

@@ -1,0 +1,84 @@
+# GoReleaser v2 — cross-compiled, signed abctl binaries on `v*` tags.
+# Validate locally: `goreleaser check` then `goreleaser release --snapshot --clean`.
+version: 2
+
+project_name: abctl
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: abctl
+    main: ./cmd/abctl
+    binary: abctl
+    env:
+      - CGO_ENABLED=0 # pure Go → trivial static cross-compile
+    flags:
+      - -trimpath
+    # NOTE: this repo injects internal/cli.version (not GoReleaser's default main.version).
+    ldflags:
+      - -s -w -X github.com/GigaionLLC/abcli/internal/cli.version={{ .Version }}
+    mod_timestamp: "{{ .CommitTimestamp }}" # reproducible: no wall-clock
+    goos: [linux, darwin, windows]
+    goarch: [amd64, arm64]
+
+archives:
+  - id: abctl
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    format_overrides:
+      - goos: windows
+        formats: [zip]
+    files:
+      - LICENSE
+      - NOTICE
+      - README.md
+
+checksum:
+  name_template: "checksums.txt"
+  algorithm: sha256
+
+# SBOM per archive (needs syft in PATH — the release workflow installs it).
+sboms:
+  - artifacts: archive
+
+# Sign the checksums with cosign keyless (Sigstore + GitHub OIDC) → a bundle that
+# `cosign verify-blob --bundle checksums.txt.sigstore.json checksums.txt` verifies.
+signs:
+  - cmd: cosign
+    signature: "${artifact}.sigstore.json"
+    args: ["sign-blob", "--yes", "--bundle=${signature}", "${artifact}"]
+    artifacts: checksum
+    output: true
+
+snapshot:
+  version_template: "{{ incpatch .Version }}-snapshot"
+
+changelog:
+  sort: asc
+  use: github
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^chore:"
+      - "^ci:"
+
+release:
+  github:
+    owner: GigaionLLC
+    name: abcli
+  prerelease: auto # a -rc/-beta tag → GitHub pre-release
+  footer: |
+    ---
+    🤖 abctl is AI-authored under Gigaion, LLC's direction. Verify a download:
+    `cosign verify-blob --bundle checksums.txt.sigstore.json checksums.txt`
+
+# Distribution taps — enable once the tap repos + a HOMEBREW_TAP_TOKEN secret exist:
+# homebrew_casks:
+#   - repository: { owner: GigaionLLC, name: homebrew-tap, token: "{{ .Env.HOMEBREW_TAP_TOKEN }}" }
+#     homepage: https://github.com/GigaionLLC/abcli
+#     description: GitOps + imperative CLI for the Apple Business API
+# scoops:
+#   - repository: { owner: GigaionLLC, name: scoop-bucket, token: "{{ .Env.SCOOP_BUCKET_TOKEN }}" }
+#     description: GitOps + imperative CLI for the Apple Business API
