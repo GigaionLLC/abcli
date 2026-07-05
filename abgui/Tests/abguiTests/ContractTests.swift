@@ -62,6 +62,40 @@ final class ContractTests: XCTestCase {
         XCTAssertTrue(plan.isEmpty)
     }
 
+    func testCreateSendsGatedJSONWithStdin() async throws {
+        actor Recorder {
+            var args: [String] = []
+            var stdin: Data?
+            func record(_ a: [String], _ s: Data?) { args = a; stdin = s }
+        }
+        struct RecordingRunner: AbctlRunner {
+            let recorder: Recorder
+            func run(_ args: [String], cwd: URL?, stdin: Data?, timeout: Duration) async throws -> AbctlResult {
+                await recorder.record(args, stdin)
+                return MockAbctlRunner.ok(#"{"action":"create","name":"WiFi.mobileconfig","id":"id-9","status":"done","treeUpdated":true}"#)
+            }
+        }
+        let recorder = Recorder()
+        let client = AbctlClient(runner: RecordingRunner(recorder: recorder))
+        let outcome = try await client.createConfiguration(name: "WiFi", xml: Data("<plist/>".utf8))
+        XCTAssertEqual(outcome.action, "create")
+        XCTAssertEqual(outcome.id, "id-9")
+        XCTAssertTrue(outcome.treeUpdated)
+        let args = await recorder.args
+        for token in ["create", "config", "WiFi", "-f", "-", "--yes", "--json"] {
+            XCTAssertTrue(args.contains(token), "missing \(token) in \(args)")
+        }
+        XCTAssertEqual(await recorder.stdin, Data("<plist/>".utf8))
+    }
+
+    func testDeleteOutcomeDecodesArchive() async throws {
+        let json = #"{"action":"delete","name":"Old.mobileconfig","id":"id-1","status":"done","archive":"gitops/archive/Old/ts.mobileconfig","treeUpdated":true}"#
+        let client = AbctlClient(runner: MockAbctlRunner(responses: ["delete config": MockAbctlRunner.ok(json)]))
+        let outcome = try await client.deleteConfiguration(id: "id-1")
+        XCTAssertEqual(outcome.action, "delete")
+        XCTAssertEqual(outcome.archive, "gitops/archive/Old/ts.mobileconfig")
+    }
+
     func testExitCodeMapping() throws {
         // exit 3 is a normal "changes pending", not an error.
         XCTAssertThrowsError(try AbctlClient.checkExit(AbctlResult(stdout: Data(), stderr: "", code: 3))) { error in

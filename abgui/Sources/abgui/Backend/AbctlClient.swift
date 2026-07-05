@@ -66,6 +66,33 @@ struct AbctlClient {
         return String(decoding: result.stdout, as: UTF8.self)
     }
 
+    // MARK: writes — every one passes --yes (abgui shows its OWN confirm first) and --json.
+
+    /// Create a CUSTOM_SETTING config from profile XML (POST). XML goes on stdin (`-f -`).
+    func createConfiguration(name: String, xml: Data) async throws -> WriteOutcome {
+        try await decodeJSON(WriteOutcome.self, ["create", "config", name, "-f", "-", "--yes", "--json"], stdin: xml)
+    }
+
+    /// Replace a config's profile (archive live, then PATCH). This is the GUI "edit".
+    func replaceConfiguration(id: String, xml: Data) async throws -> WriteOutcome {
+        try await decodeJSON(WriteOutcome.self, ["replace", "config", id, "-f", "-", "--yes", "--json"], stdin: xml)
+    }
+
+    /// Delete a config (archive live, then DELETE).
+    func deleteConfiguration(id: String) async throws -> WriteOutcome {
+        try await decodeJSON(WriteOutcome.self, ["delete", "config", id, "--yes", "--json"])
+    }
+
+    /// Attach a config to a blueprint (additive membership).
+    func attach(configID: String, blueprint: String) async throws -> WriteOutcome {
+        try await decodeJSON(WriteOutcome.self, ["attach", "config", configID, "--blueprint", blueprint, "--yes", "--json"])
+    }
+
+    /// Detach a config from a blueprint.
+    func detach(configID: String, blueprint: String) async throws -> WriteOutcome {
+        try await decodeJSON(WriteOutcome.self, ["detach", "config", configID, "--blueprint", blueprint, "--yes", "--json"])
+    }
+
     // MARK: plumbing
 
     private func argv(_ base: [String]) -> [String] {
@@ -73,8 +100,8 @@ struct AbctlClient {
         return base + ["--context", context]
     }
 
-    private func decodeJSON<T: Decodable>(_ type: T.Type, _ base: [String]) async throws -> T {
-        let result = try await runner.run(argv(base), cwd: nil, stdin: nil, timeout: .seconds(60))
+    private func decodeJSON<T: Decodable>(_ type: T.Type, _ base: [String], stdin: Data? = nil) async throws -> T {
+        let result = try await runner.run(argv(base), cwd: nil, stdin: stdin, timeout: .seconds(60))
         try Self.checkExit(result)
         do {
             return try Self.decoder.decode(T.self, from: result.stdout)
