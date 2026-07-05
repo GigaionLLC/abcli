@@ -42,14 +42,16 @@ them, so your MDM profiles and blueprint membership live in version control like
 
 ## abgui — native macOS app
 
-![abgui browsing configurations (UI preview)](docs/assets/abgui-screenshot.png)
+![abgui — the read-only Users view with roles (UI preview)](docs/assets/abgui-screenshot.png)
 
 **[abgui](abgui/)** puts a native **Swift / SwiftUI** control plane on top of `abctl`. It ships as one
 self-contained `.app` with a universal `abctl` **embedded inside it** (no separate install, no `PATH`),
 reuses your `abctl` connection contexts, and re-implements none of the API — it shells out to the embedded
 CLI, decodes its JSON, and renders it.
 
-- **Browse** Configurations, Blueprints, Devices, Users / Groups / Apps / MDM-servers, and the audit log.
+- **Browse — read-only where the API is:** Configurations & Blueprints, plus clearly-badged **read-only**
+  views of Devices, Users (with roles), User Groups, Apps & Books, Packages, MDM Servers, and the audit log
+  — each with a full-resource JSON inspector, grouped in the sidebar as *GitOps* vs *Read-only*.
 - **The GitOps hero:** a visual 3-way **diff / drift** view and a gated **`sync --apply`** with `--prune`
   and `--limit-writes` as explicit toggles.
 - **Write, gated:** create / edit / delete configs and attach / detach blueprint membership — each behind an
