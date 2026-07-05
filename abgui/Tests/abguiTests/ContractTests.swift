@@ -174,6 +174,36 @@ final class ContractTests: XCTestCase {
         XCTAssertEqual(recordedStdin, Data("<x/>".utf8))
     }
 
+    func testUserRolesDecodeAndColumns() throws {
+        let json = #"{"type":"users","id":"u1","attributes":{"firstName":"Ada","lastName":"Lovelace","managedAppleId":"ada@x.appleid.com","status":"ACTIVE","roles":[{"role":"Administrator","organizationalUnit":"HQ"},{"role":"Manager"}]}}"#
+        let user = try JSONDecoder().decode(Resource.self, from: Data(json.utf8))
+        XCTAssertEqual(user.roleNames(), "Administrator, Manager")
+        let columns = ReadOnlyKind.users.columns
+        XCTAssertEqual(columns.first { $0.header == "Name" }?.value(user), "Ada Lovelace")
+        XCTAssertEqual(columns.first { $0.header == "Roles" }?.value(user), "Administrator, Manager")
+        XCTAssertEqual(columns.first { $0.header == "Managed Apple ID" }?.value(user), "ada@x.appleid.com")
+    }
+
+    func testPackagesUsesGetPackages() async throws {
+        actor Recorder {
+            var args: [String] = []
+            func record(_ a: [String]) { args = a }
+        }
+        struct RecordingRunner: AbctlRunner {
+            let recorder: Recorder
+            func run(_ args: [String], cwd: URL?, stdin: Data?, timeout: Duration) async throws -> AbctlResult {
+                await recorder.record(args)
+                return MockAbctlRunner.ok("[]")
+            }
+        }
+        let recorder = Recorder()
+        let client = AbctlClient(runner: RecordingRunner(recorder: recorder))
+        let packages = try await client.packages()
+        XCTAssertTrue(packages.isEmpty)
+        let args = await recorder.args
+        XCTAssertEqual(Array(args.prefix(2)), ["get", "packages"])
+    }
+
     func testExitCodeMapping() throws {
         // exit 3 is a normal "changes pending", not an error.
         XCTAssertThrowsError(try AbctlClient.checkExit(AbctlResult(stdout: Data(), stderr: "", code: 3))) { error in

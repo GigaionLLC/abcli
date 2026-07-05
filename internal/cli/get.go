@@ -70,6 +70,10 @@ func newGetCmd() *cobra.Command {
 			[]string{"NAME", "BUNDLE_ID", "ID"}, func(r ab.Resource) []string {
 				return []string{r.AttrStr("name"), r.AttrStr("bundleId"), r.ID}
 			}),
+		readCmd("packages", "List packages (custom apps/pkgs)", (*ab.Client).ListPackages,
+			[]string{"NAME", "BUNDLE_ID", "VERSION"}, func(r ab.Resource) []string {
+				return []string{r.AttrStr("name"), r.AttrStr("bundleId"), r.AttrStr("version")}
+			}),
 		readCmd("mdmservers", "List MDM servers", (*ab.Client).ListMDMServers,
 			[]string{"NAME", "TYPE", "ID"}, func(r ab.Resource) []string {
 				return []string{r.AttrStr("serverName"), r.AttrStr("serverType"), r.ID}

@@ -56,6 +56,26 @@ struct AbctlClient {
         try await decodeJSON([Resource].self, ["get", "devices", "-o", "json"])
     }
 
+    // Read-only inventory / identity / Apps & Books — all live GETs, never writable.
+    func users() async throws -> [Resource] {
+        try await decodeJSON([Resource].self, ["get", "users", "-o", "json"])
+    }
+    func userGroups() async throws -> [Resource] {
+        try await decodeJSON([Resource].self, ["get", "usergroups", "-o", "json"])
+    }
+    func apps() async throws -> [Resource] {
+        try await decodeJSON([Resource].self, ["get", "apps", "-o", "json"])
+    }
+    func packages() async throws -> [Resource] {
+        try await decodeJSON([Resource].self, ["get", "packages", "-o", "json"])
+    }
+    func mdmServers() async throws -> [Resource] {
+        try await decodeJSON([Resource].self, ["get", "mdmservers", "-o", "json"])
+    }
+    func audit(since: String) async throws -> [Resource] {
+        try await decodeJSON([Resource].self, ["get", "audit", "--since", since, "-o", "json"])
+    }
+
     /// The 3-way plan. `diff --json` prints it and exits 0 — drift is a non-empty plan.
     /// Resolved against the workspace (cwd), where the `gitops/` tree lives.
     func plan() async throws -> Plan {

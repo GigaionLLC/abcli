@@ -23,8 +23,17 @@ final class AppModel {
     // Browsed inventory (loaded lazily per screen)
     var configurations: [Resource] = []
     var blueprints: [Resource] = []
-    var devices: [Resource] = []
     var plan: Plan?
+
+    // Read-only resources (Apple Business exposes these for reading only)
+    var devices: [Resource] = []
+    var users: [Resource] = []
+    var userGroups: [Resource] = []
+    var apps: [Resource] = []
+    var packages: [Resource] = []
+    var mdmServers: [Resource] = []
+    var auditEvents: [Resource] = []
+    var auditSince = "7d"
 
     // GitOps workspace (the dir containing gitops/) — required for diff / sync / archive.
     var repoRoot: URL?
@@ -114,8 +123,35 @@ final class AppModel {
 
     func loadConfigurations() async { await run { self.configurations = try await $0.configurations() } }
     func loadBlueprints() async { await run { self.blueprints = try await $0.blueprints() } }
-    func loadDevices() async { await run { self.devices = try await $0.devices() } }
     func loadPlan() async { await run { self.plan = try await $0.plan() } }
+
+    /// The currently-loaded rows for a read-only resource.
+    func readItems(_ kind: ReadOnlyKind) -> [Resource] {
+        switch kind {
+        case .devices: return devices
+        case .users: return users
+        case .userGroups: return userGroups
+        case .apps: return apps
+        case .packages: return packages
+        case .mdmServers: return mdmServers
+        case .audit: return auditEvents
+        }
+    }
+
+    /// Load a read-only resource (a live GET; never writes).
+    func loadReadOnly(_ kind: ReadOnlyKind) async {
+        await run { client in
+            switch kind {
+            case .devices: self.devices = try await client.devices()
+            case .users: self.users = try await client.users()
+            case .userGroups: self.userGroups = try await client.userGroups()
+            case .apps: self.apps = try await client.apps()
+            case .packages: self.packages = try await client.packages()
+            case .mdmServers: self.mdmServers = try await client.mdmServers()
+            case .audit: self.auditEvents = try await client.audit(since: self.auditSince)
+            }
+        }
+    }
 
     /// Fetch a config's raw profile XML (used by the profile inspector / editor).
     func profile(for id: String) async throws -> String {

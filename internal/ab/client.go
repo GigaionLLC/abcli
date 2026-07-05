@@ -260,6 +260,11 @@ func (c *Client) ListUserGroups() ([]Resource, error) { return c.list("userGroup
 // ListApps returns the organization's apps (Apps & Books; read-only).
 func (c *Client) ListApps() ([]Resource, error) { return c.list("apps?limit=1000") }
 
+// ListPackages returns the organization's packages (custom apps/pkgs; read-only). The
+// endpoint is gated by the built-in-device-management permission, so it may 403 for an
+// account without it.
+func (c *Client) ListPackages() ([]Resource, error) { return c.list("packages?limit=1000") }
+
 // ListMDMServers returns the organization's MDM servers (read-only).
 func (c *Client) ListMDMServers() ([]Resource, error) { return c.list("mdmServers?limit=1000") }
 

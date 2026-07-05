@@ -50,4 +50,10 @@ enum JSONValue: Codable, Equatable {
         if case .object(let o) = self, case .string(let s)? = o[key] { return s }
         return nil
     }
+
+    /// The array at `key` if this is an object with an array there (e.g. a user's `roles`).
+    func array(_ key: String) -> [JSONValue]? {
+        if case .object(let o) = self, case .array(let a)? = o[key] { return a }
+        return nil
+    }
 }
