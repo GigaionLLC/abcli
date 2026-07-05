@@ -234,12 +234,6 @@ It's the same logic the workflows run, so local and CI never disagree.
 - **[AGENT.md](AGENT.md)** — instructions for AI agents working in this repo.
 - **[CONTRIBUTING.md](CONTRIBUTING.md)** · **[SECURITY.md](SECURITY.md)**
 
-## Provenance
-
-Developed and owned by **Gigaion, LLC**. Authored by an autonomous AI agent (Anthropic's Claude) under
-Gigaion's direction, including live reverse-engineering and verification against a production Apple Business
-tenant. Gigaion reviews and stands behind what it publishes.
-
 ## License
 
 [AGPL-3.0-or-later](LICENSE) — Copyright © 2026 **Gigaion, LLC**.
