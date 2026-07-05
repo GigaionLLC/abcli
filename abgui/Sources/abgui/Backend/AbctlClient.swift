@@ -28,6 +28,9 @@ struct AbctlClient {
     let runner: AbctlRunner
     /// Threaded as `--context <ctx>` on every call when non-nil.
     var context: String?
+    /// The GitOps workspace (dir containing `gitops/`). Used as cwd for the tree-relative
+    /// verbs (diff / sync) — a context is a connection, not a repo location.
+    var repoRoot: URL?
 
     private static let decoder = JSONDecoder()
 
@@ -54,8 +57,18 @@ struct AbctlClient {
     }
 
     /// The 3-way plan. `diff --json` prints it and exits 0 — drift is a non-empty plan.
+    /// Resolved against the workspace (cwd), where the `gitops/` tree lives.
     func plan() async throws -> Plan {
-        try await decodeJSON(Plan.self, ["diff", "--json"])
+        try await decodeJSON(Plan.self, ["diff", "--json"], cwd: repoRoot)
+    }
+
+    /// Reconcile the tenant to the workspace's git desired state (gated; abgui confirms
+    /// first, so --yes). `--prune` allows deletes/detaches; `--limit-writes` caps writes.
+    func syncApply(prune: Bool, limitWrites: Int?) async throws -> ApplyResult {
+        var args = ["sync", "--apply", "--yes", "--json"]
+        if prune { args.append("--prune") }
+        if let limitWrites, limitWrites > 0 { args += ["--limit-writes", String(limitWrites)] }
+        return try await decodeJSON(ApplyResult.self, args, cwd: repoRoot, timeout: .seconds(180))
     }
 
     /// The raw `.mobileconfig` XML for a config (stdout is XML, not JSON).
@@ -100,8 +113,9 @@ struct AbctlClient {
         return base + ["--context", context]
     }
 
-    private func decodeJSON<T: Decodable>(_ type: T.Type, _ base: [String], stdin: Data? = nil) async throws -> T {
-        let result = try await runner.run(argv(base), cwd: nil, stdin: stdin, timeout: .seconds(60))
+    private func decodeJSON<T: Decodable>(_ type: T.Type, _ base: [String], stdin: Data? = nil,
+                                          cwd: URL? = nil, timeout: Duration = .seconds(60)) async throws -> T {
+        let result = try await runner.run(argv(base), cwd: cwd, stdin: stdin, timeout: timeout)
         try Self.checkExit(result)
         do {
             return try Self.decoder.decode(T.self, from: result.stdout)

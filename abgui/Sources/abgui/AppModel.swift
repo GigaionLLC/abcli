@@ -26,6 +26,10 @@ final class AppModel {
     var devices: [Resource] = []
     var plan: Plan?
 
+    // GitOps workspace (the dir containing gitops/) — required for diff / sync / archive.
+    var repoRoot: URL?
+    var applyResult: ApplyResult?
+
     // Per-screen UI state
     var isLoading = false
     var loadError: String?
@@ -34,12 +38,41 @@ final class AppModel {
     var isWriting = false
     var lastWriteError: String?
 
-    /// Build a client for the current context, or nil if abctl can't be located.
+    /// Build a client for the current context + workspace, or nil if abctl isn't found.
     private func makeClient() -> AbctlClient? {
         guard let binary = AbctlLocator.resolve() else { return nil }
         var client = AbctlClient(runner: ProcessRunner(executable: binary))
         client.context = context.isEmpty ? nil : context
+        client.repoRoot = repoRoot
         return client
+    }
+
+    /// Point at a GitOps workspace (the dir containing `gitops/`) and recompute drift.
+    func setWorkspace(_ url: URL) {
+        repoRoot = url
+        plan = nil
+        applyResult = nil
+    }
+
+    /// Reconcile the tenant to the workspace git state. Returns true on a clean apply.
+    func apply(prune: Bool, limitWrites: Int?) async -> Bool {
+        guard let client = makeClient() else {
+            lastWriteError = "abctl was not found in the app bundle."
+            return false
+        }
+        isWriting = true
+        lastWriteError = nil
+        defer { isWriting = false }
+        do {
+            let result = try await client.syncApply(prune: prune, limitWrites: limitWrites)
+            applyResult = result
+            await loadPlan()           // refresh drift
+            await loadConfigurations() // the tenant changed
+            return result.totalErrors == 0
+        } catch {
+            lastWriteError = error.localizedDescription
+            return false
+        }
     }
 
     /// Verify the embedded abctl runs and read its version + (best-effort) identity.

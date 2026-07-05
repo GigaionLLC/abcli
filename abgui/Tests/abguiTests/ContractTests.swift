@@ -97,6 +97,41 @@ final class ContractTests: XCTestCase {
         XCTAssertEqual(outcome.archive, "gitops/archive/Old/ts.mobileconfig")
     }
 
+    func testApplyResultDecodesAndCounts() async throws {
+        let json = """
+        {"configs":{"outcomes":[{"name":"WiFi.mobileconfig","action":"update","status":"done","detail":"PATCH","archive":"a/b"}],"writes":1,"errors":0,"skipped":0},
+         "blueprints":{"outcomes":[{"blueprint":"Fleet","config":"WiFi.mobileconfig","action":"attach","status":"done","detail":"attached"}],"writes":1,"errors":0,"skipped":0}}
+        """
+        let client = AbctlClient(runner: MockAbctlRunner(responses: ["sync --apply": MockAbctlRunner.ok(json)]))
+        let result = try await client.syncApply(prune: false, limitWrites: nil)
+        XCTAssertEqual(result.totalWrites, 2)
+        XCTAssertEqual(result.totalErrors, 0)
+        XCTAssertEqual(result.rows.count, 2)
+        XCTAssertTrue(result.rows.contains { $0.name == "Fleet / WiFi.mobileconfig" })
+        XCTAssertEqual(result.rows.first?.archive, "a/b")
+    }
+
+    func testApplyArgsIncludePruneAndLimit() async throws {
+        actor Recorder {
+            var args: [String] = []
+            func record(_ a: [String]) { args = a }
+        }
+        struct RecordingRunner: AbctlRunner {
+            let recorder: Recorder
+            func run(_ args: [String], cwd: URL?, stdin: Data?, timeout: Duration) async throws -> AbctlResult {
+                await recorder.record(args)
+                return MockAbctlRunner.ok(#"{"configs":{"outcomes":[],"writes":0,"errors":0,"skipped":0},"blueprints":{"outcomes":[],"writes":0,"errors":0,"skipped":0}}"#)
+            }
+        }
+        let recorder = Recorder()
+        let client = AbctlClient(runner: RecordingRunner(recorder: recorder))
+        _ = try await client.syncApply(prune: true, limitWrites: 5)
+        let args = await recorder.args
+        for token in ["sync", "--apply", "--yes", "--json", "--prune", "--limit-writes", "5"] {
+            XCTAssertTrue(args.contains(token), "missing \(token) in \(args)")
+        }
+    }
+
     func testExitCodeMapping() throws {
         // exit 3 is a normal "changes pending", not an error.
         XCTAssertThrowsError(try AbctlClient.checkExit(AbctlResult(stdout: Data(), stderr: "", code: 3))) { error in
