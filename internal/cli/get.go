@@ -1,0 +1,236 @@
+package cli
+
+import (
+	"fmt"
+	"os"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/spf13/cobra"
+)
+
+func newGetCmd() *cobra.Command {
+	get := &cobra.Command{Use: "get", Short: "Read-only inspection (table by default, --json for machine output)"}
+
+	var cJSON bool
+	var cType string
+	configs := &cobra.Command{
+		Use: "configurations", Aliases: []string{"configs"}, Short: "List configurations", Args: cobra.NoArgs,
+		RunE: func(*cobra.Command, []string) error { return getConfigurations(cJSON, cType) },
+	}
+	configs.Flags().BoolVar(&cJSON, "json", false, "JSON output")
+	configs.Flags().StringVar(&cType, "type", "", "filter by config type (e.g. CUSTOM_SETTING)")
+
+	var oJSON, profile bool
+	oneCfg := &cobra.Command{
+		Use: "configuration <name|id>", Aliases: []string{"config"}, Short: "Get one configuration", Args: cobra.ExactArgs(1),
+		RunE: func(_ *cobra.Command, a []string) error { return getConfiguration(a[0], oJSON, profile) },
+	}
+	oneCfg.Flags().BoolVar(&oJSON, "json", false, "JSON output")
+	oneCfg.Flags().BoolVar(&profile, "profile", false, "dump the raw .mobileconfig XML")
+
+	var bJSON bool
+	bps := &cobra.Command{Use: "blueprints", Aliases: []string{"bp"}, Short: "List blueprints", Args: cobra.NoArgs,
+		RunE: func(*cobra.Command, []string) error { return getBlueprints(bJSON) }}
+	bps.Flags().BoolVar(&bJSON, "json", false, "JSON output")
+
+	var bpJSON bool
+	bp := &cobra.Command{Use: "blueprint <name|id>", Short: "Get one blueprint (with member counts)", Args: cobra.ExactArgs(1),
+		RunE: func(_ *cobra.Command, a []string) error { return getBlueprint(a[0], bpJSON) }}
+	bp.Flags().BoolVar(&bpJSON, "json", false, "JSON output")
+
+	var dJSON bool
+	dev := &cobra.Command{Use: "devices", Short: "List org devices", Args: cobra.NoArgs,
+		RunE: func(*cobra.Command, []string) error { return getDevices(dJSON) }}
+	dev.Flags().BoolVar(&dJSON, "json", false, "JSON output")
+
+	var aJSON bool
+	var since string
+	aud := &cobra.Command{Use: "audit", Short: "List audit events", Args: cobra.NoArgs,
+		RunE: func(*cobra.Command, []string) error { return getAudit(since, aJSON) }}
+	aud.Flags().BoolVar(&aJSON, "json", false, "JSON output")
+	aud.Flags().StringVar(&since, "since", "24h", "look-back window (e.g. 24h, 7d, 90d)")
+
+	get.AddCommand(configs, oneCfg, bps, bp, dev, aud)
+	return get
+}
+
+func getConfigurations(asJSON bool, typ string) error {
+	c, _, err := mustClient()
+	if err != nil {
+		return err
+	}
+	items, err := c.ListConfigurations()
+	if err != nil {
+		return err
+	}
+	if typ != "" {
+		f := items[:0:0]
+		for _, it := range items {
+			if strings.EqualFold(it.AttrStr("type"), typ) {
+				f = append(f, it)
+			}
+		}
+		items = f
+	}
+	if asJSON {
+		return printJSON(items)
+	}
+	rows := make([][]string, 0, len(items))
+	for _, it := range items {
+		rows = append(rows, []string{it.AttrStr("name"), it.AttrStr("type"), it.AttrStr("updatedDateTime")})
+	}
+	printTable([]string{"NAME", "TYPE", "UPDATED"}, rows)
+	fmt.Fprintf(os.Stderr, "%d configuration(s)\n", len(items))
+	return nil
+}
+
+func getConfiguration(nameOrID string, asJSON, profile bool) error {
+	c, _, err := mustClient()
+	if err != nil {
+		return err
+	}
+	r, err := c.ResolveConfig(nameOrID)
+	if err != nil {
+		return err
+	}
+	full, err := c.GetConfiguration(r.ID)
+	if err != nil {
+		return err
+	}
+	if profile {
+		csv, _ := full.Attr()["customSettingsValues"].(map[string]any)
+		if csv == nil {
+			return fmt.Errorf("%q has no customSettingsValues (type %s is not a custom profile)", nameOrID, full.AttrStr("type"))
+		}
+		xml, _ := csv["configurationProfile"].(string)
+		if xml == "" {
+			return fmt.Errorf("no configurationProfile content on %q", nameOrID)
+		}
+		fmt.Print(xml)
+		if !strings.HasSuffix(xml, "\n") {
+			fmt.Println()
+		}
+		return nil
+	}
+	if asJSON {
+		return printJSON(full)
+	}
+	fmt.Printf("name     %s\n", full.AttrStr("name"))
+	fmt.Printf("id       %s\n", full.ID)
+	fmt.Printf("type     %s\n", full.AttrStr("type"))
+	fmt.Printf("created  %s\n", full.AttrStr("createdDateTime"))
+	fmt.Printf("updated  %s\n", full.AttrStr("updatedDateTime"))
+	return nil
+}
+
+func getBlueprints(asJSON bool) error {
+	c, _, err := mustClient()
+	if err != nil {
+		return err
+	}
+	items, err := c.ListBlueprints()
+	if err != nil {
+		return err
+	}
+	if asJSON {
+		return printJSON(items)
+	}
+	rows := make([][]string, 0, len(items))
+	for _, it := range items {
+		rows = append(rows, []string{it.AttrStr("name"), it.AttrStr("status"), it.ID})
+	}
+	printTable([]string{"NAME", "STATUS", "ID"}, rows)
+	fmt.Fprintf(os.Stderr, "%d blueprint(s)\n", len(items))
+	return nil
+}
+
+func getBlueprint(nameOrID string, asJSON bool) error {
+	c, _, err := mustClient()
+	if err != nil {
+		return err
+	}
+	r, err := c.ResolveBlueprint(nameOrID)
+	if err != nil {
+		return err
+	}
+	if asJSON {
+		return printJSON(r)
+	}
+	configs, _ := c.BlueprintRelationship(r.ID, "configurations")
+	devices, _ := c.BlueprintRelationship(r.ID, "orgDevices")
+	fmt.Printf("name     %s\n", r.AttrStr("name"))
+	fmt.Printf("id       %s\n", r.ID)
+	fmt.Printf("status   %s\n", r.AttrStr("status"))
+	fmt.Printf("configs  %d\n", len(configs))
+	fmt.Printf("devices  %d\n", len(devices))
+	return nil
+}
+
+func getDevices(asJSON bool) error {
+	c, _, err := mustClient()
+	if err != nil {
+		return err
+	}
+	items, err := c.ListDevices()
+	if err != nil {
+		return err
+	}
+	if asJSON {
+		return printJSON(items)
+	}
+	rows := make([][]string, 0, len(items))
+	for _, it := range items {
+		rows = append(rows, []string{it.AttrStr("serialNumber"), it.AttrStr("productFamily"), it.AttrStr("deviceModel")})
+	}
+	printTable([]string{"SERIAL", "FAMILY", "MODEL"}, rows)
+	fmt.Fprintf(os.Stderr, "%d device(s)\n", len(items))
+	return nil
+}
+
+func getAudit(since string, asJSON bool) error {
+	c, _, err := mustClient()
+	if err != nil {
+		return err
+	}
+	dur, err := parseSince(since)
+	if err != nil {
+		return err
+	}
+	end := time.Now().UTC()
+	items, err := c.AuditEvents(end.Add(-dur).Format(time.RFC3339), end.Format(time.RFC3339))
+	if err != nil {
+		return err
+	}
+	if asJSON {
+		return printJSON(items)
+	}
+	rows := make([][]string, 0, len(items))
+	for _, it := range items {
+		a := it.Attr()
+		t, _ := a["eventTime"].(string)
+		if t == "" {
+			t, _ = a["createdDateTime"].(string)
+		}
+		actor, _ := a["actorName"].(string)
+		if actor == "" {
+			actor, _ = a["actorId"].(string)
+		}
+		rows = append(rows, []string{t, it.AttrStr("eventType"), actor})
+	}
+	printTable([]string{"TIME", "EVENT", "ACTOR"}, rows)
+	fmt.Fprintf(os.Stderr, "%d event(s) in last %s\n", len(items), since)
+	return nil
+}
+
+func parseSince(s string) (time.Duration, error) {
+	if strings.HasSuffix(s, "d") {
+		n, err := strconv.Atoi(strings.TrimSuffix(s, "d"))
+		if err != nil {
+			return 0, fmt.Errorf("bad --since %q", s)
+		}
+		return time.Duration(n) * 24 * time.Hour, nil
+	}
+	return time.ParseDuration(s)
+}

@@ -1,0 +1,122 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-test:
+    name: build · vet · test (race)
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: gofmt (check)
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "These files are not gofmt-clean:"
+            echo "$unformatted"
+            exit 1
+          fi
+
+      - name: vet
+        run: make vet
+
+      - name: build
+        run: make build
+
+      - name: test (race)
+        run: make test
+
+  lint:
+    name: golangci-lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      # golangci-lint's own module pins a go1.25 toolchain; GOTOOLCHAIN=local forces
+      # building it with the project's Go (1.26) so it can lint a go1.26 module.
+      - name: install golangci-lint (v2, pinned)
+        env:
+          GOTOOLCHAIN: local
+        run: go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.2
+      - name: lint
+        run: golangci-lint run ./...
+
+  # Live, READ-ONLY smoke test against a real Apple Business tenant. Runs only on
+  # trusted events, and self-skips when the secrets are not configured — so forks
+  # and secret-less repos stay green. Set AB_CLIENT_ID + AB_PRIVATE_KEY_PEM (a
+  # dedicated, least-privilege, read-only API account is strongly recommended) in
+  # the repo's Actions secrets to enable it. Write/upload tests are a separate,
+  # explicitly-gated job — see TODO.md.
+  integration:
+    name: live API (read-only, gated)
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: live read-only integration test (skips if secrets absent)
+        env:
+          AB_CLIENT_ID: ${{ secrets.AB_CLIENT_ID }}
+          AB_PRIVATE_KEY_PEM: ${{ secrets.AB_PRIVATE_KEY_PEM }}
+        run: |
+          if [ -z "$AB_CLIENT_ID" ] || [ -z "$AB_PRIVATE_KEY_PEM" ]; then
+            echo "::notice::Live API secrets not set — skipping live integration tests."
+            exit 0
+          fi
+          umask 077
+          printf '%s\n' "$AB_PRIVATE_KEY_PEM" > "$RUNNER_TEMP/abctl-key.pem"
+          AB_PRIVATE_KEY="$RUNNER_TEMP/abctl-key.pem" \
+            go test -tags=integration -run TestLiveReadOnly -v ./internal/ab/
+
+  # Live WRITE round-trip (create → download → update → delete a throwaway,
+  # UNATTACHED zz-* config that deploys to nobody). Strictly gated: manual
+  # dispatch only, a protected `live-write` environment (add required reviewers in
+  # repo settings), and a DEDICATED configurations-write-only key kept separate
+  # from the read-only one. It self-skips unless its own secrets are set, so it is
+  # safe to leave wired. It never creates/attaches blueprints, devices, or members.
+  integration-write:
+    name: live API (WRITE round-trip, manual + protected)
+    runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch'
+    environment: live-write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: live write round-trip (skips if write secrets absent)
+        env:
+          AB_CLIENT_ID: ${{ secrets.AB_CLIENT_ID_WRITE }}
+          AB_PRIVATE_KEY_PEM: ${{ secrets.AB_PRIVATE_KEY_PEM_WRITE }}
+        run: |
+          if [ -z "$AB_CLIENT_ID" ] || [ -z "$AB_PRIVATE_KEY_PEM" ]; then
+            echo "::notice::Live WRITE secrets not set — skipping live write test."
+            exit 0
+          fi
+          umask 077
+          printf '%s\n' "$AB_PRIVATE_KEY_PEM" > "$RUNNER_TEMP/abctl-write-key.pem"
+          AB_PRIVATE_KEY="$RUNNER_TEMP/abctl-write-key.pem" ABCTL_LIVE_WRITE=1 \
+            go test -tags=integration_write -run TestLiveWriteRoundTrip -v ./internal/ab/
