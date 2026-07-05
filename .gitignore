@@ -21,3 +21,10 @@ token-cache.json
 # generated tree is ignored by default so nothing sensitive is committed by accident.
 # Un-ignore it deliberately once you adopt gitops/ as your committed source of truth.
 /gitops/
+
+# The archive/ subtree holds pre-overwrite copies of LIVE profiles (the audit trail).
+# Those live bodies can carry tenant secrets, so keep archive ignored even AFTER you
+# adopt (un-ignore) the rest of gitops/ — this line survives removing /gitops/ above,
+# so archived live secrets never land in git history. CI retains it as a build
+# artifact instead. Un-ignore deliberately only if you accept committing live secrets.
+/gitops/archive/

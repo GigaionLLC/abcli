@@ -1,0 +1,102 @@
+# CD — plan preview on PRs.
+# When a pull request changes the committed gitops/ desired state, run
+# `abctl sync --dry-run` (READ-ONLY — no writes) and post the plan for review as a
+# PR comment + the job summary. exit 3 (changes pending) is EXPECTED on a
+# desired-state PR, so it does not fail the check. Self-skips when the API secrets
+# are absent (forks / secret-less repos stay green). The gitops/ tree must be
+# committed (un-ignored) for this to have anything to plan.
+name: CD plan (PR preview)
+
+on:
+  pull_request:
+    paths:
+      - 'gitops/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pull-requests: write
+
+concurrency:
+  group: abctl-plan-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  plan:
+    name: sync --dry-run (plan only, no writes)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: build
+        run: make build
+
+      - name: plan (dry-run)
+        id: plan
+        env:
+          AB_CLIENT_ID: ${{ secrets.AB_CLIENT_ID }}
+          AB_PRIVATE_KEY_PEM: ${{ secrets.AB_PRIVATE_KEY_PEM }}
+        run: |
+          if [ -z "$AB_CLIENT_ID" ] || [ -z "$AB_PRIVATE_KEY_PEM" ]; then
+            echo "::notice::Live API secrets not set — skipping the plan preview."
+            exit 0
+          fi
+          umask 077
+          printf '%s\n' "$AB_PRIVATE_KEY_PEM" > "$RUNNER_TEMP/abctl-key.pem"
+          export AB_PRIVATE_KEY="$RUNNER_TEMP/abctl-key.pem"
+
+          ./bin/abctl validate || true
+
+          # Dry-run with --exit-on-diff so exit 3 = changes pending (expected on a PR
+          # that edits the desired state) — capture it and do NOT fail the check. Any
+          # other non-zero is a real error and should fail.
+          set +e
+          ./bin/abctl sync --dry-run --exit-on-diff >plan.out 2>plan.err
+          code=$?
+          set -e
+          cat plan.err
+
+          {
+            echo '### abctl plan — `sync --dry-run` (no writes)'
+            echo
+            echo '```'
+            cat plan.out
+            echo '--- (diagnostics) ---'
+            cat plan.err
+            echo '```'
+            if [ "$code" = "3" ]; then
+              echo
+              echo '> **Changes pending** — these will be applied on merge to `main` (gated apply).'
+            elif [ "$code" = "0" ]; then
+              echo
+              echo '> In sync — no changes.'
+            fi
+          } >plan.md
+
+          cat plan.md >>"$GITHUB_STEP_SUMMARY"
+          echo "commented=true" >>"$GITHUB_OUTPUT"
+          if [ "$code" != "0" ] && [ "$code" != "3" ]; then
+            echo "::error::abctl sync --dry-run failed (exit $code)"
+            exit "$code"
+          fi
+
+      - name: comment plan on PR
+        if: github.event_name == 'pull_request' && steps.plan.outputs.commented == 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const marker = '<!-- abctl-plan -->';
+            const body = marker + '\n' + fs.readFileSync('plan.md', 'utf8');
+            const { owner, repo } = context.repo;
+            const issue_number = context.payload.pull_request.number;
+            const { data: comments } = await github.rest.issues.listComments({ owner, repo, issue_number });
+            const existing = comments.find((c) => c.body && c.body.includes(marker));
+            if (existing) {
+              await github.rest.issues.updateComment({ owner, repo, comment_id: existing.id, body });
+            } else {
+              await github.rest.issues.createComment({ owner, repo, issue_number, body });
+            }

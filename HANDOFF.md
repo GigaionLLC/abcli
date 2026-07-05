@@ -117,9 +117,14 @@ Full breakdown in **[TODO.md](TODO.md)**. Short version:
    `abctl sync --apply` against a seeded tree, or the opt-in `TestLiveWriteRoundTrip` — to confirm the
    create/update/delete path + byte-identical GET round-trip end-to-end, then stop. (Blocked today by the
    403 above.)
-2. **Phase 3 CI/CD** — the gated live-WRITE CI job (`integration-write`, manual dispatch + protected
-   `live-write` environment + a dedicated write-only key) is wired and self-skips until its secrets are set;
-   next is the PR `sync --dry-run` exit-3 gate and the approval-protected `--apply`-on-merge job.
+2. **Phase 3 CI/CD — SHIPPED.** Three GitOps workflows in `.github/workflows/cd-{plan,apply,drift}.yml`
+   (guide: [docs/cicd.md](docs/cicd.md)): PR → `sync --dry-run` plan comment; gated `sync --apply` on merge
+   behind a protected `production` environment (serialized, `ABCTL_APPROVE=1`, commits the baseline back with
+   `[skip ci]`); daily `--exit-on-diff` drift alert. Config now falls back to env vars (`AB_*`) when there's
+   no `.env`, so CI needs no `.env` file. All self-skip without secrets. To activate: adopt (un-ignore +
+   commit) `gitops/`, set the `AB_*` Actions secrets, and create the `production` environment with reviewers.
+   Remaining Phase 3: a *scheduled apply* that auto-commits pulled console edits back to git (needs `abctl`
+   to run `git add/commit` itself — the merge-apply job already commits the baseline back, just not on a timer).
 3. **Blueprint membership + device moves** — blocked twice over (Included-MDM 403 **and** 0 devices). Needs
    a throwaway test device before `relationships` replace-vs-merge can be confirmed safely; do NOT probe it
    against real users/groups.

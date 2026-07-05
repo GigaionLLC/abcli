@@ -20,34 +20,45 @@ type Config struct {
 	EnvDir   string // directory containing the .env (secrets/ paths resolve against it)
 }
 
-// Load resolves and parses the .env. Search order: $ABCTL_ENV, then the nearest
-// .env found by walking up from the current working directory.
+// Load resolves the Apple Business config. Search order: $ABCTL_ENV, then the
+// nearest .env found by walking up from the current working directory; if none is
+// found it falls back to the process environment (AB_* variables) — the 12-factor
+// path used in CI/CD, where secrets come from the runner environment, not a file.
 func Load() (*Config, error) {
 	path, err := findEnv()
 	if err != nil {
-		return nil, err
+		// No .env file — read AB_* from the process environment. Relative key paths
+		// and the gitops tree resolve against the current working directory.
+		dir, _ := os.Getwd()
+		return build(os.Getenv, dir, "environment")
 	}
 	m, err := parseEnv(path)
 	if err != nil {
 		return nil, err
 	}
-	dir := filepath.Dir(path)
+	return build(func(k string) string { return m[k] }, filepath.Dir(path), path)
+}
+
+// build assembles a Config from a key getter (a .env map or os.Getenv). dir is the
+// directory relative key paths / the gitops tree resolve against; src names the
+// source for error messages.
+func build(get func(string) string, dir, src string) (*Config, error) {
 	c := &Config{
-		ClientID: m["AB_CLIENT_ID"],
-		Scope:    orDefault(m["AB_SCOPE"], "business.api"),
-		TokenURL: orDefault(m["AB_TOKEN_URL"], "https://account.apple.com/auth/oauth2/token"),
-		TokenAud: orDefault(m["AB_TOKEN_AUD"], "https://account.apple.com/auth/oauth2/v2/token"),
-		APIBase:  orDefault(m["AB_API_BASE"], "https://api-business.apple.com/v1/"),
+		ClientID: get("AB_CLIENT_ID"),
+		Scope:    orDefault(get("AB_SCOPE"), "business.api"),
+		TokenURL: orDefault(get("AB_TOKEN_URL"), "https://account.apple.com/auth/oauth2/token"),
+		TokenAud: orDefault(get("AB_TOKEN_AUD"), "https://account.apple.com/auth/oauth2/v2/token"),
+		APIBase:  orDefault(get("AB_API_BASE"), "https://api-business.apple.com/v1/"),
 		EnvDir:   dir,
 	}
 	if c.ClientID == "" {
-		return nil, fmt.Errorf("AB_CLIENT_ID not set in %s", path)
+		return nil, fmt.Errorf("AB_CLIENT_ID not set (%s)", src)
 	}
-	kp := m["AB_PRIVATE_KEY"]
+	kp := get("AB_PRIVATE_KEY")
 	if kp == "" {
-		return nil, fmt.Errorf("AB_PRIVATE_KEY not set in %s", path)
+		return nil, fmt.Errorf("AB_PRIVATE_KEY not set (%s)", src)
 	}
-	if !filepath.IsAbs(kp) {
+	if !filepath.IsAbs(kp) && dir != "" {
 		kp = filepath.Join(dir, kp)
 	}
 	c.KeyPath = kp

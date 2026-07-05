@@ -158,11 +158,18 @@ Data → stdout, diagnostics → stderr; `--json` for machine output.
 
 ## CI/CD
 
-CI (GitHub Actions) runs build/vet/race-test on Linux + macOS, `golangci-lint`, and **gated live integration
-tests** (read-only, and a strictly-gated write round-trip) that self-skip without secrets. For continuous
-delivery, `sync --dry-run --exit-on-diff` gives you a PR "plan gate" (exit `3` = changes pending), and gated
-`sync --apply` (behind `$ABCTL_APPROVE=1` + a protected environment) deploys on merge. See
-[docs/design-abctl.md](docs/design-abctl.md) §7.
+**CI** (GitHub Actions) runs build/vet/race-test on Linux + macOS, `golangci-lint`, and **gated live
+integration tests** (read-only + a strictly-gated write round-trip) that self-skip without secrets.
+
+**CD** is three GitOps workflows (also self-skipping) — full setup in **[docs/cicd.md](docs/cicd.md)**:
+
+| Workflow | Trigger | Does |
+|---|---|---|
+| **Plan** (`cd-plan.yml`) | PR touching `gitops/**` | `sync --dry-run` → posts the plan as a PR comment (no writes) |
+| **Apply** (`cd-apply.yml`) | merge to `main` (or manual) | gated `sync --apply` behind a protected `production` environment → reconciles + commits the baseline back |
+| **Drift** (`cd-drift.yml`) | daily cron | `sync --dry-run --exit-on-diff` → alerts if the console drifted from git |
+
+In CI, `abctl` reads config from the environment (`AB_CLIENT_ID` + `AB_PRIVATE_KEY`) — no `.env` needed.
 
 ## Verified API facts (from live testing — trust these)
 

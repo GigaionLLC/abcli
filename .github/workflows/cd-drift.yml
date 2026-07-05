@@ -1,0 +1,71 @@
+# CD — scheduled drift check.
+# Periodically run `abctl sync --dry-run --exit-on-diff` (READ-ONLY) to detect
+# drift between the committed git desired state and the live tenant — i.e. someone
+# edited the console, or git changes are due but unapplied. exit 3 (changes
+# pending) FAILS the run so the standard failed-workflow notification acts as the
+# alert; the plan is written to the job summary. Self-skips without secrets.
+name: CD drift check (scheduled)
+
+on:
+  schedule:
+    - cron: '17 8 * * *' # daily ~08:17 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: abctl-drift
+  cancel-in-progress: true
+
+jobs:
+  drift:
+    name: sync --dry-run --exit-on-diff (alert on drift)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: build
+        run: make build
+
+      - name: drift check
+        env:
+          AB_CLIENT_ID: ${{ secrets.AB_CLIENT_ID }}
+          AB_PRIVATE_KEY_PEM: ${{ secrets.AB_PRIVATE_KEY_PEM }}
+        run: |
+          if [ -z "$AB_CLIENT_ID" ] || [ -z "$AB_PRIVATE_KEY_PEM" ]; then
+            echo "::notice::Live API secrets not set — skipping the drift check."
+            exit 0
+          fi
+          umask 077
+          printf '%s\n' "$AB_PRIVATE_KEY_PEM" > "$RUNNER_TEMP/abctl-key.pem"
+          export AB_PRIVATE_KEY="$RUNNER_TEMP/abctl-key.pem"
+
+          set +e
+          ./bin/abctl sync --dry-run --exit-on-diff >drift.out 2>drift.err
+          code=$?
+          set -e
+          cat drift.out; cat drift.err
+
+          {
+            echo '### abctl drift check — `sync --dry-run --exit-on-diff`'
+            echo
+            echo '```'
+            cat drift.out
+            echo '--- (diagnostics) ---'
+            cat drift.err
+            echo '```'
+          } >>"$GITHUB_STEP_SUMMARY"
+
+          if [ "$code" = "3" ]; then
+            echo "::warning::abctl detected drift between git and the live tenant (or due git changes) — review and reconcile."
+            exit 3
+          fi
+          if [ "$code" != "0" ]; then
+            echo "::error::abctl drift check failed (exit $code)"
+            exit "$code"
+          fi
+          echo "in sync — no drift."

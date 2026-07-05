@@ -1,0 +1,122 @@
+# CD — gated apply on merge to main.
+# When the committed gitops/ desired state lands on main, run `abctl sync --apply`
+# to reconcile the live tenant, then commit the updated baseline + any pulled console
+# edits back so the GitOps loop stays consistent. The archive/ tree (pre-overwrite
+# LIVE profile bodies, which can carry tenant secrets) is NEVER committed — it is
+# retained as an expiring build artifact instead, so live secrets never reach git.
+#
+# GATES: (1) a protected `production` environment — configure required reviewers in
+# repo Settings → Environments so a human approves before the job runs; (2) a
+# serialized concurrency group so two applies never overlap; (3) self-skip when the
+# API secrets are absent. --prune (deletes/detaches) is OFF unless explicitly
+# requested via workflow_dispatch. The bot's baseline commit carries [skip ci] to
+# avoid re-triggering. NOTE: if `main` is a protected branch, allow this workflow
+# (or a deploy key / PAT) to push, else the baseline commit-back will fail.
+name: CD apply (gated, on merge)
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'gitops/**'
+  workflow_dispatch:
+    inputs:
+      prune:
+        description: 'Allow deletes/detaches (--prune)'
+        type: boolean
+        default: false
+
+permissions:
+  contents: write # to commit the reconciled baseline back to main
+
+concurrency:
+  group: abctl-apply
+  cancel-in-progress: false
+
+jobs:
+  apply:
+    name: sync --apply (gated)
+    runs-on: ubuntu-latest
+    environment: production # protected — required reviewers approve here
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: build
+        run: make build
+
+      - name: apply
+        id: apply
+        env:
+          AB_CLIENT_ID: ${{ secrets.AB_CLIENT_ID }}
+          AB_PRIVATE_KEY_PEM: ${{ secrets.AB_PRIVATE_KEY_PEM }}
+          PRUNE: ${{ github.event.inputs.prune }}
+        run: |
+          if [ -z "$AB_CLIENT_ID" ] || [ -z "$AB_PRIVATE_KEY_PEM" ]; then
+            echo "::notice::Live API secrets not set — skipping apply."
+            echo "ran=false" >>"$GITHUB_OUTPUT"
+            exit 0
+          fi
+          umask 077
+          printf '%s\n' "$AB_PRIVATE_KEY_PEM" > "$RUNNER_TEMP/abctl-key.pem"
+          export AB_PRIVATE_KEY="$RUNNER_TEMP/abctl-key.pem"
+          export ABCTL_APPROVE=1 # CI escape past the interactive confirm
+
+          FLAGS=""
+          if [ "$PRUNE" = "true" ]; then FLAGS="--prune"; fi
+
+          set +e
+          ./bin/abctl sync --apply $FLAGS >apply.out 2>apply.err
+          code=$?
+          set -e
+          cat apply.out; cat apply.err
+
+          {
+            echo "### abctl apply — \`sync --apply $FLAGS\`"
+            echo
+            echo '```'
+            cat apply.out
+            echo '--- (diagnostics) ---'
+            cat apply.err
+            echo '```'
+          } >>"$GITHUB_STEP_SUMMARY"
+
+          echo "ran=true" >>"$GITHUB_OUTPUT"
+          echo "code=$code" >>"$GITHUB_OUTPUT"
+          # Do not exit non-zero yet — let the baseline commit-back run first so a
+          # partially-applied run still persists what succeeded (resumable).
+
+      - name: retain archive (audit trail — may carry secrets, so NOT committed)
+        if: steps.apply.outputs.ran == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: abctl-archive-${{ github.run_id }}
+          path: gitops/archive/
+          if-no-files-found: ignore
+          retention-days: 90
+
+      - name: commit reconciled baseline
+        if: steps.apply.outputs.ran == 'true'
+        run: |
+          git config user.name  "abctl-bot"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          # Stage ONLY the desired-state + baseline — never gitops/archive/, whose
+          # pre-overwrite live profile bodies can carry tenant secrets (it is also
+          # gitignored, but be explicit so a deliberate un-ignore can't leak via CI).
+          for p in gitops/state gitops/lib gitops/blueprints; do
+            [ -e "$p" ] && git add "$p"
+          done
+          if git diff --cached --quiet; then
+            echo "no baseline / pulled-file changes to commit."
+          else
+            git commit -m "chore(abctl): reconcile baseline after apply [skip ci]"
+            git push
+          fi
+
+      - name: fail if apply errored
+        if: steps.apply.outputs.ran == 'true' && steps.apply.outputs.code != '0'
+        run: |
+          echo "::error::abctl sync --apply reported errors (exit ${{ steps.apply.outputs.code }})"
+          exit 1

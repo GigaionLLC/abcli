@@ -58,11 +58,15 @@ design: [docs/design-abctl.md](docs/design-abctl.md).
   (`POST /users`,`/userGroups` → `403 does-not-allow-CREATE`), so members are always console-created.
 
 ## Phase 3 — CI/CD
-- [ ] **Live tests in CI** (read-only job shipped): add the gated **write** job; both run only when the
-  repo's `AB_*` secrets are set and self-skip otherwise.
-- [ ] PR → `sync --dry-run` (exit-3 gate); gated `--apply` on merge to main (approval-protected environment).
-- [ ] A scheduled bidirectional `sync` that **pulls console edits into git as commits** (the "someone edited
-  the portal" path).
+- [x] **Live tests in CI** — read-only (`integration`) + gated write round-trip (`integration-write`) jobs
+  ship; both self-skip without the repo's `AB_*` secrets.
+- [x] **CD workflows** (`.github/workflows/cd-{plan,apply,drift}.yml`, guide in [docs/cicd.md](docs/cicd.md)):
+  PR → `sync --dry-run` plan comment (exit-3 tolerated); gated `sync --apply` on merge behind a protected
+  `production` environment + serialized concurrency + baseline commit-back; daily `--exit-on-diff` drift
+  alert. Config reads from env vars in CI (no `.env`). All self-skip without secrets.
+- [ ] A scheduled bidirectional **apply** that also **pulls console edits into git as commits** on a timer
+  (the drift check *detects* it read-only; auto-committing the pulled edits back needs `abctl` to run
+  `git add/commit` itself — still future; the merge-apply job commits the baseline back but not on a schedule).
 
 ## Later — enterprise polish
 - [ ] kubeconfig-style **multi-tenant contexts** (`~/.config/abctl/config`), overridable via
