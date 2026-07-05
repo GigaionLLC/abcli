@@ -28,15 +28,18 @@ func TestLoadDesired(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(tr.LibDir, "x.mobileconfig"), []byte("X"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	// non-.mobileconfig files are ignored
+	// a bare-named config (a live ABM name without the extension) IS a config
+	_ = os.WriteFile(filepath.Join(tr.LibDir, "WiFi-Corp"), []byte("W"), 0o644)
+	// other extensions and dotfiles are ignored
 	_ = os.WriteFile(filepath.Join(tr.LibDir, "note.txt"), []byte("nope"), 0o644)
+	_ = os.WriteFile(filepath.Join(tr.LibDir, ".gitkeep"), []byte(""), 0o644)
 
 	got, err := tr.LoadDesired()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(got) != 1 || string(got["x.mobileconfig"]) != "X" {
-		t.Fatalf("LoadDesired = %v, want {x.mobileconfig: X}", got)
+	if len(got) != 2 || string(got["x.mobileconfig"]) != "X" || string(got["WiFi-Corp"]) != "W" {
+		t.Fatalf("LoadDesired = %v, want {x.mobileconfig:X, WiFi-Corp:W}", got)
 	}
 }
 

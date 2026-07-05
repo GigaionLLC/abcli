@@ -157,8 +157,8 @@ func getConfigurations(asJSON bool, typ string) error {
 		}
 		items = f
 	}
-	if asJSON {
-		return printJSON(items)
+	if asJSON || flagOutput != "table" {
+		return render(outFmt(asJSON), items, nil, nil)
 	}
 	rows := make([][]string, 0, len(items))
 	for _, it := range items {
@@ -197,8 +197,8 @@ func getConfiguration(nameOrID string, asJSON, profile bool) error {
 		}
 		return nil
 	}
-	if asJSON {
-		return printJSON(full)
+	if asJSON || flagOutput != "table" {
+		return render(outFmt(asJSON), full, nil, nil)
 	}
 	fmt.Printf("name     %s\n", full.AttrStr("name"))
 	fmt.Printf("id       %s\n", full.ID)
@@ -217,8 +217,8 @@ func getBlueprints(asJSON bool) error {
 	if err != nil {
 		return err
 	}
-	if asJSON {
-		return printJSON(items)
+	if asJSON || flagOutput != "table" {
+		return render(outFmt(asJSON), items, nil, nil)
 	}
 	rows := make([][]string, 0, len(items))
 	for _, it := range items {
@@ -238,8 +238,8 @@ func getBlueprint(nameOrID string, asJSON bool) error {
 	if err != nil {
 		return err
 	}
-	if asJSON {
-		return printJSON(r)
+	if asJSON || flagOutput != "table" {
+		return render(outFmt(asJSON), r, nil, nil)
 	}
 	configs, _ := c.BlueprintRelationship(r.ID, "configurations")
 	devices, _ := c.BlueprintRelationship(r.ID, "orgDevices")
@@ -260,8 +260,8 @@ func getDevices(asJSON bool) error {
 	if err != nil {
 		return err
 	}
-	if asJSON {
-		return printJSON(items)
+	if asJSON || flagOutput != "table" {
+		return render(outFmt(asJSON), items, nil, nil)
 	}
 	rows := make([][]string, 0, len(items))
 	for _, it := range items {
@@ -286,8 +286,8 @@ func getAudit(since string, asJSON bool) error {
 	if err != nil {
 		return err
 	}
-	if asJSON {
-		return printJSON(items)
+	if asJSON || flagOutput != "table" {
+		return render(outFmt(asJSON), items, nil, nil)
 	}
 	rows := make([][]string, 0, len(items))
 	for _, it := range items {

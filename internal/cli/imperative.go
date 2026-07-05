@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"sort"
 	"strings"
 	"time"
 
@@ -385,13 +386,48 @@ func resolveLiveConfig(c *ab.Client, nameOrID string) (ab.LiveConfig, error) {
 	if err != nil {
 		return ab.LiveConfig{}, err
 	}
+	if lc, ok := findLiveConfig(live, nameOrID); ok {
+		return lc, nil
+	}
+	return ab.LiveConfig{}, fmt.Errorf("CUSTOM_SETTING config %q not found (by name or id)", nameOrID)
+}
+
+func findLiveConfig(live []ab.LiveConfig, nameOrID string) (ab.LiveConfig, bool) {
 	want := configName(nameOrID)
 	for _, l := range live {
 		if l.Name == nameOrID || l.Name == want || l.ID == nameOrID {
-			return l, nil
+			return l, true
 		}
 	}
-	return ab.LiveConfig{}, fmt.Errorf("CUSTOM_SETTING config %q not found (by name or id)", nameOrID)
+	return ab.LiveConfig{}, false
+}
+
+// syncBlueprintManifest rewrites blueprints/<name>.yml to the blueprint's ACTUAL
+// post-write live config membership, so the git manifest always equals live (never
+// a partial set that a later `sync --prune` would treat as configs to detach).
+// live is the current CUSTOM_SETTING list (for id→name resolution).
+func (i *imp) syncBlueprintManifest(bpName, bpID string, live []ab.LiveConfig) error {
+	links, err := i.c.BlueprintRelationship(bpID, "configurations")
+	if err != nil {
+		return err
+	}
+	nameByID := make(map[string]string, len(live))
+	for _, l := range live {
+		nameByID[l.ID] = l.Name
+	}
+	names := make([]string, 0, len(links))
+	for _, ln := range links {
+		if n, ok := nameByID[ln.ID]; ok {
+			names = append(names, n) // a managed CUSTOM_SETTING → its name
+		} else {
+			names = append(names, ln.ID) // a native/console config abctl doesn't own → pass its id through
+		}
+	}
+	sort.Strings(names)
+	all, _ := i.tree.LoadBlueprints()
+	return i.tree.WriteBlueprintSpec(gitops.BlueprintSpec{
+		Name: bpName, ID: bpID, Description: all[bpName].Description, Configurations: names,
+	})
 }
 
 func addWriteFlags(cmd *cobra.Command, fl *writeFlags, needFile bool) {

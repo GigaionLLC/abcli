@@ -44,14 +44,20 @@ func (t *Tree) LoadDesired() (map[string][]byte, error) {
 		return nil, err
 	}
 	for _, e := range entries {
-		if e.IsDir() || !strings.HasSuffix(e.Name(), ".mobileconfig") {
+		name := e.Name()
+		ext := strings.ToLower(filepath.Ext(name))
+		// A profile is any non-dotfile whose extension is .mobileconfig OR empty — a
+		// live config's ABM `name` (which is the file identity) need not carry the
+		// extension. Files with other extensions (.md/.txt/…) are skipped so stray
+		// files aren't treated as configs.
+		if e.IsDir() || strings.HasPrefix(name, ".") || (ext != "" && ext != ".mobileconfig") {
 			continue
 		}
-		b, err := os.ReadFile(filepath.Join(t.LibDir, e.Name()))
+		b, err := os.ReadFile(filepath.Join(t.LibDir, name))
 		if err != nil {
 			return nil, err
 		}
-		out[e.Name()] = b
+		out[name] = b
 	}
 	return out, nil
 }

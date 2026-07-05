@@ -5,13 +5,11 @@ import (
 	"os"
 	"os/exec"
 	"runtime"
-	"sort"
 	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
 
-	"github.com/GigaionLLC/abcli/internal/gitops"
 	"github.com/GigaionLLC/abcli/internal/hash"
 	"github.com/GigaionLLC/abcli/internal/state"
 )
@@ -66,9 +64,13 @@ func runMembership(verb, configArg, blueprintArg string, yes, noWriteTree bool) 
 	if err != nil {
 		return err
 	}
-	lc, err := resolveLiveConfig(i.c, configArg)
+	live, err := i.c.FetchCustomSettings()
 	if err != nil {
 		return err
+	}
+	lc, ok := findLiveConfig(live, configArg)
+	if !ok {
+		return fmt.Errorf("CUSTOM_SETTING config %q not found (by name or id)", configArg)
 	}
 	bp, err := i.c.ResolveBlueprint(blueprintArg)
 	if err != nil {
@@ -92,41 +94,15 @@ func runMembership(verb, configArg, blueprintArg string, yes, noWriteTree bool) 
 		return err
 	}
 	if !noWriteTree {
-		if err := updateBlueprintManifest(i.tree, bpName, bp.ID, lc.Name, verb == "attach"); err != nil {
+		// Rewrite the manifest to the FULL post-write live membership (not a delta),
+		// so the tree can never omit members that `sync --prune` would then detach.
+		if err := i.syncBlueprintManifest(bpName, bp.ID, live); err != nil {
 			fmt.Fprintf(os.Stderr, "warning: membership changed on ABM but the local manifest update failed: %v\n", err)
 		}
 	}
 	fmt.Fprintf(os.Stderr, "%sed %q %s blueprint %q\n", verb, lc.Name,
 		map[string]string{"attach": "to", "detach": "from"}[verb], bpName)
 	return nil
-}
-
-// updateBlueprintManifest adds/removes a config from a blueprint's manifest (or
-// creates the manifest if the blueprint exists live but not yet in the tree).
-func updateBlueprintManifest(t *gitops.Tree, bpName, bpID, configName string, add bool) error {
-	all, err := t.LoadBlueprints()
-	if err != nil {
-		return err
-	}
-	spec, ok := all[bpName]
-	if !ok {
-		spec = gitops.BlueprintSpec{Name: bpName, ID: bpID}
-	}
-	set := map[string]bool{}
-	for _, c := range spec.Configurations {
-		set[c] = true
-	}
-	if add {
-		set[configName] = true
-	} else {
-		delete(set, configName)
-	}
-	spec.Configurations = spec.Configurations[:0]
-	for c := range set {
-		spec.Configurations = append(spec.Configurations, c)
-	}
-	sort.Strings(spec.Configurations)
-	return t.WriteBlueprintSpec(spec)
 }
 
 // --- pull: adopt live config(s) into the git tree (scoped seed) ---

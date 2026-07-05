@@ -44,11 +44,12 @@ type applyOpts struct {
 	delete bool
 	dryRun bool
 	yes    bool
+	force  bool
 }
 
 func newApplyCmd() *cobra.Command {
 	var files []string
-	var dryRun bool
+	var dryRun, force bool
 	c := &cobra.Command{
 		Use:   "apply -f <file.yml> [-f …]",
 		Short: "Apply abctl/v1 resource specs (upsert; incremental, never deletes)",
@@ -61,12 +62,13 @@ func newApplyCmd() *cobra.Command {
 			if len(files) == 0 {
 				return fmt.Errorf("need at least one -f <file.yml>")
 			}
-			return runApplyFiles(files, applyOpts{dryRun: dryRun, yes: applyYes})
+			return runApplyFiles(files, applyOpts{dryRun: dryRun, yes: applyYes, force: force})
 		},
 	}
 	c.Flags().StringArrayVarP(&files, "file", "f", nil, "spec file (repeatable; '-' for stdin)")
 	c.Flags().BoolVar(&dryRun, "dry-run", false, "parse + validate only, no writes")
 	c.Flags().BoolVar(&applyYes, "yes", false, "skip confirmation (also: $ABCTL_APPROVE=1)")
+	c.Flags().BoolVar(&force, "force", false, "skip client-side profile validation")
 	return c
 }
 
@@ -87,6 +89,20 @@ func runApplyFiles(files []string, opts applyOpts) error {
 		fmt.Fprintf(os.Stderr, "  %s %s/%s\n", verb, s.Kind, s.Metadata.Name)
 	}
 	if opts.dryRun {
+		for _, s := range specs { // honor "validate" — resolve profileFile + structural check
+			if s.Kind != "Configuration" || opts.delete {
+				continue
+			}
+			content, err := s.profileBytes()
+			if err != nil {
+				return err
+			}
+			if !opts.force {
+				if err := validateProfile(content); err != nil {
+					return fmt.Errorf("%s/%s: %w", s.Kind, s.Metadata.Name, err)
+				}
+			}
+		}
 		fmt.Fprintf(os.Stderr, "dry-run: %d resource(s) validated, no writes.\n", len(specs))
 		return nil
 	}
@@ -124,6 +140,11 @@ func applyOneSpec(i *imp, s Spec, opts applyOpts) error {
 		content, err := s.profileBytes()
 		if err != nil {
 			return err
+		}
+		if !opts.force {
+			if err := validateProfile(content); err != nil {
+				return err
+			}
 		}
 		return upsertConfig(i, configName(s.Metadata.Name), content, s.Spec.Platforms)
 	case "Blueprint":
@@ -214,6 +235,11 @@ func applyBlueprintSpec(i *imp, s Spec) error {
 			return err
 		}
 		attachedN++
+	}
+	// Mirror the ABM membership into the git manifest (full live set) so the tree
+	// stays == live and a later `sync --prune` never reverts this attach.
+	if err := i.syncBlueprintManifest(bp.AttrStr("name"), bp.ID, live); err != nil {
+		fmt.Fprintf(os.Stderr, "  warning: attached on ABM but local manifest update failed: %v\n", err)
 	}
 	fmt.Fprintf(os.Stderr, "  ✓ Blueprint/%s: %d config(s) attached\n", s.Metadata.Name, attachedN)
 	return nil
