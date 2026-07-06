@@ -8,6 +8,7 @@ import (
 	"crypto/sha256"
 	"crypto/x509"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
 	"fmt"
@@ -34,13 +35,32 @@ type TokenSource struct {
 	expiry time.Time
 }
 
-// NewTokenSource caches the bearer at <EnvDir>/secrets/.token-cache.json (gitignored).
+// NewTokenSource caches the bearer in a stable, per-credential file (see tokenCachePath).
 func NewTokenSource(cfg *config.Config, hc *http.Client) *TokenSource {
 	return &TokenSource{
 		cfg:       cfg,
 		hc:        hc,
-		cachePath: filepath.Join(cfg.EnvDir, "secrets", ".token-cache.json"),
+		cachePath: tokenCachePath(cfg),
 	}
+}
+
+// tokenCachePath returns a stable, writable, per-credential bearer-cache path that does NOT
+// depend on the current working directory. The old <EnvDir>/secrets/ location was cwd-relative
+// (EnvDir = cwd in context/env mode), so a GUI — which has no control over its cwd and often
+// runs from "/" — could never persist the cache and re-minted a token on EVERY call, tripping
+// Apple's token-endpoint rate limit (429). The cache lives under the user cache dir (falling
+// back to ~/.abctl), keyed by client_id + token URL so distinct tenants never share a bearer.
+func tokenCachePath(cfg *config.Config) string {
+	base, err := os.UserCacheDir()
+	if err != nil || base == "" {
+		if home, herr := os.UserHomeDir(); herr == nil {
+			base = filepath.Join(home, ".abctl")
+		} else {
+			base = "." // last resort — still better than a non-writable cwd
+		}
+	}
+	sum := sha256.Sum256([]byte(cfg.ClientID + "\x00" + cfg.TokenURL))
+	return filepath.Join(base, "abctl", "token-"+hex.EncodeToString(sum[:8])+".json")
 }
 
 type cacheFile struct {
@@ -82,6 +102,9 @@ func (ts *TokenSource) loadCache() {
 }
 
 func (ts *TokenSource) saveCache() {
+	if err := os.MkdirAll(filepath.Dir(ts.cachePath), 0o700); err != nil {
+		return // best-effort: a missing cache dir just means we re-mint next time
+	}
 	b, _ := json.Marshal(cacheFile{Token: ts.token, Expiry: ts.expiry})
 	_ = os.WriteFile(ts.cachePath, b, 0o600)
 }
@@ -117,35 +140,50 @@ func (ts *TokenSource) mint() error {
 	form.Set("client_assertion", jwt)
 	form.Set("scope", ts.cfg.Scope)
 
-	req, _ := http.NewRequest("POST", ts.cfg.TokenURL, strings.NewReader(form.Encode()))
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	resp, err := ts.hc.Do(req)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = resp.Body.Close() }()
-	var tr struct {
-		AccessToken string `json:"access_token"`
-		ExpiresIn   int    `json:"expires_in"`
-		Error       string `json:"error"`
-		ErrorDesc   string `json:"error_description"`
-	}
-	_ = json.NewDecoder(resp.Body).Decode(&tr)
-	if resp.StatusCode != 200 || tr.AccessToken == "" {
+	// Apple rate-limits the token endpoint (429). The bearer cache makes minting rare, but a
+	// burst can still 429 — back off and retry (respecting Retry-After) rather than hard-fail.
+	for attempt := 0; ; attempt++ {
+		req, _ := http.NewRequest("POST", ts.cfg.TokenURL, strings.NewReader(form.Encode()))
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		resp, err := ts.hc.Do(req)
+		if err != nil {
+			return err
+		}
+		var tr struct {
+			AccessToken string `json:"access_token"`
+			ExpiresIn   int    `json:"expires_in"`
+			Error       string `json:"error"`
+			ErrorDesc   string `json:"error_description"`
+		}
+		_ = json.NewDecoder(resp.Body).Decode(&tr)
+		retryAfter := resp.Header.Get("Retry-After")
+		status := resp.StatusCode
+		_ = resp.Body.Close()
+
+		if status == 200 && tr.AccessToken != "" {
+			ts.token = tr.AccessToken
+			ts.expiry = now.Add(time.Duration(tr.ExpiresIn) * time.Second)
+			ts.saveCache()
+			return nil
+		}
+		if (status == 429 || status >= 500) && attempt < maxTokenMintRetries {
+			time.Sleep(backoff(retryAfter, attempt))
+			continue
+		}
 		msg := tr.Error
 		if tr.ErrorDesc != "" {
 			msg += ": " + tr.ErrorDesc
 		}
 		if msg == "" {
-			msg = resp.Status
+			msg = fmt.Sprintf("HTTP %d", status)
 		}
-		return fmt.Errorf("token request failed (%d): %s", resp.StatusCode, msg)
+		return fmt.Errorf("token request failed (%d): %s", status, msg)
 	}
-	ts.token = tr.AccessToken
-	ts.expiry = now.Add(time.Duration(tr.ExpiresIn) * time.Second)
-	ts.saveCache()
-	return nil
 }
+
+// maxTokenMintRetries bounds the mint backoff so a persistently rate-limited endpoint can't
+// hang a caller indefinitely (the GUI also has its own subprocess timeout).
+const maxTokenMintRetries = 4
 
 // signES256 produces a JWS ES256 signature: raw R||S, each left-padded to 32 bytes.
 func signES256(key *ecdsa.PrivateKey, msg []byte) (string, error) {
@@ -172,23 +210,41 @@ func loadECKey(path string) (*ecdsa.PrivateKey, error) {
 	if err != nil {
 		return nil, err
 	}
-	blk, _ := pem.Decode(raw)
-	if blk == nil {
+	// Walk EVERY PEM block, not just the first. OpenSSL (and some Apple Business Manager
+	// downloads) emit an EC key as two blocks — a leading "EC PARAMETERS" block followed by
+	// the "EC PRIVATE KEY". Decoding only the first block grabbed EC PARAMETERS and failed,
+	// which is why converting to single-block PKCS#8 "fixed" it. Skip non-key blocks and take
+	// the first block that parses as an EC private key (SEC1 or PKCS#8).
+	var sawEncrypted, sawBlock bool
+	for rest := raw; ; {
+		var blk *pem.Block
+		blk, rest = pem.Decode(rest)
+		if blk == nil {
+			break
+		}
+		sawBlock = true
+		if strings.Contains(blk.Type, "ENCRYPTED") {
+			sawEncrypted = true
+			continue
+		}
+		if k, err := x509.ParseECPrivateKey(blk.Bytes); err == nil { // SEC1
+			return k, nil
+		}
+		if k, err := x509.ParsePKCS8PrivateKey(blk.Bytes); err == nil { // PKCS#8
+			if ek, ok := k.(*ecdsa.PrivateKey); ok {
+				return ek, nil
+			}
+		}
+		// otherwise: a non-key block (e.g. "EC PARAMETERS") or a non-EC key — keep scanning
+	}
+	if sawEncrypted {
+		return nil, fmt.Errorf("key %s is encrypted; provide an unencrypted EC key "+
+			"(convert with: openssl pkcs8 -topk8 -nocrypt -in %s -out key_pkcs8.pem)", path, path)
+	}
+	if !sawBlock {
 		return nil, fmt.Errorf("no PEM block in %s", path)
 	}
-	if strings.Contains(blk.Type, "ENCRYPTED") {
-		return nil, fmt.Errorf("key %s is encrypted; provide an unencrypted PKCS#8/SEC1 EC key", path)
-	}
-	if k, err := x509.ParseECPrivateKey(blk.Bytes); err == nil { // SEC1
-		return k, nil
-	}
-	if k, err := x509.ParsePKCS8PrivateKey(blk.Bytes); err == nil { // PKCS#8
-		if ek, ok := k.(*ecdsa.PrivateKey); ok {
-			return ek, nil
-		}
-		return nil, fmt.Errorf("PKCS#8 key in %s is not EC", path)
-	}
-	return nil, fmt.Errorf("could not parse EC private key in %s (need unencrypted PKCS#8 or SEC1)", path)
+	return nil, fmt.Errorf("no unencrypted EC private key (PKCS#8 or SEC1) found in %s", path)
 }
 
 func b64(b []byte) string { return base64.RawURLEncoding.EncodeToString(b) }

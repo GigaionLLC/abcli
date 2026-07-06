@@ -49,6 +49,6 @@ Administrator**. Up to 50 API accounts. On create you get **Client ID** + **Key 
 
 ## Gotchas
 - **A — key is download-once.** Client ID / Key ID stay retrievable; the private key is **not** re-downloadable. Lost key ⇒ roll a new Key ID.
-- **B — key format.** ES256 signing uses an **unencrypted EC P-256** key. Apple's download is SEC1 (`BEGIN EC PRIVATE KEY`); `abctl` reads SEC1 **and** PKCS#8 (`BEGIN PRIVATE KEY`) directly (`x509.ParseECPrivateKey` / `x509.ParsePKCS8PrivateKey`), so **no conversion is needed**. If another tool requires PKCS#8, convert with `openssl pkcs8 -topk8 -nocrypt -in <key> -out key_pkcs8.pem`.
+- **B — key format.** ES256 signing uses an **unencrypted EC P-256** key. Apple's download is SEC1 (`BEGIN EC PRIVATE KEY`); `abctl` reads SEC1 **and** PKCS#8 (`BEGIN PRIVATE KEY`) directly (`x509.ParseECPrivateKey` / `x509.ParsePKCS8PrivateKey`), and scans **all** PEM blocks — so a two-block file with a leading `BEGIN EC PARAMETERS` block (how OpenSSL, and some ABM downloads, emit EC keys) also works as-is. So **no conversion is needed**. Only an **encrypted** key must be converted first: `openssl pkcs8 -topk8 -nocrypt -in <key> -out key_pkcs8.pem`.
 - **C — "Device API Manager" migrated role.** Orgs migrated from ABM/Essentials keep a device-only API role. It gets **`403` on `/v1/blueprints` and `/v1/configurations`** until **View/Manage Blueprints** + **Create/edit/delete device configurations** are explicitly granted and the key regenerated. *(Watch for this on first write attempt — medium confidence it's unchecked by default.)*
 
