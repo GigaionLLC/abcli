@@ -317,6 +317,7 @@ func runSeed() error {
 	if err != nil {
 		return err
 	}
+	fmt.Fprintln(os.Stderr, "fetching live configurations…")
 	live, err := c.FetchCustomSettings()
 	if err != nil {
 		return err
@@ -334,6 +335,7 @@ func runSeed() error {
 	if err := st.Save(t.StateFile); err != nil {
 		return err
 	}
+	fmt.Fprintln(os.Stderr, "fetching blueprints…")
 	bps, err := c.ListBlueprints()
 	if err != nil {
 		return err
@@ -453,6 +455,7 @@ func loadPlan() (*planCtx, error) {
 	if err != nil {
 		return nil, err
 	}
+	fmt.Fprintln(os.Stderr, "fetching live configurations…")
 	live, err := c.FetchCustomSettings()
 	if err != nil {
 		return nil, err
@@ -474,6 +477,7 @@ func loadPlan() (*planCtx, error) {
 	if err != nil {
 		return nil, err
 	}
+	fmt.Fprintln(os.Stderr, "fetching blueprints…")
 	liveBPs, err := c.FetchBlueprints(cfgNameByID)
 	if err != nil {
 		return nil, err

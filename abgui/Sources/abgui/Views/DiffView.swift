@@ -17,7 +17,8 @@ struct DiffView: View {
                 if model.repoRoot != nil {
                     Button { showApply = true } label: { Label("Apply…", systemImage: "checkmark.circle") }
                         .disabled(model.plan?.isEmpty ?? true)
-                    RefreshButton { await model.loadPlan() }
+                    Button { model.refreshPlan() } label: { Label("Refresh", systemImage: "arrow.clockwise") }
+                        .disabled(model.isLoading || model.isSeeding)
                 }
                 Button { showWorkspacePicker = true } label: { Label("Workspace", systemImage: "folder") }
             }
@@ -26,7 +27,7 @@ struct DiffView: View {
             }
             .sheet(isPresented: $showApply) { ApplySheet() }
             .task(id: model.repoRoot) {
-                if model.repoRoot != nil && model.plan == nil { await model.loadPlan() }
+                if model.repoRoot != nil && model.plan == nil { model.refreshPlan() }
             }
     }
 
@@ -40,7 +41,7 @@ struct DiffView: View {
                 Button("Choose Workspace…") { showWorkspacePicker = true }
             }
         } else if model.isSeeding {
-            ProgressView("Initializing workspace from the tenant…")
+            workingView("Initializing workspace from the tenant…")
         } else if model.needsSeed {
             seedPrompt
         } else if let plan = model.plan {
@@ -51,7 +52,7 @@ struct DiffView: View {
                 planContent(plan)
             }
         } else if model.isLoading {
-            ProgressView("Computing plan…")
+            workingView("Computing plan…")
         } else if let error = model.loadError {
             ContentUnavailableView("Couldn't compute the plan", systemImage: "exclamationmark.triangle",
                                    description: Text(error))
@@ -59,6 +60,38 @@ struct DiffView: View {
             ContentUnavailableView("No plan yet", systemImage: "arrow.triangle.branch",
                                    description: Text("Refresh to compute drift."))
         }
+    }
+
+    /// A working state with abctl's live progress narration + a Cancel button, so a long diff/
+    /// seed shows what it's doing (authenticating, fetching…) and can be stopped.
+    @ViewBuilder private func workingView(_ title: String) -> some View {
+        VStack(spacing: 12) {
+            ProgressView(title)
+            if !model.progressLog.isEmpty {
+                ScrollViewReader { proxy in
+                    ScrollView {
+                        VStack(alignment: .leading, spacing: 2) {
+                            ForEach(model.progressLog.indices, id: \.self) { idx in
+                                Text(model.progressLog[idx])
+                                    .font(.system(.caption, design: .monospaced))
+                                    .foregroundStyle(.secondary)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                    .id(idx)
+                            }
+                        }
+                        .padding(8)
+                    }
+                    .frame(maxWidth: 460, maxHeight: 160)
+                    .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 6))
+                    .onChange(of: model.progressLog.count) { _, count in
+                        if count > 0 { withAnimation { proxy.scrollTo(count - 1, anchor: .bottom) } }
+                    }
+                }
+            }
+            Button("Cancel") { model.cancelWork() }
+                .buttonStyle(.bordered)
+        }
+        .padding()
     }
 
     /// Shown when the chosen folder has no gitops/ tree yet: offer to initialize it from the
@@ -71,7 +104,7 @@ struct DiffView: View {
                  + "Initialize it from the current tenant — abctl downloads live configurations and "
                  + "blueprints into gitops/ (plus a baseline) so you can diff and apply.")
         } actions: {
-            Button("Initialize from Tenant…") { Task { await model.seedWorkspace() } }
+            Button("Initialize from Tenant…") { model.startSeed() }
                 .buttonStyle(.borderedProminent)
             Button("Choose a Different Folder…") { showWorkspacePicker = true }
                 .buttonStyle(.link)

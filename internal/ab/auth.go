@@ -142,6 +142,9 @@ func (ts *TokenSource) mint() error {
 
 	// Apple rate-limits the token endpoint (429). The bearer cache makes minting rare, but a
 	// burst can still 429 — back off and retry (respecting Retry-After) rather than hard-fail.
+	// Progress goes to stderr (never stdout, which carries JSON) so a caller — the CLI or the
+	// GUI streaming this — can see what's happening during a slow authenticate.
+	fmt.Fprintln(os.Stderr, "authenticating with Apple…")
 	for attempt := 0; ; attempt++ {
 		req, _ := http.NewRequest("POST", ts.cfg.TokenURL, strings.NewReader(form.Encode()))
 		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
@@ -167,7 +170,10 @@ func (ts *TokenSource) mint() error {
 			return nil
 		}
 		if (status == 429 || status >= 500) && attempt < maxTokenMintRetries {
-			time.Sleep(backoff(retryAfter, attempt))
+			d := backoff(retryAfter, attempt)
+			fmt.Fprintf(os.Stderr, "authentication rate-limited by Apple (HTTP %d); retrying in %s…\n",
+				status, d.Round(time.Second))
+			time.Sleep(d)
 			continue
 		}
 		msg := tr.Error

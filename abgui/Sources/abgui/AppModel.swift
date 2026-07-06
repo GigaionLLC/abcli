@@ -61,21 +61,38 @@ final class AppModel {
     // Per-screen UI state
     var isLoading = false
     var loadError: String?
+    var progressLog: [String] = [] // live stderr narration from abctl during diff/seed
+    private var workTask: Task<Void, Never>? // the in-flight diff/seed, so a Cancel button can stop it
+
+    /// Append a progress line (called from abctl's stderr stream), capped so it can't grow unbounded.
+    func appendProgress(_ line: String) {
+        progressLog.append(line)
+        if progressLog.count > 200 { progressLog.removeFirst(progressLog.count - 200) }
+    }
 
     // Write state (v2)
     var isWriting = false
     var lastWriteError: String?
 
     /// Build a client for the current context + workspace, or nil if abctl isn't found.
-    private func makeClient() -> AbctlClient? {
+    /// Pass `onProgress` to stream abctl's stderr narration (used by diff/seed for live progress).
+    private func makeClient(onProgress: (@Sendable (String) -> Void)? = nil) -> AbctlClient? {
         guard let binary = AbctlLocator.resolve() else { return nil }
-        var client = AbctlClient(runner: ProcessRunner(executable: binary))
+        var client = AbctlClient(runner: ProcessRunner(executable: binary, onStderrLine: onProgress))
         client.context = context.isEmpty ? nil : context
         client.repoRoot = repoRoot
         return client
     }
 
-    /// Point at a GitOps workspace (the dir containing `gitops/`) and recompute drift.
+    /// A progress sink that streams abctl's stderr into `progressLog` on the main actor.
+    private var progressSink: (@Sendable (String) -> Void) {
+        { [weak self] line in Task { @MainActor in self?.appendProgress(line) } }
+    }
+
+    private static let workspaceKey = "abgui.workspacePath"
+
+    /// Point at a GitOps workspace (the dir containing `gitops/`) and recompute drift. The path
+    /// is remembered so the next launch reopens it (see `restoreWorkspace`).
     func setWorkspace(_ url: URL) {
         repoRoot = url
         plan = nil
@@ -83,7 +100,28 @@ final class AppModel {
         archiveEntries = []
         needsSeed = false // recomputed by loadPlan
         loadError = nil
+        UserDefaults.standard.set(url.path, forKey: Self.workspaceKey)
     }
+
+    /// Reopen the last-used workspace on launch. abgui is non-sandboxed, so a plain saved path
+    /// works (no security-scoped bookmark needed). A path that no longer exists is ignored.
+    func restoreWorkspace() {
+        guard repoRoot == nil,
+              let path = UserDefaults.standard.string(forKey: Self.workspaceKey), !path.isEmpty else { return }
+        var isDir: ObjCBool = false
+        if FileManager.default.fileExists(atPath: path, isDirectory: &isDir), isDir.boolValue {
+            repoRoot = URL(fileURLWithPath: path, isDirectory: true)
+        }
+    }
+
+    /// Start (or restart) computing the plan as a cancellable task, so the UI can offer Cancel.
+    func refreshPlan() {
+        workTask?.cancel()
+        workTask = Task { await loadPlan() }
+    }
+
+    /// Cancel an in-flight diff/seed (terminates the abctl subprocess).
+    func cancelWork() { workTask?.cancel() }
 
     /// Scan the workspace's gitops/archive/ tree (pure filesystem — no abctl).
     func loadArchive() {
@@ -284,21 +322,46 @@ final class AppModel {
             return
         }
         needsSeed = false
-        await run { self.plan = try await $0.plan() }
+        guard let client = makeClient(onProgress: progressSink) else {
+            loadError = "abctl was not found in the app bundle."
+            return
+        }
+        isLoading = true
+        loadError = nil
+        progressLog = []
+        defer { isLoading = false }
+        do {
+            plan = try await client.plan()
+        } catch is CancellationError {
+            // user cancelled — clear the in-flight state, no error shown
+        } catch {
+            if Task.isCancelled { return } // a race: cancelled just after the process returned
+            loadError = error.localizedDescription
+        }
+    }
+
+    /// Seed the workspace as a cancellable task (so the Cancel button can stop it).
+    func startSeed() {
+        workTask?.cancel()
+        workTask = Task { _ = await seedWorkspace() }
     }
 
     /// Initialize the chosen workspace's `gitops/` tree from the tenant (`abctl seed` — reads
     /// live, writes local files), then compute drift. This is what turns a plain folder into a
     /// GitOps workspace from inside the app. Returns true on success.
     func seedWorkspace() async -> Bool {
-        guard repoRoot != nil, let client = makeClient() else {
+        guard repoRoot != nil, let client = makeClient(onProgress: progressSink) else {
             loadError = "Choose a workspace folder first."
             return false
         }
         isSeeding = true
         loadError = nil
+        progressLog = []
         do {
             _ = try await client.seed()
+        } catch is CancellationError {
+            isSeeding = false
+            return false
         } catch {
             isSeeding = false
             loadError = "Couldn't initialize the workspace from the tenant: \(error.localizedDescription)"

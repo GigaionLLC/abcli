@@ -296,6 +296,14 @@ final class ContractTests: XCTestCase {
         }
     }
 
+    @MainActor
+    func testProgressLogIsCappedAndKeepsLatest() {
+        let model = AppModel()
+        for i in 0..<500 { model.appendProgress("line \(i)") }
+        XCTAssertLessThanOrEqual(model.progressLog.count, 200, "progress log must stay bounded")
+        XCTAssertEqual(model.progressLog.last, "line 499", "the newest line must be retained")
+    }
+
     func testTimeoutErrorIsActionable() {
         // The message must name likely causes and surface abctl's last output, not just "timed out".
         let err = AbctlError.timedOut(seconds: 120, lastOutput: "  minting token…\n")

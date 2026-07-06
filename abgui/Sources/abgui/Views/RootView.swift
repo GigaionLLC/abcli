@@ -85,7 +85,10 @@ struct RootView: View {
                 detail
             }
         }
-        .task { await model.check() }
+        .task {
+            model.restoreWorkspace() // reopen the last-used GitOps folder
+            await model.check()
+        }
     }
 
     @ViewBuilder private var detail: some View {
