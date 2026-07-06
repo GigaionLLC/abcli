@@ -243,18 +243,30 @@ func getBlueprint(nameOrID string, asJSON bool) error {
 		return err
 	}
 	configs, _ := c.BlueprintRelationship(r.ID, "configurations")
+	apps, _ := c.BlueprintRelationship(r.ID, "apps")
 	devices, _ := c.BlueprintRelationship(r.ID, "orgDevices")
+	deficient, _ := r.Attr()["appLicenseDeficient"].(bool) // built-in-MDM Apps & Books signal
+	appIDs := make([]string, 0, len(apps))
+	for _, a := range apps {
+		appIDs = append(appIDs, a.ID)
+	}
 	if asJSON || flagOutput != "table" {
-		// P6: a JSON-driven detail screen needs the member counts the table shows.
+		// A JSON-driven detail screen needs the member counts + the app ids (to cross-
+		// reference `get apps`) + the license-deficient flag for built-in-MDM Apps & Books.
 		return render(outFmt(asJSON), map[string]any{
-			"blueprint": r, "configs": len(configs), "devices": len(devices),
+			"blueprint": r, "configs": len(configs), "apps": len(apps), "devices": len(devices),
+			"appIds": appIDs, "appLicenseDeficient": deficient,
 		}, nil, nil)
 	}
 	fmt.Printf("name     %s\n", r.AttrStr("name"))
 	fmt.Printf("id       %s\n", r.ID)
 	fmt.Printf("status   %s\n", r.AttrStr("status"))
 	fmt.Printf("configs  %d\n", len(configs))
+	fmt.Printf("apps     %d\n", len(apps))
 	fmt.Printf("devices  %d\n", len(devices))
+	if deficient {
+		fmt.Println("licenses ⚠ app-license-deficient (more app licenses needed than available)")
+	}
 	return nil
 }
 

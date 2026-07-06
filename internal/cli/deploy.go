@@ -41,15 +41,23 @@ func newDetachCmd() *cobra.Command { return membershipCmd("detach") }
 func membershipCmd(verb string) *cobra.Command {
 	var blueprint string
 	var yes, noWriteTree, jsonOut bool
+	prep := map[string]string{"attach": "to", "detach": "from"}[verb]
 	c := &cobra.Command{
-		Use:   verb + " config <name|id> --blueprint <name|id>",
-		Short: verb + " a configuration " + map[string]string{"attach": "to", "detach": "from"}[verb] + " a blueprint",
-		Args:  cobra.ExactArgs(2), // "config" <name>
+		Use:   verb + " <config|app> <name|id> --blueprint <name|id>",
+		Short: verb + " a configuration or app " + prep + " a blueprint",
+		Long: verb + " a configuration or an app " + prep + " a blueprint. Apps are how built-in MDM\n" +
+			"(Apple Business Essentials) deploys Apps & Books — assign an owned app to a blueprint and\n" +
+			"the blueprint's devices/users get it (`abctl get blueprint <id>` shows apps + license status).",
+		Args: cobra.ExactArgs(2), // "<config|app>" <name>
 		RunE: func(_ *cobra.Command, a []string) error {
-			if a[0] != "config" && a[0] != "configuration" {
-				return fmt.Errorf("usage: abctl %s config <name|id> --blueprint <bp>", verb)
+			switch a[0] {
+			case "config", "configuration":
+				return runMembership(verb, a[1], blueprint, yes, noWriteTree, jsonOut)
+			case "app", "apps":
+				return runAppMembership(verb, a[1], blueprint, yes, jsonOut)
+			default:
+				return fmt.Errorf("usage: abctl %s <config|app> <name|id> --blueprint <bp>", verb)
 			}
-			return runMembership(verb, a[1], blueprint, yes, noWriteTree, jsonOut)
 		},
 	}
 	c.Flags().StringVar(&blueprint, "blueprint", "", "target blueprint (name or id)")
@@ -106,6 +114,47 @@ func runMembership(verb, configArg, blueprintArg string, yes, noWriteTree, jsonO
 	}
 	fmt.Fprintf(os.Stderr, "%sed %q %s blueprint %q\n", verb, lc.Name,
 		map[string]string{"attach": "to", "detach": "from"}[verb], bpName)
+	return nil
+}
+
+// runAppMembership attaches/detaches an owned app to/from a blueprint. This is the built-in
+// MDM (Apple Business Essentials) Apps & Books path: assigning an app to a blueprint deploys
+// it to that blueprint's devices/users. App membership is NOT GitOps-tracked (the blueprint
+// manifest tracks CUSTOM_SETTING configs only), so there is no manifest write here.
+func runAppMembership(verb, appArg, blueprintArg string, yes, jsonOut bool) error {
+	prep := map[string]string{"attach": "to", "detach": "from"}[verb]
+	i, err := newImp()
+	if err != nil {
+		return err
+	}
+	app, err := i.c.ResolveApp(appArg)
+	if err != nil {
+		return err
+	}
+	bp, err := i.c.ResolveBlueprint(blueprintArg)
+	if err != nil {
+		return err
+	}
+	appName, bpName := app.AttrStr("name"), bp.AttrStr("name")
+	if !approved(yes) {
+		ok, err := confirmWrite(fmt.Sprintf("%s app %q %s blueprint %q", verb, appName, prep, bpName))
+		if err != nil || !ok {
+			fmt.Fprintln(os.Stderr, "aborted.")
+			return ExitError{Code: 1}
+		}
+	}
+	if verb == "attach" {
+		err = i.c.AddBlueprintMembers(bp.ID, "apps", "apps", []string{app.ID})
+	} else {
+		err = i.c.RemoveBlueprintMembers(bp.ID, "apps", "apps", []string{app.ID})
+	}
+	if err != nil {
+		return err
+	}
+	if wantsMachine(jsonOut) {
+		return emitWrite(writeOutcome{Action: verb, Name: appName, ID: app.ID, Blueprint: bpName}, jsonOut)
+	}
+	fmt.Fprintf(os.Stderr, "%sed app %q %s blueprint %q (app membership isn't GitOps-tracked)\n", verb, appName, prep, bpName)
 	return nil
 }
 

@@ -175,6 +175,82 @@ func TestWriteRetriesOn429(t *testing.T) {
 	}
 }
 
+// appsServer serves a small owned-app catalog on GET /apps: two distinct apps plus a
+// duplicate-named pair (to exercise the name-ambiguity path).
+func appsServer(t *testing.T) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/apps" {
+			t.Errorf("unexpected path %q, want /apps", r.URL.Path)
+		}
+		fmt.Fprint(w, `{"data":[
+			{"type":"apps","id":"361285480","attributes":{"name":"Keynote","bundleId":"com.apple.Keynote"}},
+			{"type":"apps","id":"409201541","attributes":{"name":"Pages","bundleId":"com.apple.Pages"}},
+			{"type":"apps","id":"111","attributes":{"name":"Twins","bundleId":"com.x.one"}},
+			{"type":"apps","id":"222","attributes":{"name":"Twins","bundleId":"com.x.two"}}
+		],"meta":{"paging":{"nextCursor":""}}}`)
+	}))
+}
+
+// TestResolveApp checks id/bundleId win immediately, a unique name resolves, an ambiguous
+// name errors, and an unknown value errors.
+func TestResolveApp(t *testing.T) {
+	srv := appsServer(t)
+	defer srv.Close()
+	c := testClient(srv.URL)
+
+	cases := []struct {
+		arg, wantID string
+	}{
+		{"361285480", "361285480"},       // by id (adamId)
+		{"com.apple.Pages", "409201541"}, // by bundleId
+		{"Keynote", "361285480"},         // by unique name
+	}
+	for _, tc := range cases {
+		got, err := c.ResolveApp(tc.arg)
+		if err != nil {
+			t.Fatalf("ResolveApp(%q): %v", tc.arg, err)
+		}
+		if got.ID != tc.wantID {
+			t.Errorf("ResolveApp(%q).ID = %q, want %q", tc.arg, got.ID, tc.wantID)
+		}
+	}
+	if _, err := c.ResolveApp("Twins"); err == nil {
+		t.Error("ResolveApp(ambiguous name) should error, got nil")
+	}
+	if _, err := c.ResolveApp("Nope"); err == nil {
+		t.Error("ResolveApp(unknown) should error, got nil")
+	}
+}
+
+// TestAddBlueprintMembersApps locks the built-in-MDM Apps & Books write: a POST to
+// /blueprints/{id}/relationships/apps carrying {data:[{type:apps,id}]}.
+func TestAddBlueprintMembersApps(t *testing.T) {
+	var gotBody map[string]any
+	var method, path string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		method, path = r.Method, r.URL.Path
+		_ = json.NewDecoder(r.Body).Decode(&gotBody)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer srv.Close()
+
+	if err := testClient(srv.URL).AddBlueprintMembers("bp-1", "apps", "apps", []string{"361285480"}); err != nil {
+		t.Fatal(err)
+	}
+	if method != "POST" || path != "/blueprints/bp-1/relationships/apps" {
+		t.Fatalf("got %s %s, want POST /blueprints/bp-1/relationships/apps", method, path)
+	}
+	data, _ := gotBody["data"].([]any)
+	if len(data) != 1 {
+		t.Fatalf("body data len = %d, want 1", len(data))
+	}
+	m, _ := data[0].(map[string]any)
+	if m["type"] != "apps" || m["id"] != "361285480" {
+		t.Errorf("member = %v, want {type:apps, id:361285480}", m)
+	}
+}
+
 // TestWriteErrorMapsAPIError verifies a non-2xx write surfaces a typed *APIError.
 func TestWriteErrorMapsAPIError(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {

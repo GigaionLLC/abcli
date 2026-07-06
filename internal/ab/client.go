@@ -314,6 +314,34 @@ func (c *Client) ResolveBlueprint(nameOrID string) (*Resource, error) {
 
 func looksLikeID(s string) bool { return len(s) == 36 && strings.Count(s, "-") == 4 }
 
+// ResolveApp finds an owned app by id, bundleId, or name. id/bundleId are unique so they
+// win immediately; name may collide, so a name that matches >1 app is an error (caller
+// should use the id/bundleId). App ids are numeric adamIds, not UUIDs, so looksLikeID never
+// matches — always list and match here.
+func (c *Client) ResolveApp(nameOrID string) (*Resource, error) {
+	apps, err := c.ListApps()
+	if err != nil {
+		return nil, err
+	}
+	var byName []*Resource
+	for i := range apps {
+		if apps[i].ID == nameOrID || apps[i].AttrStr("bundleId") == nameOrID {
+			return &apps[i], nil
+		}
+		if apps[i].AttrStr("name") == nameOrID {
+			byName = append(byName, &apps[i])
+		}
+	}
+	switch len(byName) {
+	case 1:
+		return byName[0], nil
+	case 0:
+		return nil, fmt.Errorf("app %q not found (by name, bundleId, or id)", nameOrID)
+	default:
+		return nil, fmt.Errorf("app name %q is ambiguous (%d owned apps share it) — use the app id or bundleId", nameOrID, len(byName))
+	}
+}
+
 // LiveConfig is a CUSTOM_SETTING configuration with its raw profile XML.
 type LiveConfig struct {
 	Name    string
