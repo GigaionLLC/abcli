@@ -20,9 +20,9 @@ var capabilities = []string{
 	"list-empty-array",      // N3: empty lists serialize as []
 	"version-json",          // P2: this command
 	"blueprint-counts-json", // P6: get blueprint --json member counts
-	"vpp-read",              // Apps & Books (VPP) read: vpp config|assets|assignments|users
-	"vpp-names",             // vpp assets resolves names via the iTunes lookup
-	"vpp-write",             // vpp associate|disassociate|status (gated)
+	// VPP content-token capabilities are intentionally NOT advertised: the `vpp` path is
+	// disabled by default (no content token under Apple Business Essentials). They are
+	// re-added when ABCTL_ENABLE_VPP-gated support is re-enabled for 3rd-party-MDM orgs.
 }
 
 // versionInfo is the machine-readable build identity + capability set (P2). A GUI reads

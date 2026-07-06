@@ -11,15 +11,43 @@ import (
 	"github.com/GigaionLLC/abcli/internal/vpp"
 )
 
+// vppEnabled reports whether the (disabled-by-default) VPP content-token path is force-
+// enabled via $ABCTL_ENABLE_VPP. It's disabled because a content token isn't available
+// while Apple Business Essentials (built-in MDM) is the MDM — for built-in MDM, assign
+// apps via blueprints (`abctl attach app … --blueprint …`).
+func vppEnabled() bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("ABCTL_ENABLE_VPP"))) {
+	case "1", "true", "yes", "y", "on":
+		return true
+	}
+	return false
+}
+
 func newVPPCmd() *cobra.Command {
 	c := &cobra.Command{
-		Use:   "vpp",
-		Short: "Apps & Books (VPP) license inventory — read-only (App and Book Management API v2)",
-		Long: "vpp reads the organization's Apps & Books license inventory from Apple's App and\n" +
-			"Book Management API (vpp.itunes.apple.com/mdm/v2) — a SEPARATE service from the\n" +
-			"Business API, authenticated with a content token (sToken) from Apple Business\n" +
-			"Manager → Apps and Books → content token. Read-only.\n" +
-			"Token resolution: --vpp-token, else $AB_VPP_TOKEN, else $AB_VPP_TOKEN_FILE (a path).",
+		Use:    "vpp",
+		Short:  "Apps & Books via a VPP content token (DISABLED; for 3rd-party-MDM orgs only)",
+		Hidden: true, // hidden + gated: kept for non-Essentials orgs, not removed
+		Long: "vpp reads/writes Apps & Books via Apple's App and Book Management API v2\n" +
+			"(vpp.itunes.apple.com/mdm/v2), authenticated with a content token (sToken).\n\n" +
+			"DISABLED by default: a content token is NOT available while Apple Business\n" +
+			"Essentials (built-in MDM) is your MDM — so this path can't be used or tested on\n" +
+			"such an org. For built-in MDM, manage Apps & Books via blueprints instead\n" +
+			"(`abctl get blueprint <id>` shows apps + license status; `abctl attach app …`).\n" +
+			"To force-enable for a 3rd-party-MDM org with a content token: ABCTL_ENABLE_VPP=1.",
+		// Gate every vpp subcommand; still honor the global -o validation.
+		PersistentPreRunE: func(*cobra.Command, []string) error {
+			if err := validOutput(flagOutput); err != nil {
+				return err
+			}
+			if !vppEnabled() {
+				return fmt.Errorf("`abctl vpp` is disabled: a VPP content token isn't available under Apple " +
+					"Business Essentials (built-in MDM). For built-in MDM, assign apps via blueprints " +
+					"(`abctl attach app <name|id> --blueprint <bp>`; `abctl get blueprint <id>` shows apps + " +
+					"license status). To force-enable this path for a 3rd-party-MDM org: ABCTL_ENABLE_VPP=1")
+			}
+			return nil
+		},
 	}
 	c.PersistentFlags().String("vpp-token", "", "VPP content token (sToken); else $AB_VPP_TOKEN / $AB_VPP_TOKEN_FILE")
 	c.AddCommand(

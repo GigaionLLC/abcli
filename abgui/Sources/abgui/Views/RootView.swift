@@ -57,7 +57,10 @@ struct RootView: View {
         }
 
         static let gitopsItems: [SidebarItem] = [.configurations, .blueprints, .diff, .archive]
-        static let readOnlyItems: [SidebarItem] = [.devices, .users, .userGroups, .apps, .packages, .mdmServers, .audit, .appsBooks]
+        // .appsBooks (VPP content-token screen) is intentionally omitted while the VPP path
+        // is disabled — a content token isn't available under Apple Business Essentials.
+        // The case + VPPView are kept so it can be re-enabled (add .appsBooks back here).
+        static let readOnlyItems: [SidebarItem] = [.devices, .users, .userGroups, .apps, .packages, .mdmServers, .audit]
     }
 
     var body: some View {

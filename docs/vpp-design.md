@@ -1,5 +1,14 @@
 # VPP / Apps & Books — design + verified API reference
 
+> **⚠️ DISABLED (kept, not removed).** This content-token path only applies to orgs on a
+> **third-party MDM**. Under **Apple Business Essentials** (Apple's built-in MDM — what
+> Gigaion uses), Apple does **not** expose a VPP content token, so this path can't be used
+> or tested here. It is therefore **disabled by default**: `abctl vpp` is hidden and errors
+> unless `ABCTL_ENABLE_VPP=1`, and the abgui "Apps & Books (VPP)" screen is removed from the
+> sidebar. All the code is kept so it can be re-enabled if a testable token ever exists.
+> **For built-in MDM, manage Apps & Books via blueprints** — see [design-abctl.md](design-abctl.md)
+> and `abctl get blueprint <id>` (apps + `appLicenseDeficient`) / `abctl attach app … --blueprint …`.
+
 `abctl` speaks two Apple services. The **Apple Business API** (`api-business.apple.com/v1`,
 ES256 client-assertion) drives built-in-MDM Configurations + Blueprints. **Apps & Books
 license management** — how many app/book licenses the org owns, and who they're assigned to
