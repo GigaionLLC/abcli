@@ -50,8 +50,9 @@ reuses your `abctl` connection contexts, and re-implements none of the API — i
 CLI, decodes its JSON, and renders it.
 
 - **Browse — read-only where the API is:** Configurations & Blueprints, plus clearly-badged **read-only**
-  views of Devices, Users (with roles), User Groups, Apps & Books, Packages, MDM Servers, and the audit log
-  — each with a full-resource JSON inspector, grouped in the sidebar as *GitOps* vs *Read-only*.
+  views of Devices, Users (with roles), User Groups, Apps (catalog), Packages, MDM Servers, the audit log,
+  and **Apps & Books (VPP)** license inventory — each with a full-resource inspector, grouped in the sidebar
+  as *GitOps* vs *Read-only*.
 - **The GitOps hero:** a visual 3-way **diff / drift** view and a gated **`sync --apply`** with `--prune`
   and `--limit-writes` as explicit toggles.
 - **Write, gated:** create / edit / delete configs and attach / detach blueprint membership — each behind an
@@ -259,6 +260,7 @@ It's the same logic the workflows run, so local and CI never disagree.
 - **[docs/cicd.md](docs/cicd.md)** — the GitOps CI/CD pipelines (plan / apply / drift) and how to set them up.
 - **[docs/imperative-cli.md](docs/imperative-cli.md)** — design + roadmap for the imperative CLI + signed binary release.
 - **[docs/abgui-design.md](docs/abgui-design.md)** — the abgui (native macOS GUI) design plan.
+- **[docs/vpp-design.md](docs/vpp-design.md)** — Apps & Books (VPP) — verified App-and-Book-Management-API-v2 reference + plan.
 - **[abgui/README.md](abgui/README.md)** — the desktop app: scope, layout, and how to build / run it.
 - **[docs/auth.md](docs/auth.md)** + **[docs/endpoints/](docs/endpoints/)** — the *live-verified* Apple Business API reference.
 - **[HANDOFF.md](HANDOFF.md)** / **[TODO.md](TODO.md)** — current state and roadmap.
