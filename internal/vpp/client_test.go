@@ -1,11 +1,58 @@
 package vpp
 
 import (
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 )
+
+// TestAssociateAssets: the POST hits /assets/associate with a Bearer + JSON body carrying
+// assets/serials/users, and the async eventId decodes.
+func TestAssociateAssets(t *testing.T) {
+	var gotPath, gotAuth, gotCT string
+	var gotBody manageAssetsRequest
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath, gotAuth, gotCT = r.URL.Path, r.Header.Get("Authorization"), r.Header.Get("Content-Type")
+		_ = json.NewDecoder(r.Body).Decode(&gotBody)
+		_, _ = w.Write([]byte(`{"eventId":"evt-123","uId":"u","tokenExpirationDate":"2030-01-01T00:00:00+0000"}`))
+	}))
+	defer srv.Close()
+
+	res, err := NewClient("TOK", srv.URL).AssociateAssets(
+		[]AssetRef{{AdamID: "408709785", PricingParam: "STDQ"}}, []string{"SER1", "SER2"}, []string{"user-1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.EventID != "evt-123" {
+		t.Errorf("eventId = %q", res.EventID)
+	}
+	if gotPath != "/assets/associate" || gotAuth != "Bearer TOK" || gotCT != "application/json" {
+		t.Errorf("request: path=%q auth=%q ct=%q", gotPath, gotAuth, gotCT)
+	}
+	if len(gotBody.Assets) != 1 || gotBody.Assets[0].AdamID != "408709785" || gotBody.Assets[0].PricingParam != "STDQ" {
+		t.Errorf("assets body = %+v", gotBody.Assets)
+	}
+	if len(gotBody.SerialNumbers) != 2 || len(gotBody.ClientUserIDs) != 1 {
+		t.Errorf("serials=%v users=%v", gotBody.SerialNumbers, gotBody.ClientUserIDs)
+	}
+}
+
+func TestDisassociateUsesDisassociatePath(t *testing.T) {
+	var gotPath string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		_, _ = w.Write([]byte(`{"eventId":"e"}`))
+	}))
+	defer srv.Close()
+	if _, err := NewClient("t", srv.URL).DisassociateAssets([]AssetRef{{AdamID: "1"}}, []string{"S"}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if gotPath != "/assets/disassociate" {
+		t.Errorf("path = %q", gotPath)
+	}
+}
 
 // TestServiceConfigAndAuthHeader: the token is sent as `Authorization: Bearer <token>`,
 // and the config (urls + limits) decodes.

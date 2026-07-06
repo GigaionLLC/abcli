@@ -103,10 +103,24 @@ abgui shells out to `abctl vpp … -o json` and renders — no new API code in S
 like the other read-only screens. The content token is configured out-of-band (env/flag);
 abgui never handles the token bytes.
 
-## 5. Writes (later)
+## 5. Writes — built (gated), live-test pending a token
 
-`associate`/`disassociate` assign/unassign licenses (batch: ≤25 assets × ≤1000 serials or
-client-user-ids per call; async — returns an event id, poll `/status`). These are genuine
-tenant mutations that consume/reassign licenses, so they land **after** read-only browse is
-solid and only behind abctl's standard `--yes`/confirm gating (and abgui's own confirm) —
-mirroring how config/blueprint writes were staged.
+`associate`/`disassociate` assign/unassign licenses via `POST /assets/associate` ·
+`/assets/disassociate` with the symmetric `ManageAssetsRequest` body
+`{assets:[{adamId,pricingParam}], clientUserIds:[], serialNumbers:[]}` → async
+`EventResponse{eventId,…}`. Batch limits (service config): ≤25 assets, ≤1000 serials or
+client-user-ids per call. Poll completion with `GET /status?eventId=`.
+
+Shipped in abctl (read + write, all httptest-verified):
+
+| Command | Endpoint | Notes |
+|---|---|---|
+| `abctl vpp associate   --adam-id N [--pricing STDQ] --serial S… --user U… [--yes]` | `POST /assets/associate` | gated write; async → eventId |
+| `abctl vpp disassociate --adam-id N … [--yes]` | `POST /assets/disassociate` | gated write; async → eventId |
+| `abctl vpp status <eventId>` | `GET /status?eventId=` | poll; raw map (shape field-checked live) |
+
+Gating mirrors config/blueprint writes: confirm unless `--yes`/`$ABCTL_APPROVE`. These are
+genuine tenant mutations (they consume/reassign licenses), so **live verification is
+deferred until a fresh content token exists** — they can't be safely exercised against real
+licenses before then. The `/status` response shape is modeled and will be confirmed live.
+abgui write UI (a confirm dialog over these) lands once reads are live-verified.

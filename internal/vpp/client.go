@@ -9,6 +9,7 @@
 package vpp
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -56,9 +57,6 @@ func (e APIError) Error() string {
 
 // get performs an authenticated GET and decodes the JSON body into out.
 func (c *Client) get(path string, q url.Values, out any) error {
-	if c.Token == "" {
-		return fmt.Errorf("no VPP content token (set --vpp-token, $AB_VPP_TOKEN, or $AB_VPP_TOKEN_FILE)")
-	}
 	u := c.Base + path
 	if len(q) > 0 {
 		u += "?" + q.Encode()
@@ -66,6 +64,28 @@ func (c *Client) get(path string, q url.Values, out any) error {
 	req, err := http.NewRequest(http.MethodGet, u, nil)
 	if err != nil {
 		return err
+	}
+	return c.do(req, out)
+}
+
+// post performs an authenticated POST of a JSON body and decodes the response into out.
+func (c *Client) post(path string, body, out any) error {
+	payload, err := json.Marshal(body)
+	if err != nil {
+		return err
+	}
+	req, err := http.NewRequest(http.MethodPost, c.Base+path, bytes.NewReader(payload))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	return c.do(req, out)
+}
+
+// do sends an authenticated request and decodes the JSON body into out.
+func (c *Client) do(req *http.Request, out any) error {
+	if c.Token == "" {
+		return fmt.Errorf("no VPP content token (set --vpp-token, $AB_VPP_TOKEN, or $AB_VPP_TOKEN_FILE)")
 	}
 	req.Header.Set("Authorization", "Bearer "+c.Token)
 	req.Header.Set("Accept", "application/json")
@@ -279,4 +299,59 @@ func setNonEmpty(q url.Values, key, val string) {
 	if val != "" {
 		q.Set(key, val)
 	}
+}
+
+// --- writes: associate / disassociate licenses (async) ---
+
+// AssetRef identifies a licensed product to (dis)associate.
+type AssetRef struct {
+	AdamID       string `json:"adamId"`
+	PricingParam string `json:"pricingParam,omitempty"`
+}
+
+// manageAssetsRequest is the body for /assets/associate and /assets/disassociate.
+type manageAssetsRequest struct {
+	Assets        []AssetRef `json:"assets"`
+	ClientUserIDs []string   `json:"clientUserIds,omitempty"`
+	SerialNumbers []string   `json:"serialNumbers,omitempty"`
+}
+
+// EventResult is the async response to associate/disassociate: an eventId to poll.
+type EventResult struct {
+	EventID         string `json:"eventId"`
+	TokenExpiration string `json:"tokenExpirationDate,omitempty"`
+	UID             string `json:"uId,omitempty"`
+}
+
+// AssociateAssets assigns licenses for the given assets to devices (serials) and/or users
+// (clientUserIds). Async — returns an eventId; poll EventStatus for completion. Batch
+// limits (from service config): <=25 assets, <=1000 serials or clientUserIds.
+func (c *Client) AssociateAssets(assets []AssetRef, serials, clientUserIDs []string) (*EventResult, error) {
+	return c.manageAssets("/assets/associate", assets, serials, clientUserIDs)
+}
+
+// DisassociateAssets unassigns licenses (symmetric with AssociateAssets).
+func (c *Client) DisassociateAssets(assets []AssetRef, serials, clientUserIDs []string) (*EventResult, error) {
+	return c.manageAssets("/assets/disassociate", assets, serials, clientUserIDs)
+}
+
+func (c *Client) manageAssets(path string, assets []AssetRef, serials, clientUserIDs []string) (*EventResult, error) {
+	var out EventResult
+	err := c.post(path, manageAssetsRequest{Assets: assets, SerialNumbers: serials, ClientUserIDs: clientUserIDs}, &out)
+	if err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// EventStatus polls an async associate/disassociate event by id. The response shape is
+// returned as a raw map (its exact fields are field-checked live) so no field is lost.
+func (c *Client) EventStatus(eventID string) (map[string]any, error) {
+	q := url.Values{}
+	q.Set("eventId", eventID)
+	var out map[string]any
+	if err := c.get("/status", q, &out); err != nil {
+		return nil, err
+	}
+	return out, nil
 }

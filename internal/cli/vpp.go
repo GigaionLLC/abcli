@@ -22,7 +22,10 @@ func newVPPCmd() *cobra.Command {
 			"Token resolution: --vpp-token, else $AB_VPP_TOKEN, else $AB_VPP_TOKEN_FILE (a path).",
 	}
 	c.PersistentFlags().String("vpp-token", "", "VPP content token (sToken); else $AB_VPP_TOKEN / $AB_VPP_TOKEN_FILE")
-	c.AddCommand(newVPPConfigCmd(), newVPPAssetsCmd(), newVPPAssignmentsCmd(), newVPPUsersCmd())
+	c.AddCommand(
+		newVPPConfigCmd(), newVPPAssetsCmd(), newVPPAssignmentsCmd(), newVPPUsersCmd(),
+		newVPPManageCmd("associate"), newVPPManageCmd("disassociate"), newVPPStatusCmd(),
+	)
 	return c
 }
 
@@ -186,6 +189,94 @@ func newVPPAssignmentsCmd() *cobra.Command {
 	c.Flags().StringVar(&adamID, "adam-id", "", "filter by product adamId")
 	c.Flags().StringVar(&serial, "serial", "", "filter by device serial number")
 	c.Flags().StringVar(&user, "user", "", "filter by clientUserId")
+	return c
+}
+
+// newVPPManageCmd builds `vpp associate` / `vpp disassociate` — GATED license writes.
+func newVPPManageCmd(verb string) *cobra.Command {
+	var adamIDs, serials, users []string
+	var pricing string
+	var yes, asJSON bool
+	prep := map[string]string{"associate": "to", "disassociate": "from"}[verb]
+	c := &cobra.Command{
+		Use:   verb,
+		Short: verb + " app/book licenses " + prep + " devices (--serial) and/or users (--user)",
+		Long: verb + " assigns" + map[string]string{"associate": "", "disassociate": "/unassigns"}[verb] +
+			" one or more assets " + prep + " devices and/or users. This is an ASYNC tenant write —\n" +
+			"it returns an eventId; poll it with `abctl vpp status <eventId>`. Gated: confirm unless\n" +
+			"--yes / $ABCTL_APPROVE. Limits: <=25 assets, <=1000 serials or users per call.",
+		Args: cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			if len(adamIDs) == 0 {
+				return fmt.Errorf("need at least one --adam-id")
+			}
+			if len(serials) == 0 && len(users) == 0 {
+				return fmt.Errorf("need at least one --serial (device) or --user (clientUserId)")
+			}
+			cl, err := vppClient(cmd)
+			if err != nil {
+				return err
+			}
+			assets := make([]vpp.AssetRef, 0, len(adamIDs))
+			for _, id := range adamIDs {
+				assets = append(assets, vpp.AssetRef{AdamID: id, PricingParam: pricing})
+			}
+			if !approved(yes) {
+				desc := fmt.Sprintf("%s %d asset(s) %s %d device(s) + %d user(s)", verb, len(adamIDs), prep, len(serials), len(users))
+				ok, cerr := confirmWrite(desc)
+				if cerr != nil || !ok {
+					fmt.Fprintln(os.Stderr, "aborted.")
+					return ExitError{Code: 1}
+				}
+			}
+			var res *vpp.EventResult
+			if verb == "associate" {
+				res, err = cl.AssociateAssets(assets, serials, users)
+			} else {
+				res, err = cl.DisassociateAssets(assets, serials, users)
+			}
+			if err != nil {
+				return err
+			}
+			if asJSON || flagOutput != "table" {
+				return render(outFmt(asJSON), res, nil, nil)
+			}
+			fmt.Printf("%s queued ✓  eventId %s\n", verb, res.EventID)
+			fmt.Fprintf(os.Stderr, "poll: abctl vpp status %s\n", res.EventID)
+			return nil
+		},
+	}
+	c.Flags().StringArrayVar(&adamIDs, "adam-id", nil, "product adamId (repeatable)")
+	c.Flags().StringVar(&pricing, "pricing", "STDQ", "pricing param: STDQ | PLUS")
+	c.Flags().StringArrayVar(&serials, "serial", nil, "device serial number (repeatable)")
+	c.Flags().StringArrayVar(&users, "user", nil, "clientUserId (repeatable)")
+	c.Flags().BoolVar(&yes, "yes", false, "skip confirmation (also: $ABCTL_APPROVE=1)")
+	c.Flags().BoolVar(&asJSON, "json", false, "JSON output")
+	return c
+}
+
+// newVPPStatusCmd polls an async associate/disassociate event.
+func newVPPStatusCmd() *cobra.Command {
+	c := &cobra.Command{
+		Use:   "status <eventId>",
+		Short: "Poll an async associate/disassociate event",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, a []string) error {
+			cl, err := vppClient(cmd)
+			if err != nil {
+				return err
+			}
+			st, err := cl.EventStatus(a[0])
+			if err != nil {
+				return err
+			}
+			format := flagOutput
+			if format == "table" { // no meaningful table for a raw event map
+				format = "json"
+			}
+			return render(format, st, nil, nil)
+		},
+	}
 	return c
 }
 

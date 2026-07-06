@@ -21,6 +21,8 @@ var capabilities = []string{
 	"version-json",          // P2: this command
 	"blueprint-counts-json", // P6: get blueprint --json member counts
 	"vpp-read",              // Apps & Books (VPP) read: vpp config|assets|assignments|users
+	"vpp-names",             // vpp assets resolves names via the iTunes lookup
+	"vpp-write",             // vpp associate|disassociate|status (gated)
 }
 
 // versionInfo is the machine-readable build identity + capability set (P2). A GUI reads
