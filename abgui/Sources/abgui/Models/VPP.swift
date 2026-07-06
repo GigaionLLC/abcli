@@ -4,6 +4,7 @@ import Foundation
 
 /// One owned app/book + its license counts (`abctl vpp assets`).
 struct VPPAsset: Decodable, Identifiable {
+    let name: String?  // resolved by abctl via the iTunes lookup (may be absent)
     let adamId: String
     let productType: String?
     let pricingParam: String?

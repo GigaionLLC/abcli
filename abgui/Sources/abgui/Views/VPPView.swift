@@ -79,6 +79,7 @@ struct VPPView: View {
         switch tab {
         case 0:
             VPPTable(items: model.vppAssets, columns: [
+                VPPCol(title: "Name", value: { $0.name ?? $0.adamId }),
                 VPPCol(title: "Adam ID", value: { $0.adamId }),
                 VPPCol(title: "Type", value: { $0.productType ?? "—" }),
                 VPPCol(title: "Pricing", value: { $0.pricingParam ?? "—" }),

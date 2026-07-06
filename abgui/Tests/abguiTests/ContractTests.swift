@@ -206,11 +206,12 @@ final class ContractTests: XCTestCase {
 
     func testVPPAssetDecodes() async throws {
         // Matches `abctl vpp assets -o json` (internal/vpp.Asset).
-        let json = #"[{"adamId":"408709785","productType":"App","pricingParam":"STDQ","availableCount":42,"assignedCount":8,"retiredCount":0,"totalCount":50,"deviceAssignable":true,"revocable":true,"supportedPlatforms":["iOS","macOS"]}]"#
+        let json = #"[{"name":"WhatsApp Messenger","adamId":"408709785","productType":"App","pricingParam":"STDQ","availableCount":42,"assignedCount":8,"retiredCount":0,"totalCount":50,"deviceAssignable":true,"revocable":true,"supportedPlatforms":["iOS","macOS"]}]"#
         let client = AbctlClient(runner: MockAbctlRunner(responses: ["vpp assets": MockAbctlRunner.ok(json)]))
         let assets = try await client.vppAssets(token: "tok")
         XCTAssertEqual(assets.count, 1)
         let asset = assets[0]
+        XCTAssertEqual(asset.name, "WhatsApp Messenger")
         XCTAssertEqual(asset.adamId, "408709785")
         XCTAssertEqual(asset.availableCount, 42)
         XCTAssertEqual(asset.totalCount, 50)
