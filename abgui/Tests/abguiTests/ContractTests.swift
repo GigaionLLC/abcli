@@ -269,9 +269,18 @@ final class ContractTests: XCTestCase {
         do {
             _ = try await runner.run(["5"], cwd: nil, stdin: nil, timeout: .milliseconds(150))
             XCTFail("expected a timeout")
-        } catch AbctlError.timedOut {
-            // expected
+        } catch let error as AbctlError {
+            guard case .timedOut = error else { return XCTFail("expected .timedOut, got \(error)") }
         }
+    }
+
+    func testTimeoutErrorIsActionable() {
+        // The message must name likely causes and surface abctl's last output, not just "timed out".
+        let err = AbctlError.timedOut(seconds: 120, lastOutput: "  minting token…\n")
+        let desc = err.errorDescription ?? ""
+        XCTAssertTrue(desc.contains("120s"), "should say how long it waited: \(desc)")
+        XCTAssertTrue(desc.contains("network") && desc.contains("gitops/"), "should name likely causes: \(desc)")
+        XCTAssertTrue(desc.contains("minting token"), "should surface abctl's last output: \(desc)")
     }
 
     func testContextListDecodes() async throws {

@@ -8,7 +8,7 @@ enum AbctlError: Error, LocalizedError {
     case usage(String)        // any other non-0/non-3 exit — likely an argv bug in abgui
     case decode(Error)        // exit 0 but stdout did not decode
     case changesPending       // exit 3: a NORMAL "drift/plan pending" state, not a failure
-    case timedOut             // the child outstayed its timeout and was terminated
+    case timedOut(seconds: Int, lastOutput: String) // outstayed its timeout — carries what abctl last printed
 
     var errorDescription: String? {
         switch self {
@@ -16,7 +16,18 @@ enum AbctlError: Error, LocalizedError {
         case .usage(let s): return "unexpected abctl exit: \(s)"
         case .decode(let e): return "could not decode abctl output: \(e.localizedDescription)"
         case .changesPending: return "changes pending."
-        case .timedOut: return "abctl timed out and was stopped."
+        case .timedOut(let seconds, let lastOutput):
+            // Timeouts are almost always the network round-trip to Apple, so name the likely
+            // causes and show whatever abctl managed to print before it hung.
+            let waited = seconds >= 1 ? "\(seconds)s" : "under a second"
+            var msg = "abctl ran for \(waited) without finishing and was stopped. It reaches Apple's API "
+                + "(api-business.apple.com and account.apple.com) for live data, so this is usually a slow or "
+                + "blocked network (VPN/proxy/firewall), a rate-limited token, or credentials that aren't set. "
+                + "Check the connection dot in the sidebar; for diff/apply, also confirm the chosen folder "
+                + "contains a gitops/ tree."
+            let tail = lastOutput.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !tail.isEmpty { msg += "\n\nLast output from abctl:\n\(tail)" }
+            return msg
         }
     }
 }
@@ -92,9 +103,10 @@ struct AbctlClient {
     }
 
     /// The 3-way plan. `diff --json` prints it and exits 0 — drift is a non-empty plan.
-    /// Resolved against the workspace (cwd), where the `gitops/` tree lives.
+    /// Resolved against the workspace (cwd), where the `gitops/` tree lives. Diff makes live
+    /// API calls (and may mint/refresh a token), so it gets a longer budget than a plain read.
     func plan() async throws -> Plan {
-        try await decodeJSON(Plan.self, ["diff", "--json"], cwd: repoRoot)
+        try await decodeJSON(Plan.self, ["diff", "--json"], cwd: repoRoot, timeout: .seconds(120))
     }
 
     /// Reconcile the tenant to the workspace's git desired state (gated; abgui confirms

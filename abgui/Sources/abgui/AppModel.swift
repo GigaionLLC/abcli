@@ -268,7 +268,27 @@ final class AppModel {
 
     func loadConfigurations() async { await run { self.configurations = try await $0.configurations() } }
     func loadBlueprints() async { await run { self.blueprints = try await $0.blueprints() } }
-    func loadPlan() async { await run { self.plan = try await $0.plan() } }
+
+    func loadPlan() async {
+        // Fast pre-flight: diff resolves the tree at <workspace>/gitops. If that's absent, the
+        // folder isn't a GitOps workspace — say so instantly instead of making the user wait out
+        // a network diff (and a possible timeout) against a tree that has nothing to compare.
+        if let root = repoRoot, !Self.hasGitopsTree(root) {
+            plan = nil
+            loadError = "No gitops/ tree in \"\(root.lastPathComponent)\". Choose the folder that contains "
+                + "your gitops/ directory, or seed one first with the CLI (abctl pull / abctl seed). Diff "
+                + "compares that tree against the tenant — an empty folder has nothing to compare."
+            return
+        }
+        await run { self.plan = try await $0.plan() }
+    }
+
+    /// True when `root/gitops/` exists and is a directory (the abctl tree root).
+    private static func hasGitopsTree(_ root: URL) -> Bool {
+        var isDir: ObjCBool = false
+        let path = root.appendingPathComponent("gitops", isDirectory: true).path
+        return FileManager.default.fileExists(atPath: path, isDirectory: &isDir) && isDir.boolValue
+    }
 
     /// The currently-loaded rows for a read-only resource.
     func readItems(_ kind: ReadOnlyKind) -> [Resource] {

@@ -52,7 +52,12 @@ actor ProcessRunner: AbctlRunner {
         watchdog.cancel()
         var timedOut = false
         do { try await watchdog.value; timedOut = true } catch { timedOut = false }
-        if timedOut { throw AbctlError.timedOut }
+        if timedOut {
+            // Hand back what abctl printed before it hung (usually the most diagnostic thing)
+            // plus how long we waited, so the UI can show an actionable message, not just "timed out".
+            throw AbctlError.timedOut(seconds: Int(timeout.components.seconds),
+                                      lastOutput: String(decoding: stderr, as: UTF8.self))
+        }
 
         return AbctlResult(
             stdout: stdout,
