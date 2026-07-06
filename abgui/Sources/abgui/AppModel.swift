@@ -55,6 +55,8 @@ final class AppModel {
     var repoRoot: URL?
     var applyResult: ApplyResult?
     var archiveEntries: [ArchiveEntry] = []
+    var needsSeed = false  // workspace chosen but has no gitops/ tree yet → offer to initialize
+    var isSeeding = false  // `abctl seed` in flight
 
     // Per-screen UI state
     var isLoading = false
@@ -79,6 +81,8 @@ final class AppModel {
         plan = nil
         applyResult = nil
         archiveEntries = []
+        needsSeed = false // recomputed by loadPlan
+        loadError = nil
     }
 
     /// Scan the workspace's gitops/archive/ tree (pure filesystem — no abctl).
@@ -271,16 +275,39 @@ final class AppModel {
 
     func loadPlan() async {
         // Fast pre-flight: diff resolves the tree at <workspace>/gitops. If that's absent, the
-        // folder isn't a GitOps workspace — say so instantly instead of making the user wait out
-        // a network diff (and a possible timeout) against a tree that has nothing to compare.
+        // folder isn't a GitOps workspace yet — surface the "needs seed" state (DiffView offers
+        // to initialize it) instead of waiting out a network diff that has nothing to compare.
         if let root = repoRoot, !Self.hasGitopsTree(root) {
             plan = nil
-            loadError = "No gitops/ tree in \"\(root.lastPathComponent)\". Choose the folder that contains "
-                + "your gitops/ directory, or seed one first with the CLI (abctl pull / abctl seed). Diff "
-                + "compares that tree against the tenant — an empty folder has nothing to compare."
+            loadError = nil
+            needsSeed = true
             return
         }
+        needsSeed = false
         await run { self.plan = try await $0.plan() }
+    }
+
+    /// Initialize the chosen workspace's `gitops/` tree from the tenant (`abctl seed` — reads
+    /// live, writes local files), then compute drift. This is what turns a plain folder into a
+    /// GitOps workspace from inside the app. Returns true on success.
+    func seedWorkspace() async -> Bool {
+        guard repoRoot != nil, let client = makeClient() else {
+            loadError = "Choose a workspace folder first."
+            return false
+        }
+        isSeeding = true
+        loadError = nil
+        do {
+            _ = try await client.seed()
+        } catch {
+            isSeeding = false
+            loadError = "Couldn't initialize the workspace from the tenant: \(error.localizedDescription)"
+            return false
+        }
+        isSeeding = false
+        needsSeed = false
+        await loadPlan() // tree exists now → drift (a fresh seed should read back in sync)
+        return true
     }
 
     /// True when `root/gitops/` exists and is a directory (the abctl tree root).

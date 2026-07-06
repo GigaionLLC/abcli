@@ -109,6 +109,17 @@ struct AbctlClient {
         try await decodeJSON(Plan.self, ["diff", "--json"], cwd: repoRoot, timeout: .seconds(120))
     }
 
+    /// Initialize (or refresh) the workspace's GitOps tree from live tenant state: `abctl seed`
+    /// downloads live configurations + blueprints into `<workspace>/gitops/` plus a baseline,
+    /// creating the tree if it doesn't exist. Reads the tenant and writes LOCAL files only (no
+    /// tenant mutation, so no --yes gate). Output is human text, not JSON.
+    @discardableResult
+    func seed() async throws -> String {
+        let result = try await runner.run(argv(["seed"]), cwd: repoRoot, stdin: nil, timeout: .seconds(120))
+        try Self.checkExit(result)
+        return String(decoding: result.stdout, as: UTF8.self)
+    }
+
     /// Reconcile the tenant to the workspace's git desired state (gated; abgui confirms
     /// first, so --yes). `--prune` allows deletes/detaches; `--limit-writes` caps writes.
     func syncApply(prune: Bool, limitWrites: Int?) async throws -> ApplyResult {

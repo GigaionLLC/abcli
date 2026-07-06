@@ -39,6 +39,10 @@ struct DiffView: View {
             } actions: {
                 Button("Choose Workspace…") { showWorkspacePicker = true }
             }
+        } else if model.isSeeding {
+            ProgressView("Initializing workspace from the tenant…")
+        } else if model.needsSeed {
+            seedPrompt
         } else if let plan = model.plan {
             if plan.isEmpty {
                 ContentUnavailableView("In sync", systemImage: "checkmark.seal",
@@ -54,6 +58,26 @@ struct DiffView: View {
         } else {
             ContentUnavailableView("No plan yet", systemImage: "arrow.triangle.branch",
                                    description: Text("Refresh to compute drift."))
+        }
+    }
+
+    /// Shown when the chosen folder has no gitops/ tree yet: offer to initialize it from the
+    /// tenant (`abctl seed`) rather than dead-ending. Seeding creates gitops/ inside the folder.
+    @ViewBuilder private var seedPrompt: some View {
+        ContentUnavailableView {
+            Label("No GitOps tree here yet", systemImage: "folder.badge.plus")
+        } description: {
+            Text("\"\(model.repoRoot?.lastPathComponent ?? "This folder")\" has no gitops/ directory. "
+                 + "Initialize it from the current tenant — abctl downloads live configurations and "
+                 + "blueprints into gitops/ (plus a baseline) so you can diff and apply.")
+        } actions: {
+            Button("Initialize from Tenant…") { Task { await model.seedWorkspace() } }
+                .buttonStyle(.borderedProminent)
+            Button("Choose a Different Folder…") { showWorkspacePicker = true }
+                .buttonStyle(.link)
+            if let error = model.loadError {
+                Text(error).font(.caption).foregroundStyle(.red)
+            }
         }
     }
 

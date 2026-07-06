@@ -62,6 +62,28 @@ final class ContractTests: XCTestCase {
         XCTAssertTrue(plan.isEmpty)
     }
 
+    func testSeedRunsSeedInWorkspaceWithContext() async throws {
+        actor Recorder { var args: [String] = []; var cwd: URL?; func set(_ a: [String], _ c: URL?) { args = a; cwd = c } }
+        struct RecordingRunner: AbctlRunner {
+            let recorder: Recorder
+            func run(_ args: [String], cwd: URL?, stdin: Data?, timeout: Duration) async throws -> AbctlResult {
+                await recorder.set(args, cwd)
+                return MockAbctlRunner.ok("seeded 3 configuration(s)")
+            }
+        }
+        let recorder = Recorder()
+        var client = AbctlClient(runner: RecordingRunner(recorder: recorder))
+        client.context = "prod"
+        client.repoRoot = URL(fileURLWithPath: "/work/ws")
+        let summary = try await client.seed()
+        XCTAssertTrue(summary.contains("seeded"))
+        let args = await recorder.args
+        XCTAssertEqual(args.first, "seed")
+        XCTAssertEqual(args.suffix(2), ["--context", "prod"]) // seed needs creds → context threaded
+        let cwd = await recorder.cwd
+        XCTAssertEqual(cwd?.path, "/work/ws") // tree is written into the chosen workspace
+    }
+
     func testCreateSendsGatedJSONWithStdin() async throws {
         actor Recorder {
             var args: [String] = []
