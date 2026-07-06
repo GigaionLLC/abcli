@@ -96,11 +96,11 @@ func newVPPConfigCmd() *cobra.Command {
 }
 
 func newVPPAssetsCmd() *cobra.Command {
-	var asJSON bool
+	var asJSON, noNames bool
 	var typ, pricing, adamID string
 	c := &cobra.Command{
 		Use:   "assets",
-		Short: "List owned apps/books + license counts",
+		Short: "List owned apps/books + license counts (names resolved via iTunes lookup)",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			cl, err := vppClient(cmd)
@@ -111,25 +111,47 @@ func newVPPAssetsCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			resolveAssetNames(assets, noNames) // best-effort; leaves Name blank on failure
 			if asJSON || flagOutput != "table" {
 				return render(outFmt(asJSON), asList(assets), nil, nil)
 			}
 			rows := make([][]string, 0, len(assets))
 			for _, a := range assets {
-				rows = append(rows, []string{a.AdamID, a.ProductType, a.PricingParam,
-					strconv.Itoa(a.AvailableCount), strconv.Itoa(a.AssignedCount), strconv.Itoa(a.TotalCount),
-					fmt.Sprintf("%v", a.DeviceAssignable)})
+				rows = append(rows, []string{a.Name, a.AdamID, a.ProductType, a.PricingParam,
+					strconv.Itoa(a.AvailableCount), strconv.Itoa(a.AssignedCount), strconv.Itoa(a.TotalCount)})
 			}
-			printTable([]string{"ADAM_ID", "TYPE", "PRICING", "AVAILABLE", "ASSIGNED", "TOTAL", "DEVICE_ASSIGNABLE"}, rows)
+			printTable([]string{"NAME", "ADAM_ID", "TYPE", "PRICING", "AVAILABLE", "ASSIGNED", "TOTAL"}, rows)
 			fmt.Fprintf(os.Stderr, "%d asset(s)\n", len(assets))
 			return nil
 		},
 	}
 	c.Flags().BoolVar(&asJSON, "json", false, "JSON output")
+	c.Flags().BoolVar(&noNames, "no-names", false, "skip resolving app/book names via the public iTunes lookup")
 	c.Flags().StringVar(&typ, "type", "", "filter by product type: App | Book")
 	c.Flags().StringVar(&pricing, "pricing", "", "filter by pricing: STDQ | PLUS")
 	c.Flags().StringVar(&adamID, "adam-id", "", "filter by product adamId")
 	return c
+}
+
+// resolveAssetNames fills in each asset's Name from the public iTunes lookup (best-effort:
+// network/lookup failures leave names blank rather than failing the command).
+func resolveAssetNames(assets []vpp.Asset, skip bool) {
+	if skip || len(assets) == 0 {
+		return
+	}
+	ids := make([]string, 0, len(assets))
+	for _, a := range assets {
+		ids = append(ids, a.AdamID)
+	}
+	names, err := vpp.NewLookup(os.Getenv("AB_ITUNES_BASE")).Names(ids)
+	if err != nil && len(names) == 0 {
+		return
+	}
+	for i := range assets {
+		if n := names[assets[i].AdamID]; n != "" {
+			assets[i].Name = n
+		}
+	}
 }
 
 func newVPPAssignmentsCmd() *cobra.Command {

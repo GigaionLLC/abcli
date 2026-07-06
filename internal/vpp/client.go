@@ -141,8 +141,10 @@ func (c *Client) ServiceConfig() (*ServiceConfig, error) {
 
 // --- assets (owned apps/books + license counts) ---
 
-// Asset is one owned app or book with its license counts.
+// Asset is one owned app or book with its license counts. Name is not from the VPP API —
+// it's filled in from the public iTunes lookup (see Lookup).
 type Asset struct {
+	Name               string   `json:"name,omitempty"`
 	AdamID             string   `json:"adamId"`
 	ProductType        string   `json:"productType"`  // App | Book
 	PricingParam       string   `json:"pricingParam"` // STDQ | PLUS
