@@ -274,6 +274,90 @@ final class ContractTests: XCTestCase {
         }
     }
 
+    func testContextListDecodes() async throws {
+        let json = #"{"contexts":["prod","staging"],"current":"prod"}"#
+        let client = AbctlClient(runner: MockAbctlRunner(responses: ["context list": MockAbctlRunner.ok(json)]))
+        let list = try await client.contextList()
+        XCTAssertEqual(list.contexts, ["prod", "staging"])
+        XCTAssertEqual(list.current, "prod")
+    }
+
+    func testEmptyContextListDecodes() async throws {
+        let client = AbctlClient(runner: MockAbctlRunner(responses: ["context list": MockAbctlRunner.ok(#"{"contexts":[],"current":""}"#)]))
+        let list = try await client.contextList()
+        XCTAssertTrue(list.contexts.isEmpty)
+        XCTAssertEqual(list.current, "")
+    }
+
+    func testContextDetailDecodesSnakeCaseAndKeyPath() async throws {
+        let json = #"{"context":{"client_id":"BUSINESSAPI.aaa","key":"/keys/prod.pem","api_base":"https://api-business.apple.com/v1/"},"name":"prod"}"#
+        let client = AbctlClient(runner: MockAbctlRunner(responses: ["context get": MockAbctlRunner.ok(json)]))
+        let detail = try await client.contextDetail("prod")
+        XCTAssertEqual(detail.name, "prod")
+        XCTAssertEqual(detail.context.clientID, "BUSINESSAPI.aaa")
+        XCTAssertEqual(detail.context.keyPath, "/keys/prod.pem")
+        XCTAssertEqual(detail.context.apiBase, "https://api-business.apple.com/v1/")
+    }
+
+    func testContextDetailWithoutApiBaseDecodes() async throws {
+        let client = AbctlClient(runner: MockAbctlRunner(responses: ["context get": MockAbctlRunner.ok(#"{"context":{"client_id":"c","key":"/k.pem"},"name":"staging"}"#)]))
+        let detail = try await client.contextDetail("staging")
+        XCTAssertNil(detail.context.apiBase)
+        XCTAssertEqual(detail.context.keyPath, "/k.pem")
+    }
+
+    func testSaveContextThreadsFlagsAndNeverAddsContextFlag() async throws {
+        actor Recorder { var args: [String] = []; func set(_ a: [String]) { args = a } }
+        struct RecordingRunner: AbctlRunner {
+            let recorder: Recorder
+            func run(_ args: [String], cwd: URL?, stdin: Data?, timeout: Duration) async throws -> AbctlResult {
+                await recorder.set(args)
+                return MockAbctlRunner.ok("")
+            }
+        }
+        let recorder = Recorder()
+        var client = AbctlClient(runner: RecordingRunner(recorder: recorder))
+        client.context = "some-selected-context" // must NOT bleed into a context-store write
+        try await client.saveContext(name: "prod", clientID: "BUSINESSAPI.aaa",
+                                     keyPath: "/keys/prod.pem", apiBase: "https://b/v1/", makeCurrent: true)
+        let args = await recorder.args
+        XCTAssertEqual(Array(args.prefix(3)), ["context", "set", "prod"])
+        for token in ["--client-id", "BUSINESSAPI.aaa", "--key", "/keys/prod.pem", "--api-base", "https://b/v1/", "--use"] {
+            XCTAssertTrue(args.contains(token), "missing \(token) in \(args)")
+        }
+        XCTAssertFalse(args.contains("--context"), "context-store writes must never thread --context: \(args)")
+    }
+
+    func testSaveContextOmitsApiBaseAndUseWhenNotSet() async throws {
+        actor Recorder { var args: [String] = []; func set(_ a: [String]) { args = a } }
+        struct RecordingRunner: AbctlRunner {
+            let recorder: Recorder
+            func run(_ args: [String], cwd: URL?, stdin: Data?, timeout: Duration) async throws -> AbctlResult {
+                await recorder.set(args); return MockAbctlRunner.ok("")
+            }
+        }
+        let recorder = Recorder()
+        let client = AbctlClient(runner: RecordingRunner(recorder: recorder))
+        try await client.saveContext(name: "s", clientID: "c", keyPath: "/k.pem", apiBase: nil, makeCurrent: false)
+        let args = await recorder.args
+        XCTAssertFalse(args.contains("--api-base"))
+        XCTAssertFalse(args.contains("--use"))
+    }
+
+    func testCredentialStoreWritesOwnerOnlyKeyFile() throws {
+        let pem = "-----BEGIN PRIVATE KEY-----\nMIGH...\n-----END PRIVATE KEY-----\n"
+        let url = try CredentialStore.writeKey(pem: pem, context: "unit-test/../weird name")
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        // Written verbatim…
+        XCTAssertEqual(try String(contentsOf: url, encoding: .utf8), pem)
+        // …with a filesystem-safe name…
+        XCTAssertFalse(url.lastPathComponent.contains("/"))
+        // …and owner-only (0600) permissions.
+        let perms = try FileManager.default.attributesOfItem(atPath: url.path)[.posixPermissions] as? NSNumber
+        XCTAssertEqual(perms?.int16Value, 0o600)
+    }
+
     func testContextIsThreadedAsFlag() async throws {
         // A recording runner asserts --context is appended when set.
         actor Recorder { var last: [String] = []; func set(_ a: [String]) { last = a } }

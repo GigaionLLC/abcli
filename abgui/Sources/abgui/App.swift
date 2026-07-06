@@ -13,5 +13,11 @@ struct ABGUIApp: App {
                 .frame(minWidth: 820, minHeight: 520)
         }
         .defaultSize(width: 1040, height: 680)
+
+        // Standard macOS Settings window (⌘,) — where the Apple Business credentials live.
+        Settings {
+            SettingsView()
+                .environment(model)
+        }
     }
 }

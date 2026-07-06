@@ -49,6 +49,10 @@ self-contained `.app` with a universal `abctl` **embedded inside it** (no separa
 reuses your `abctl` connection contexts, and re-implements none of the API — it shells out to the embedded
 CLI, decodes its JSON, and renders it.
 
+- **Connect from the GUI (no shell needed):** a **Settings** window (⌘,) to enter your Apple Business API
+  **Client ID** + **EC private key** (paste the PEM or point at a `.pem`) and save it as an `abctl` context —
+  so a Finder-launched app that inherits no `AB_*` environment still authenticates. The key is stored `0600`
+  and handed to `abctl` as a file path (never on argv/logs); switch tenants from the same picker.
 - **Browse — read-only where the API is:** Configurations & Blueprints, plus clearly-badged **read-only**
   views of Devices, Users (with roles), User Groups, Apps (catalog), Packages, MDM Servers, and the audit
   log — each with a full-resource inspector, grouped in the sidebar as *GitOps* vs *Read-only*. (The separate

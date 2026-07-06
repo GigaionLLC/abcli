@@ -38,7 +38,11 @@ CLI**, not a second implementation of the API.
 - **The GitOps story is the hero.** A visual 3-way diff/plan view, a per-config drift badge, and an
   archive/rollback browser — capabilities no comparable single-tenant GUI offers.
 - **Reuse `abctl` contexts as the tenant switcher.** No second credential store; the connection picker is a
-  front-end over `~/.abctl/contexts.yaml`.
+  front-end over `~/.abctl/contexts.yaml`. The **Settings** window (⌘,) also *writes* contexts — enter a
+  Client ID + EC private key and it runs `context set … --key <path> --use`, so a Finder-launched app (which
+  inherits no `AB_*` env) can authenticate without a shell. A pasted PEM is written to a `0600` file under
+  `~/Library/Application Support/abgui/keys/`; `abctl` reads the key by **path only**, so key material never
+  touches argv, logs, or `contexts.yaml`. See `SettingsView` + `CredentialStore`.
 - **Unsigned, zero-cost distribution.** Ad-hoc-signed universal `.app`, shipped as a zip, launchable with
   one documented `xattr` command — no Apple Developer account.
 - **Self-contained `.app` — abctl embedded (decided).** The GUI ships as one bundle with a universal `abctl`

@@ -2,9 +2,11 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import SwiftUI
 
-/// The sidebar footer: a connection dot + summary, and a context field / reconnect.
+/// The sidebar footer: a connection dot + summary, a Settings affordance (with a call-to-
+/// action when there's no tenant yet), and a context field / reconnect.
 struct ConnectionFooter: View {
     @Environment(AppModel.self) private var model
+    @Environment(\.openSettings) private var openSettings
 
     var body: some View {
         @Bindable var model = model
@@ -13,6 +15,20 @@ struct ConnectionFooter: View {
             HStack(spacing: 6) {
                 Circle().fill(dotColor).frame(width: 8, height: 8)
                 Text(summary).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                Spacer(minLength: 4)
+                Button { openSettings() } label: {
+                    Image(systemName: "gearshape")
+                }
+                .buttonStyle(.borderless)
+                .help("Connection settings")
+            }
+            if needsSetup {
+                Button { openSettings() } label: {
+                    Label("Set up connection…", systemImage: "key.horizontal")
+                        .font(.caption)
+                }
+                .buttonStyle(.link)
+                .help("Enter your Apple Business API Client ID + private key")
             }
             HStack(spacing: 6) {
                 TextField("context", text: $model.context)
@@ -29,6 +45,15 @@ struct ConnectionFooter: View {
             }
         }
         .padding(8)
+    }
+
+    /// True when abctl runs but no tenant is authenticated — the state that needs Settings.
+    private var needsSetup: Bool {
+        switch model.connection {
+        case .failed: return true
+        case .connected(_, let identity): return identity == nil
+        default: return false
+        }
     }
 
     private var dotColor: Color {

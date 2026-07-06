@@ -141,11 +141,57 @@ struct AbctlClient {
         try await decodeJSON(WriteOutcome.self, ["detach", "config", configID, "--blueprint", blueprint, "--yes", "--json"])
     }
 
+    // MARK: connection contexts (~/.abctl/contexts.yaml — the credential store)
+    //
+    // These MANAGE the context store, so they are never threaded with --context (which
+    // SELECTS a context to resolve). The private key is always passed as a file PATH — key
+    // material never touches argv, so it can't leak via a process listing or an error string.
+
+    func contextList() async throws -> ContextList {
+        try await decodeControl(ContextList.self, ["context", "list", "-o", "json"])
+    }
+
+    func contextDetail(_ name: String?) async throws -> ContextDetail {
+        var args = ["context", "get"]
+        if let name, !name.isEmpty { args.append(name) }
+        args += ["-o", "json"]
+        return try await decodeControl(ContextDetail.self, args)
+    }
+
+    /// Create or update a context (client id + key path + optional API base), optionally
+    /// making it current. `keyPath` is a filesystem path to the EC private key.
+    func saveContext(name: String, clientID: String, keyPath: String, apiBase: String?, makeCurrent: Bool) async throws {
+        var args = ["context", "set", name, "--client-id", clientID, "--key", keyPath]
+        if let apiBase, !apiBase.isEmpty { args += ["--api-base", apiBase] }
+        if makeCurrent { args.append("--use") }
+        try await runControl(args)
+    }
+
+    func useContext(_ name: String) async throws { try await runControl(["context", "use", name]) }
+    func deleteContext(_ name: String) async throws { try await runControl(["context", "delete", name]) }
+
     // MARK: plumbing
 
     private func argv(_ base: [String]) -> [String] {
         guard let context, !context.isEmpty else { return base }
         return base + ["--context", context]
+    }
+
+    /// Run a context-store command (raw argv, no --context threading, no repo cwd).
+    @discardableResult
+    private func runControl(_ args: [String]) async throws -> AbctlResult {
+        let result = try await runner.run(args, cwd: nil, stdin: nil, timeout: .seconds(30))
+        try Self.checkExit(result)
+        return result
+    }
+
+    private func decodeControl<T: Decodable>(_ type: T.Type, _ args: [String]) async throws -> T {
+        let result = try await runControl(args)
+        do {
+            return try Self.decoder.decode(T.self, from: result.stdout)
+        } catch {
+            throw AbctlError.decode(error)
+        }
     }
 
     private func decodeJSON<T: Decodable>(_ type: T.Type, _ base: [String], stdin: Data? = nil,

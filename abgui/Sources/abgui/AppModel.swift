@@ -20,6 +20,12 @@ final class AppModel {
     /// Optional abctl context name (blank → abctl uses its own .env / current context).
     var context: String = ""
 
+    // Connection contexts (the credential store, ~/.abctl/contexts.yaml)
+    var contexts: [String] = []
+    var currentContext: String = ""
+    var settingsError: String?
+    var settingsBusy = false
+
     // Browsed inventory (loaded lazily per screen)
     var configurations: [Resource] = []
     var blueprints: [Resource] = []
@@ -156,6 +162,106 @@ final class AppModel {
         } catch {
             connection = .failed(error.localizedDescription)
         }
+    }
+
+    // MARK: connection settings (credential store) — see SettingsView
+
+    /// Load the saved connection contexts + the current one (for the settings picker/footer).
+    func loadContexts() async {
+        guard let client = makeClient() else { return }
+        if let list = try? await client.contextList() {
+            contexts = list.contexts
+            currentContext = list.current
+        }
+    }
+
+    /// A saved context's fields, to pre-fill the settings form. Returns only the client id +
+    /// key PATH (abctl never exposes key material), or nil if it can't be read.
+    func contextDetail(_ name: String) async -> ContextDetail? {
+        guard let client = makeClient() else { return nil }
+        return try? await client.contextDetail(name)
+    }
+
+    /// Save a connection from the settings form, then verify it end-to-end (mint a token +
+    /// hit the API via `whoami`). A pasted `keyPEM` is written to a protected file; otherwise
+    /// `keyPath` (an existing .pem on disk) is used as-is. On success the context becomes
+    /// current and abgui reconnects. Returns true iff the credentials actually authenticate.
+    func saveConnection(name: String, clientID: String, keyPEM: String, keyPath: String, apiBase: String) async -> Bool {
+        guard let client = makeClient() else {
+            settingsError = "abctl was not found in the app bundle."
+            return false
+        }
+        settingsBusy = true
+        settingsError = nil
+        defer { settingsBusy = false }
+
+        let ctxName = name.trimmingCharacters(in: .whitespaces)
+        let cid = clientID.trimmingCharacters(in: .whitespaces)
+        guard !ctxName.isEmpty, !cid.isEmpty else {
+            settingsError = "Connection name and Client ID are required."
+            return false
+        }
+
+        // Resolve the key: a pasted PEM is written to a user-only file; else an on-disk path.
+        var resolvedKeyPath = keyPath.trimmingCharacters(in: .whitespaces)
+        let pem = keyPEM.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !pem.isEmpty {
+            guard pem.contains("PRIVATE KEY") else {
+                settingsError = "That doesn't look like a PEM private key (expected a -----BEGIN … PRIVATE KEY----- block)."
+                return false
+            }
+            do {
+                resolvedKeyPath = try CredentialStore.writeKey(pem: pem, context: ctxName).path
+            } catch {
+                settingsError = "Couldn't save the private key: \(error.localizedDescription)"
+                return false
+            }
+        }
+        guard !resolvedKeyPath.isEmpty else {
+            settingsError = "Provide the private key — paste the PEM or choose a .pem file."
+            return false
+        }
+
+        do {
+            try await client.saveContext(name: ctxName, clientID: cid, keyPath: resolvedKeyPath,
+                                         apiBase: apiBase.trimmingCharacters(in: .whitespaces), makeCurrent: true)
+        } catch {
+            settingsError = error.localizedDescription
+            return false
+        }
+
+        // Browse through the new context, then verify the credentials really authenticate.
+        context = ctxName
+        await loadContexts()
+        guard let verify = makeClient() else { return false }
+        do {
+            _ = try await verify.whoami()
+        } catch {
+            settingsError = "Saved, but the connection test failed: \(error.localizedDescription)"
+            await check()
+            return false
+        }
+        await check()
+        return true
+    }
+
+    /// Switch the current context (the credential store's active tenant) and reconnect.
+    func useConnection(_ name: String) async {
+        guard let client = makeClient() else { return }
+        try? await client.useContext(name)
+        context = name
+        await loadContexts()
+        await check()
+    }
+
+    /// Delete a saved connection. (Does not remove any pasted key file — a no-op for on-disk
+    /// keys; a stale keys/<name>.pem is harmless and overwritten on the next save.)
+    func deleteConnection(_ name: String) async {
+        guard let client = makeClient() else { return }
+        try? await client.deleteContext(name)
+        if context == name { context = "" }
+        await loadContexts()
+        await check()
     }
 
     // MARK: loads (each spawns a fresh abctl; errors surface in loadError)

@@ -31,3 +31,28 @@ struct VersionInfo: Codable, Equatable {
 
     func has(_ capability: String) -> Bool { capabilities.contains(capability) }
 }
+
+/// `context list -o json` — the saved connection contexts + which one is current.
+struct ContextList: Codable, Equatable {
+    let current: String
+    let contexts: [String]
+}
+
+/// `context get [name] -o json` — one context's fields. Only the client id + key PATH are
+/// ever surfaced (abctl never prints key material), so there is no key-bytes field here.
+struct ContextDetail: Codable, Equatable {
+    let name: String
+    let context: ContextFields
+
+    struct ContextFields: Codable, Equatable {
+        let clientID: String
+        let keyPath: String
+        let apiBase: String?
+
+        enum CodingKeys: String, CodingKey {
+            case clientID = "client_id"
+            case keyPath = "key"
+            case apiBase = "api_base"
+        }
+    }
+}
