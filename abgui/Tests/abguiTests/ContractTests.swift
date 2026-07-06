@@ -204,6 +204,40 @@ final class ContractTests: XCTestCase {
         XCTAssertEqual(Array(args.prefix(2)), ["get", "packages"])
     }
 
+    func testVPPAssetDecodes() async throws {
+        // Matches `abctl vpp assets -o json` (internal/vpp.Asset).
+        let json = #"[{"adamId":"408709785","productType":"App","pricingParam":"STDQ","availableCount":42,"assignedCount":8,"retiredCount":0,"totalCount":50,"deviceAssignable":true,"revocable":true,"supportedPlatforms":["iOS","macOS"]}]"#
+        let client = AbctlClient(runner: MockAbctlRunner(responses: ["vpp assets": MockAbctlRunner.ok(json)]))
+        let assets = try await client.vppAssets(token: "tok")
+        XCTAssertEqual(assets.count, 1)
+        let asset = assets[0]
+        XCTAssertEqual(asset.adamId, "408709785")
+        XCTAssertEqual(asset.availableCount, 42)
+        XCTAssertEqual(asset.totalCount, 50)
+        XCTAssertEqual(asset.deviceAssignable, true)
+        XCTAssertEqual(asset.supportedPlatforms, ["iOS", "macOS"])
+    }
+
+    func testVPPTokenIsPassedAsFlag() async throws {
+        actor Recorder {
+            var args: [String] = []
+            func record(_ a: [String]) { args = a }
+        }
+        struct RecordingRunner: AbctlRunner {
+            let recorder: Recorder
+            func run(_ args: [String], cwd: URL?, stdin: Data?, timeout: Duration) async throws -> AbctlResult {
+                await recorder.record(args)
+                return MockAbctlRunner.ok(#"{"locationName":"HQ","limits":{"maxAssets":25}}"#)
+            }
+        }
+        let recorder = Recorder()
+        _ = try await AbctlClient(runner: RecordingRunner(recorder: recorder)).vppConfig(token: "sTok")
+        let args = await recorder.args
+        for token in ["vpp", "config", "--vpp-token", "sTok"] {
+            XCTAssertTrue(args.contains(token), "missing \(token) in \(args)")
+        }
+    }
+
     func testExitCodeMapping() throws {
         // exit 3 is a normal "changes pending", not an error.
         XCTAssertThrowsError(try AbctlClient.checkExit(AbctlResult(stdout: Data(), stderr: "", code: 3))) { error in

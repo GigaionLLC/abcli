@@ -14,6 +14,7 @@ struct RootView: View {
         case configurations, blueprints, diff, archive
         // Read-only — live views abgui never mutates
         case devices, users, userGroups, apps, packages, mdmServers, audit
+        case appsBooks // Apps & Books (VPP) — a separate service; routes to VPPView
 
         var id: String { rawValue }
 
@@ -38,6 +39,7 @@ struct RootView: View {
             case .blueprints: return "Blueprints"
             case .diff: return "Diff / Drift"
             case .archive: return "Archive"
+            case .appsBooks: return "Apps & Books"
             default: return rawValue
             }
         }
@@ -49,12 +51,13 @@ struct RootView: View {
             case .blueprints: return "square.stack.3d.up"
             case .diff: return "arrow.triangle.branch"
             case .archive: return "clock.arrow.circlepath"
+            case .appsBooks: return "cart"
             default: return "circle"
             }
         }
 
         static let gitopsItems: [SidebarItem] = [.configurations, .blueprints, .diff, .archive]
-        static let readOnlyItems: [SidebarItem] = [.devices, .users, .userGroups, .apps, .packages, .mdmServers, .audit]
+        static let readOnlyItems: [SidebarItem] = [.devices, .users, .userGroups, .apps, .packages, .mdmServers, .audit, .appsBooks]
     }
 
     var body: some View {
@@ -91,6 +94,7 @@ struct RootView: View {
             case .blueprints: BlueprintsView()
             case .diff: DiffView()
             case .archive: ArchiveView()
+            case .appsBooks: VPPView()
             default: ContentUnavailableView("Select a section", systemImage: "sidebar.left")
             }
         }

@@ -35,6 +35,16 @@ final class AppModel {
     var auditEvents: [Resource] = []
     var auditSince = "7d"
 
+    // Apps & Books (VPP) — a separate service; the content token is held in-memory only.
+    var vppToken = ""
+    var vppConfig: VPPServiceConfig?
+    var vppAssets: [VPPAsset] = []
+    var vppAssignments: [VPPAssignment] = []
+    var vppUsers: [VPPUser] = []
+    var vppLoading = false
+    var vppError: String?
+    var vppConnected: Bool { vppConfig != nil }
+
     // GitOps workspace (the dir containing gitops/) — required for diff / sync / archive.
     var repoRoot: URL?
     var applyResult: ApplyResult?
@@ -101,6 +111,35 @@ final class AppModel {
             lastWriteError = error.localizedDescription
             return false
         }
+    }
+
+    /// Validate the VPP content token and load the Apps & Books inventory. Config failure
+    /// = not connected; the per-list calls tolerate individual endpoint failures.
+    func vppConnect() async {
+        guard let client = makeClient(), !vppToken.isEmpty else {
+            vppError = "Enter a content token."
+            return
+        }
+        vppLoading = true
+        vppError = nil
+        defer { vppLoading = false }
+        do {
+            vppConfig = try await client.vppConfig(token: vppToken)
+            vppAssets = (try? await client.vppAssets(token: vppToken)) ?? []
+            vppAssignments = (try? await client.vppAssignments(token: vppToken)) ?? []
+            vppUsers = (try? await client.vppUsers(token: vppToken)) ?? []
+        } catch {
+            vppError = error.localizedDescription
+            vppConfig = nil
+        }
+    }
+
+    func vppDisconnect() {
+        vppConfig = nil
+        vppAssets = []
+        vppAssignments = []
+        vppUsers = []
+        vppError = nil
     }
 
     /// Verify the embedded abctl runs and read its version + (best-effort) identity.

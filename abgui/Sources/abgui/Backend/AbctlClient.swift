@@ -76,6 +76,21 @@ struct AbctlClient {
         try await decodeJSON([Resource].self, ["get", "audit", "--since", since, "-o", "json"])
     }
 
+    // Apps & Books (VPP) — read-only, via `abctl vpp …`. The content token is passed as
+    // --vpp-token (a separate credential from the Business API context).
+    func vppConfig(token: String) async throws -> VPPServiceConfig {
+        try await decodeJSON(VPPServiceConfig.self, ["vpp", "config", "-o", "json", "--vpp-token", token])
+    }
+    func vppAssets(token: String) async throws -> [VPPAsset] {
+        try await decodeJSON([VPPAsset].self, ["vpp", "assets", "-o", "json", "--vpp-token", token])
+    }
+    func vppAssignments(token: String) async throws -> [VPPAssignment] {
+        try await decodeJSON([VPPAssignment].self, ["vpp", "assignments", "-o", "json", "--vpp-token", token])
+    }
+    func vppUsers(token: String) async throws -> [VPPUser] {
+        try await decodeJSON([VPPUser].self, ["vpp", "users", "-o", "json", "--vpp-token", token])
+    }
+
     /// The 3-way plan. `diff --json` prints it and exits 0 — drift is a non-empty plan.
     /// Resolved against the workspace (cwd), where the `gitops/` tree lives.
     func plan() async throws -> Plan {
