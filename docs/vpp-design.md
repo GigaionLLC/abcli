@@ -10,11 +10,17 @@ token**. This document is the verified API reference + the plan to add it to abc
 on top of that, abgui).
 
 > **AI-authored** under Gigaion, LLC's direction, like the rest of this repo. The v2 API
-> facts below are transcribed from Apple's current developer documentation (DocC), verified
-> 2026-07. Live end-to-end verification against a real content token is **pending a token**
-> (Gigaion has no VPP-licensed content to test against yet); until then the client is
-> verified against the *documented* request/response shapes via `httptest`, and a live
-> integration test self-skips without a token.
+> facts below are transcribed from Apple's current developer documentation (DocC).
+>
+> **Live-verified (2026-07) against the real API** with a Gigaion content token: the auth
+> form is confirmed — the **outer base64 sToken** (the `.vpptoken` file's contents,
+> verbatim) as `Authorization: Bearer …` is what the server accepts (the *inner* decoded
+> `token` field is rejected as `9622`). `GET /service/config` succeeds, and the client
+> correctly surfaces Apple's error envelope. The token on hand is **revoked** (`9625 "The
+> server has revoked the sToken."` — downloading a newer content token in ABM revokes older
+> ones), so **listing actual inventory awaits a fresh, non-revoked content token**. Client
+> logic is otherwise verified against the documented shapes via `httptest` + a
+> self-skipping live integration test.
 
 ## 1. Auth + discovery
 

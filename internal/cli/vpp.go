@@ -69,6 +69,12 @@ func newVPPConfigCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			// GET /service/config is lenient — it returns even for a REVOKED token — so
+			// probe a data endpoint (assets) to truly validate the token before saying OK.
+			assets, aerr := cl.GetAssets(vpp.AssetFilter{})
+			if aerr != nil {
+				return fmt.Errorf("service config reachable, but the content token is not valid for data: %w", aerr)
+			}
 			if asJSON || flagOutput != "table" {
 				return render(outFmt(asJSON), sc, nil, nil)
 			}
@@ -81,6 +87,7 @@ func newVPPConfigCmd() *cobra.Command {
 			}
 			fmt.Printf("  endpoints  %d\n", len(sc.URLs))
 			fmt.Printf("  maxAssets  %d\n", sc.Limits["maxAssets"])
+			fmt.Printf("  assets     %d reachable\n", len(assets))
 			return nil
 		},
 	}

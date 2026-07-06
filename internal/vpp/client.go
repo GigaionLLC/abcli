@@ -78,7 +78,11 @@ func (c *Client) get(path string, q url.Values, out any) error {
 	body, _ := io.ReadAll(resp.Body)
 
 	if resp.StatusCode == http.StatusUnauthorized {
-		return fmt.Errorf("VPP auth failed (HTTP 401): the content token is missing, invalid, or expired")
+		if e := parseError(body); e != nil {
+			// e.g. 9625 "The server has revoked the sToken." — actionable.
+			return fmt.Errorf("VPP auth failed (HTTP 401): %w", e)
+		}
+		return fmt.Errorf("VPP auth failed (HTTP 401): the content token is missing, invalid, revoked, or expired")
 	}
 	if resp.StatusCode/100 != 2 {
 		if e := parseError(body); e != nil {

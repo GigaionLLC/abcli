@@ -73,12 +73,16 @@ func TestGetAssetsPaginatesAndFilters(t *testing.T) {
 // TestErrors: HTTP 401 → a clear auth error; an errorNumber inside a 200 body → APIError;
 // a missing token → an error before any request.
 func TestErrors(t *testing.T) {
+	// A 401 with Apple's error envelope (the real "revoked sToken" case) → the message
+	// must surface both the 401 and the errorNumber.
 	s401 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte(`{"errorNumber":9625,"errorMessage":"The server has revoked the sToken."}`))
 	}))
 	defer s401.Close()
-	if _, err := NewClient("t", s401.URL).GetAssets(AssetFilter{}); err == nil || !strings.Contains(err.Error(), "401") {
-		t.Errorf("want a 401 error, got %v", err)
+	if _, err := NewClient("t", s401.URL).GetAssets(AssetFilter{}); err == nil ||
+		!strings.Contains(err.Error(), "401") || !strings.Contains(err.Error(), "9625") {
+		t.Errorf("want a 401 error surfacing 9625, got %v", err)
 	}
 
 	sErr := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
