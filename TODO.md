@@ -34,7 +34,7 @@ design: [docs/design-abctl.md](docs/design-abctl.md).
   both conflict directions + tie + unresolved, prune gate, limit-writes, archive-fail-blocks-write, error
   isolation.
 - [x] **First live write — DONE (2026-07-05).** After Included MDM was enabled in the console,
-  `TestLiveWriteRoundTrip` passed live against the Gigaion tenant: create → download → update → download →
+  `TestLiveWriteRoundTrip` passed live against the Gigaion, LLC tenant: create → download → update → download →
   delete a throwaway unattached `zz-*` config, `POST 201` / `PATCH 200` / `DELETE 204` / `GET 404`. Confirmed
   **live**: the raw `.mobileconfig` **GET round-trip is byte-identical** (drift-hash assumption holds), and
   the write response carries `updatedDateTime` (baseline stays exact). The API validator rejects an empty
@@ -44,7 +44,7 @@ design: [docs/design-abctl.md](docs/design-abctl.md).
   build tag (`integration_write`) + an explicit `ABCTL_LIVE_WRITE=1` opt-in, always cleans up, and a
   **strictly-gated** CI job (`integration-write`: `workflow_dispatch` + protected `live-write` environment +
   a dedicated **configurations-write-only** key `AB_*_WRITE`). Never attaches to blueprints/devices.
-  *(EXECUTED LIVE 2026-07-05 — passed against the Gigaion tenant.)*
+  *(EXECUTED LIVE 2026-07-05 — passed against the Gigaion, LLC tenant.)*
 - [x] **Blueprint config-membership GitOps — WIRED.** `diff`/`sync` now reconcile each blueprint's
   CUSTOM_SETTING config membership (git-authoritative): `gitops.LoadBlueprints` reads `blueprints/*.yml`
   (yaml.v3), `ab.FetchBlueprints` resolves live membership to config names, `reconcile.ComputeBlueprints`

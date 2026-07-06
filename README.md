@@ -13,7 +13,7 @@ trail. **[abgui](#abgui--native-macos-app)** is a native SwiftUI desktop app tha
 > API and verifying every behavior live against a real production tenant. Essentially every line — code,
 > tests, and docs — is AI-authored. Review it with that in mind: it is thoroughly tested and live-verified,
 > but it is not a substitute for your own judgment before you point it at a production tenant. This is the
-> same "AI-built, human-directed, openly disclosed" approach Gigaion uses across its open-source projects.
+> same "AI-built, human-directed, openly disclosed" approach Gigaion, LLC uses across its open-source projects.
 
 > **Status:** pre-1.0. Auth + read + plan are live-verified. Config CRUD and blueprint config-membership
 > GitOps are built, unit-tested, and their core write operations verified live against a production Apple
@@ -68,7 +68,7 @@ CLI, decodes its JSON, and renders it.
 See **[abgui/README.md](abgui/README.md)** and the design plan in **[docs/abgui-design.md](docs/abgui-design.md)**.
 
 > The image above is a UI preview. abgui is macOS-only and builds on a macOS runner; like the rest of this
-> repo it is AI-authored under Gigaion's direction.
+> repo it is AI-authored under Gigaion, LLC's direction.
 
 ## Install & build
 

@@ -11,7 +11,7 @@ subprocess/decoding layer, and **re-implements none of the API**.
 > ### 🤖 Built by AI
 > **abgui is designed, written, tested, and documented end-to-end by an autonomous AI coding agent
 > (Anthropic's Claude), directed by Gigaion, LLC** — the same "AI-built, human-directed, openly disclosed"
-> approach Gigaion uses across its open-source projects. This document is the design plan; treat it as a
+> approach Gigaion, LLC uses across its open-source projects. This document is the design plan; treat it as a
 > buildable blueprint, not a substitute for your own review before pointing it at a production tenant.
 
 > **Status:** design only — no code yet. This plan pins abgui to the *current, source-verified* `abctl`
@@ -383,7 +383,7 @@ exclusions are needed on either side**, and `.golangci.yml` stays unchanged.
 ```
 abgui/
 ├── Package.swift                 # SwiftPM manifest — one executable target, ZERO external deps
-├── README.md                     # scope + AI-authorship/Gigaion disclosure; "see ../LICENSE, ../NOTICE"
+├── README.md                     # scope + AI-authorship/Gigaion, LLC disclosure; "see ../LICENSE, ../NOTICE"
 ├── Sources/
 │   └── abgui/
 │       ├── App.swift             # @main SwiftUI App
@@ -467,7 +467,7 @@ codesign -s - --force "$APP/Contents/MacOS/abgui"
 codesign -s - --force "$APP"
 ```
 
-`Info.plist` essentials: `CFBundleIdentifier=com.gigaion.abgui`, `CFBundleExecutable=abgui`,
+`Info.plist` essentials: `CFBundleIdentifier=com.gigaionllc.abgui`, `CFBundleExecutable=abgui`,
 `CFBundlePackageType=APPL`, `CFBundleName`, `CFBundleShortVersionString`/`CFBundleVersion=@VERSION@`,
 `LSMinimumSystemVersion=14.0`, `NSHighResolutionCapable=true`, `CFBundleIconFile=AppIcon`, plus a
 `GIEmbeddedAbctlVersion=@VERSION@` provenance key. **Do not** set `LSUIElement` (abgui is a normal foreground

@@ -2,7 +2,7 @@
 
 > **⚠️ DISABLED (kept, not removed).** This content-token path only applies to orgs on a
 > **third-party MDM**. Under **Apple Business Essentials** (Apple's built-in MDM — what
-> Gigaion uses), Apple does **not** expose a VPP content token, so this path can't be used
+> Gigaion, LLC uses), Apple does **not** expose a VPP content token, so this path can't be used
 > or tested here. It is therefore **disabled by default**: `abctl vpp` is hidden and errors
 > unless `ABCTL_ENABLE_VPP=1`, and the abgui "Apps & Books (VPP)" screen is removed from the
 > sidebar. All the code is kept so it can be re-enabled if a testable token ever exists.
@@ -21,7 +21,7 @@ on top of that, abgui).
 > **AI-authored** under Gigaion, LLC's direction, like the rest of this repo. The v2 API
 > facts below are transcribed from Apple's current developer documentation (DocC).
 >
-> **Live-verified (2026-07) against the real API** with a Gigaion content token: the auth
+> **Live-verified (2026-07) against the real API** with a Gigaion, LLC content token: the auth
 > form is confirmed — the **outer base64 sToken** (the `.vpptoken` file's contents,
 > verbatim) as `Authorization: Bearer …` is what the server accepts (the *inner* decoded
 > `token` field is rejected as `9622`). `GET /service/config` succeeds, and the client

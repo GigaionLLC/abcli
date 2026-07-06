@@ -9,7 +9,7 @@ in `abctl`.
 > ### 🤖 Built by AI
 > abgui is designed, written, tested, and documented by an autonomous AI coding agent
 > (Anthropic's Claude), directed by Gigaion, LLC — the same openly-disclosed, AI-built,
-> human-directed approach used across Gigaion's open-source projects.
+> human-directed approach used across Gigaion, LLC's open-source projects.
 
 **Design & rationale:** [`../docs/abgui-design.md`](../docs/abgui-design.md).
 

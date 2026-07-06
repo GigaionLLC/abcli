@@ -10,7 +10,7 @@
     <key>CFBundleDisplayName</key>
     <string>abgui</string>
     <key>CFBundleIdentifier</key>
-    <string>com.gigaion.abgui</string>
+    <string>com.gigaionllc.abgui</string>
     <key>CFBundleExecutable</key>
     <string>abgui</string>
     <key>CFBundlePackageType</key>

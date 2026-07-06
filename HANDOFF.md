@@ -86,7 +86,7 @@ No production credentials are needed to build or test — the suite mocks the AP
    ("Included") MDM is not enabled, the Configurations/Blueprints endpoints return
    `403 …INCLUDED_MDM_NOT_ENABLED` — enable it in the console.
 
-## Live tenant status (Gigaion org)
+## Live tenant status (Gigaion, LLC org)
 - **Auth: working** — `auth whoami` mints a token, `GET users` → 200 (`TestLiveReadOnly` passes).
 - **Config CRUD: VERIFIED LIVE (2026-07-05).** Included MDM is now enabled in the console, so
   `/configurations` is live. `TestLiveWriteRoundTrip` passed against the tenant — create → download → update

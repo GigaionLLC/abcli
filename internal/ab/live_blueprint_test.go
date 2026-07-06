@@ -210,7 +210,7 @@ func bpProfile(display, topUUID, innerUUID string) string {
 			<key>PayloadType</key>
 			<string>com.apple.ManagedClient.preferences</string>
 			<key>PayloadIdentifier</key>
-			<string>com.gigaion.abctl.livetest.pref.` + innerUUID + `</string>
+			<string>com.gigaionllc.abctl.livetest.pref.` + innerUUID + `</string>
 			<key>PayloadUUID</key>
 			<string>` + innerUUID + `</string>
 			<key>PayloadVersion</key>
@@ -219,7 +219,7 @@ func bpProfile(display, topUUID, innerUUID string) string {
 			<string>abctl test preference</string>
 			<key>PayloadContent</key>
 			<dict>
-				<key>com.gigaion.abctl.livetest</key>
+				<key>com.gigaionllc.abctl.livetest</key>
 				<dict>
 					<key>Forced</key>
 					<array>
@@ -238,7 +238,7 @@ func bpProfile(display, topUUID, innerUUID string) string {
 	<key>PayloadDisplayName</key>
 	<string>` + display + `</string>
 	<key>PayloadIdentifier</key>
-	<string>com.gigaion.abctl.livetest.` + topUUID + `</string>
+	<string>com.gigaionllc.abctl.livetest.` + topUUID + `</string>
 	<key>PayloadType</key>
 	<string>Configuration</string>
 	<key>PayloadUUID</key>
