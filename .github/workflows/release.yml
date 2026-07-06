@@ -43,3 +43,29 @@ jobs:
             dist/*.tar.gz
             dist/*.zip
             dist/checksums.txt
+
+  # abgui is a macOS .app (with a universal abctl embedded) — GoReleaser can't build it,
+  # so a macOS job packages the DMG installer + zip and uploads them to the SAME release.
+  gui-release:
+    name: abgui installer (.dmg)
+    needs: goreleaser # the GitHub Release must exist before we upload to it
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # full history → a matching git-describe version
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: build + package abgui (DMG + zip, universal abctl embedded)
+        run: ./scripts/build-gui.sh dist
+      - name: upload abgui to the release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release upload "${GITHUB_REF_NAME}" \
+            bin/abgui-*-macos.dmg \
+            bin/abgui-*-macos.zip \
+            docs/HOW-TO-RUN-UNSIGNED.txt \
+            --clobber

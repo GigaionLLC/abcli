@@ -33,18 +33,21 @@ jobs:
       - name: swift test
         run: make gui-test
 
-      - name: assemble unsigned .app (embeds universal abctl)
-        run: make gui-app
+      - name: package abgui (unsigned .app → DMG + zip; universal abctl embedded)
+        run: ./scripts/build-gui.sh dist
 
-      - name: verify the bundle is universal, has its icon, and the embedded abctl execs
+      - name: verify the bundle + installer
         run: |
           lipo -info bin/abgui.app/Contents/MacOS/abgui      # expect: arm64 x86_64
           lipo -info bin/abgui.app/Contents/Resources/abctl  # expect: arm64 x86_64
-          test -f bin/abgui.app/Contents/Resources/AppIcon.icns   # icon was generated + bundled
+          test -f bin/abgui.app/Contents/Resources/AppIcon.icns   # icon generated + bundled
           bin/abgui.app/Contents/Resources/abctl --version   # embedded CLI runs, exit 0
+          ls -la bin/abgui-*-macos.dmg bin/abgui-*-macos.zip # installer + zip built
 
       - uses: actions/upload-artifact@v4
         with:
-          name: abgui-app
-          path: bin/abgui.app
+          name: abgui-macos
+          path: |
+            bin/abgui-*-macos.dmg
+            bin/abgui-*-macos.zip
           if-no-files-found: error

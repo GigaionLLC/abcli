@@ -3,7 +3,7 @@ BINARY  := abctl
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 LDFLAGS := -X github.com/GigaionLLC/abcli/internal/cli.version=$(VERSION)
 
-.PHONY: build test vet lint fmt tidy clean gui gui-app gui-run gui-test gui-clean
+.PHONY: build test vet lint fmt tidy clean gui gui-app gui-run gui-test gui-dmg gui-dist gui-clean
 
 build:            ## build the binary into bin/
 	go build -ldflags "$(LDFLAGS)" -o bin/$(BINARY) ./cmd/abctl
@@ -35,5 +35,9 @@ gui-run:          ## build + launch abgui locally
 	./scripts/build-gui.sh run
 gui-test:         ## swift test (offline, no credentials)
 	./scripts/build-gui.sh test
-gui-clean:        ## remove Swift build products + the .app
+gui-dmg:          ## build a drag-to-Applications installer .dmg
+	./scripts/build-gui.sh dmg
+gui-dist:         ## build the release artifacts (.dmg installer + .zip)
+	./scripts/build-gui.sh dist
+gui-clean:        ## remove Swift build products + the .app/.dmg/.zip
 	./scripts/build-gui.sh clean

@@ -10,6 +10,8 @@
 #   ./scripts/build-gui.sh app     # assemble bin/abgui.app (embeds a universal abctl)
 #   ./scripts/build-gui.sh run     # assemble + launch
 #   ./scripts/build-gui.sh zip     # assemble + package bin/abgui-<ver>-macos.zip + run note
+#   ./scripts/build-gui.sh dmg     # assemble + a drag-to-Applications installer .dmg
+#   ./scripts/build-gui.sh dist    # assemble once → both the .dmg installer and the .zip (release)
 #   ./scripts/build-gui.sh clean
 
 set -euo pipefail
@@ -139,19 +141,38 @@ cmd_build() { require_macos; do_swift_build debug; log "built abgui (debug)"; }
 cmd_app() { assemble; }
 cmd_run() { assemble; log "launching abgui"; open "$APP"; }
 
-cmd_zip() {
-  assemble
-  write_run_note
+# make_zip / make_dmg package the ALREADY-assembled bin/abgui.app.
+make_zip() {
   local zip="$repo/bin/abgui-$VERSION-macos.zip"
   rm -f "$zip"
   ( cd "$repo/bin" && ditto -c -k --sequesterRsrc --keepParent "abgui.app" "$zip" )
   log "packaged $zip"
-  log "run note → docs/HOW-TO-RUN-UNSIGNED.txt"
 }
 
+# make_dmg builds a drag-to-Applications installer DMG (the friendly install path).
+make_dmg() {
+  have hdiutil || { warn "hdiutil not found — skipping the DMG."; return 0; }
+  local staging="$repo/bin/dmg-staging"
+  local dmg="$repo/bin/abgui-$VERSION-macos.dmg"
+  rm -rf "$staging"
+  mkdir -p "$staging"
+  cp -R "$APP" "$staging/"
+  ln -s /Applications "$staging/Applications" # drag target
+  [ -f "$repo/docs/HOW-TO-RUN-UNSIGNED.txt" ] && cp "$repo/docs/HOW-TO-RUN-UNSIGNED.txt" "$staging/How to run (unsigned).txt"
+  rm -f "$dmg"
+  hdiutil create -volname "abgui $VERSION" -srcfolder "$staging" -ov -format UDZO "$dmg" >/dev/null
+  rm -rf "$staging"
+  log "packaged $dmg  (drag abgui.app → Applications)"
+}
+
+cmd_zip() { assemble; write_run_note; make_zip; }
+cmd_dmg() { assemble; write_run_note; make_dmg; }
+# dist: assemble ONCE, then produce the DMG installer + the zip (the release path).
+cmd_dist() { assemble; write_run_note; make_dmg; make_zip; }
+
 cmd_clean() {
-  rm -rf "$GUIDIR/.build" "$APP"
-  rm -f "$repo"/bin/abgui-*-macos.zip
+  rm -rf "$GUIDIR/.build" "$APP" "$repo/bin/dmg-staging"
+  rm -f "$repo"/bin/abgui-*-macos.zip "$repo"/bin/abgui-*-macos.dmg
   log "cleaned abgui build products"
 }
 
@@ -161,7 +182,9 @@ case "${1:-}" in
   app)   cmd_app ;;
   run)   cmd_run ;;
   zip)   cmd_zip ;;
+  dmg)   cmd_dmg ;;
+  dist)  cmd_dist ;;
   clean) cmd_clean ;;
-  ""|-h|--help) printf 'usage: build-gui.sh {test|build|app|run|zip|clean}\n' >&2 ;;
-  *) die "unknown command: '$1' (want test|build|app|run|zip|clean)" ;;
+  ""|-h|--help) printf 'usage: build-gui.sh {test|build|app|run|zip|dmg|dist|clean}\n' >&2 ;;
+  *) die "unknown command: '$1' (want test|build|app|run|zip|dmg|dist|clean)" ;;
 esac
