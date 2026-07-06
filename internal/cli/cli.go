@@ -46,7 +46,7 @@ func newRoot() *cobra.Command {
 		newSeedCmd(), newValidateCmd(), newDiffCmd(), newSyncCmd(),
 		newCreateCmd(), newReplaceCmd(), newEditCmd(), newDeleteCmd(),
 		newApplyCmd(), newPullCmd(), newAttachCmd(), newDetachCmd(), newStatusCmd(),
-		newAPICmd(),
+		newAPICmd(), newVPPCmd(),
 	)
 	return root
 }

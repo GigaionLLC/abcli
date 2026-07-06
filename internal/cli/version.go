@@ -20,6 +20,7 @@ var capabilities = []string{
 	"list-empty-array",      // N3: empty lists serialize as []
 	"version-json",          // P2: this command
 	"blueprint-counts-json", // P6: get blueprint --json member counts
+	"vpp-read",              // Apps & Books (VPP) read: vpp config|assets|assignments|users
 }
 
 // versionInfo is the machine-readable build identity + capability set (P2). A GUI reads
