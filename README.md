@@ -50,9 +50,9 @@ reuses your `abctl` connection contexts, and re-implements none of the API — i
 CLI, decodes its JSON, and renders it.
 
 - **Browse — read-only where the API is:** Configurations & Blueprints, plus clearly-badged **read-only**
-  views of Devices, Users (with roles), User Groups, Apps (catalog), Packages, MDM Servers, the audit log,
-  and **Apps & Books (VPP)** license inventory — each with a full-resource inspector, grouped in the sidebar
-  as *GitOps* vs *Read-only*.
+  views of Devices, Users (with roles), User Groups, Apps (catalog), Packages, MDM Servers, and the audit
+  log — each with a full-resource inspector, grouped in the sidebar as *GitOps* vs *Read-only*. (The separate
+  VPP content-token *Apps & Books* screen is disabled — see the built-in-MDM note below.)
 - **The GitOps hero:** a visual 3-way **diff / drift** view and a gated **`sync --apply`** with `--prune`
   and `--limit-writes` as explicit toggles.
 - **Write, gated:** create / edit / delete configs and attach / detach blueprint membership — each behind an
@@ -176,6 +176,7 @@ abctl edit    config <name|id>                      # fetch → $EDITOR → PATC
 abctl delete  config <name|id> [--yes]              # archive live, then DELETE
 abctl apply -f a.yml [-f b.yml] [--dry-run]         # upsert abctl/v1 Configuration|Blueprint specs (bulk)
 abctl attach|detach config <name> --blueprint <bp>  # add/remove a config from a blueprint
+abctl attach|detach app <name|id> --blueprint <bp>  # built-in-MDM Apps & Books: assign an owned app to a blueprint
 abctl pull [config <name>]                          # adopt a console edit into git (scoped seed)
 
 # status (honest proxies — NOT on-device install verification)
