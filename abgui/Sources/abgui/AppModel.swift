@@ -62,6 +62,7 @@ final class AppModel {
     var isLoading = false
     var loadError: String?
     var progressLog: [String] = [] // live stderr narration from abctl during diff/seed
+    var lastCheckedAt: Date?       // when the plan was last successfully computed (refresh confirmation)
     private var workTask: Task<Void, Never>? // the in-flight diff/seed, so a Cancel button can stop it
 
     /// Append a progress line (called from abctl's stderr stream), capped so it can't grow unbounded.
@@ -332,6 +333,7 @@ final class AppModel {
         defer { isLoading = false }
         do {
             plan = try await client.plan()
+            lastCheckedAt = Date() // stamp every successful check, so a refresh confirms even when in sync
         } catch is CancellationError {
             // user cancelled — clear the in-flight state, no error shown
         } catch {

@@ -42,17 +42,19 @@ struct DiffView: View {
             }
         } else if model.isSeeding {
             workingView("Initializing workspace from the tenant…")
+        } else if model.isLoading {
+            // Check isLoading BEFORE the plan branch, so a refresh from an already-computed
+            // state visibly shows progress instead of silently redisplaying the old result.
+            workingView("Computing plan…")
         } else if model.needsSeed {
             seedPrompt
         } else if let plan = model.plan {
             if plan.isEmpty {
                 ContentUnavailableView("In sync", systemImage: "checkmark.seal",
-                                       description: Text("Git and the tenant agree — no drift."))
+                                       description: inSyncDescription)
             } else {
                 planContent(plan)
             }
-        } else if model.isLoading {
-            workingView("Computing plan…")
         } else if let error = model.loadError {
             ContentUnavailableView("Couldn't compute the plan", systemImage: "exclamationmark.triangle",
                                    description: Text(error))
@@ -60,6 +62,20 @@ struct DiffView: View {
             ContentUnavailableView("No plan yet", systemImage: "arrow.triangle.branch",
                                    description: Text("Refresh to compute drift."))
         }
+    }
+
+    /// "Checked HH:mm:ss" from the last successful plan compute — positive confirmation that a
+    /// refresh actually ran, even when the result is unchanged (still in sync).
+    private var lastCheckedText: String? {
+        guard let checked = model.lastCheckedAt else { return nil }
+        return "Checked \(checked.formatted(date: .omitted, time: .standard))"
+    }
+
+    /// The "In sync" description, with the last-checked time appended when known.
+    private var inSyncDescription: Text {
+        let base = Text("Git and the tenant agree — no drift.")
+        guard let checked = lastCheckedText else { return base }
+        return base + Text("\n\(checked)").font(.caption)
     }
 
     /// A working state with abctl's live progress narration + a Cancel button, so a long diff/
@@ -116,12 +132,17 @@ struct DiffView: View {
 
     @ViewBuilder private func planContent(_ plan: Plan) -> some View {
         VStack(alignment: .leading, spacing: 0) {
-            HStack {
+            HStack(alignment: .top) {
                 Label("\(plan.changeCount) pending change(s)", systemImage: "exclamationmark.circle")
                     .foregroundStyle(.orange)
                 Spacer()
-                if let root = model.repoRoot {
-                    Text(root.lastPathComponent).font(.caption).foregroundStyle(.secondary)
+                VStack(alignment: .trailing, spacing: 2) {
+                    if let root = model.repoRoot {
+                        Text(root.lastPathComponent).font(.caption).foregroundStyle(.secondary)
+                    }
+                    if let checked = lastCheckedText {
+                        Text(checked).font(.caption2).foregroundStyle(.tertiary)
+                    }
                 }
             }
             .padding([.horizontal, .top])
