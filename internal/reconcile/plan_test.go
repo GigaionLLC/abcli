@@ -64,6 +64,40 @@ func TestCompute(t *testing.T) {
 	}
 }
 
+func TestComputeGitSourceOfTruth(t *testing.T) {
+	desired := map[string][]byte{
+		"same.mobileconfig":   []byte("A"),
+		"patch.mobileconfig":  []byte("GIT"),
+		"create.mobileconfig": []byte("NEW"),
+	}
+	live := []ab.LiveConfig{
+		{Name: "same.mobileconfig", XML: "A", Updated: "t1"},
+		{Name: "patch.mobileconfig", XML: "LIVE", Updated: "t1"},
+		{Name: "delete.mobileconfig", XML: "OLD", Updated: "t1"},
+	}
+
+	got := map[string]Action{}
+	for _, it := range ComputeGitSourceOfTruth(desired, live).Items {
+		got[it.Name] = it.Action
+	}
+	want := map[string]Action{
+		"patch.mobileconfig":  Update,
+		"create.mobileconfig": Create,
+		"delete.mobileconfig": DeleteABM,
+	}
+	for name, w := range want {
+		if got[name] != w {
+			t.Errorf("%s: got %q, want %q", name, got[name], w)
+		}
+	}
+	if _, listed := got["same.mobileconfig"]; listed {
+		t.Error("matching live config must not appear in git-source-of-truth plan")
+	}
+	if len(got) != len(want) {
+		t.Errorf("plan has %d items, want %d: %v", len(got), len(want), got)
+	}
+}
+
 // TestComputeEmptyBaselineTimestamp: a baseline whose updatedDateTime is empty (a
 // write response that omitted it) must NOT be read as an ABM change when the hash
 // still matches — otherwise every post-apply sync shows a phantom pull.

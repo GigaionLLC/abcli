@@ -11,10 +11,13 @@ struct DiffView: View {
     @State private var showApply = false
 
     var body: some View {
+        @Bindable var model = model
         content
             .navigationTitle("Diff / Drift")
             .toolbar {
                 if model.repoRoot != nil {
+                    Toggle("Git source of truth", isOn: $model.gitSourceOfTruth)
+                        .onChange(of: model.gitSourceOfTruth) { _, _ in model.refreshPlan() }
                     Button { showApply = true } label: { Label("Apply...", systemImage: "checkmark.circle") }
                         .disabled((model.plan?.actionableChangeCount ?? 0) == 0)
                     Button { model.refreshPlan() } label: { Label("Refresh", systemImage: "arrow.clockwise") }

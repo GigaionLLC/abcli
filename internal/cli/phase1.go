@@ -41,13 +41,13 @@ func newValidateCmd() *cobra.Command {
 }
 
 func newDiffCmd() *cobra.Command {
-	var asJSON, exitOnDiff bool
+	var asJSON, exitOnDiff, gitSourceOfTruth bool
 	c := &cobra.Command{
 		Use:   "diff",
 		Short: "3-way plan: git desired vs baseline vs live ABM (configs + blueprint membership)",
 		Args:  cobra.NoArgs,
 		RunE: func(*cobra.Command, []string) error {
-			pc, err := loadPlan()
+			pc, err := loadPlan(gitSourceOfTruth)
 			if err != nil {
 				return err
 			}
@@ -62,18 +62,20 @@ func newDiffCmd() *cobra.Command {
 	}
 	c.Flags().BoolVar(&asJSON, "json", false, "JSON output")
 	c.Flags().BoolVar(&exitOnDiff, "exit-on-diff", false, "exit 3 if changes are pending")
+	c.Flags().BoolVar(&gitSourceOfTruth, "git-source-of-truth", false, "treat gitops/ as authoritative; do not pull live-only Apple configs into git")
 	return c
 }
 
 // syncFlags carries the resolved `sync` flags into runSync.
 type syncFlags struct {
-	asJSON      bool
-	apply       bool
-	exitOnDiff  bool
-	prune       bool
-	yes         bool
-	limitWrites int
-	platforms   string
+	asJSON           bool
+	apply            bool
+	exitOnDiff       bool
+	prune            bool
+	yes              bool
+	limitWrites      int
+	platforms        string
+	gitSourceOfTruth bool
 }
 
 func newSyncCmd() *cobra.Command {
@@ -88,7 +90,8 @@ func newSyncCmd() *cobra.Command {
 			"every overwrite/delete archives the live version first, and you are asked to confirm\n" +
 			"unless --yes (or $ABCTL_APPROVE) is set. --prune (off by default) allows deleting live\n" +
 			"configs removed from git and detaching blueprint members removed from git;\n" +
-			"--limit-writes N caps tenant writes as a circuit breaker.",
+			"--limit-writes N caps tenant writes as a circuit breaker. --git-source-of-truth treats\n" +
+			"gitops/ as the complete desired state and applies/deletes so Apple matches it.",
 		Args: cobra.NoArgs,
 		RunE: func(*cobra.Command, []string) error { return runSync(fl) },
 	}
@@ -100,6 +103,7 @@ func newSyncCmd() *cobra.Command {
 	c.Flags().BoolVar(&fl.yes, "yes", false, "skip the interactive confirmation (also honored: $ABCTL_APPROVE=1)")
 	c.Flags().IntVar(&fl.limitWrites, "limit-writes", 0, "circuit breaker: max tenant writes this run (0 = unlimited)")
 	c.Flags().StringVar(&fl.platforms, "platforms", "", "comma-separated configuredForPlatforms for created configs (default PLATFORM_MACOS)")
+	c.Flags().BoolVar(&fl.gitSourceOfTruth, "git-source-of-truth", false, "treat gitops/ as authoritative; apply implies --prune so Apple matches git")
 	return c
 }
 
@@ -107,9 +111,12 @@ func newSyncCmd() *cobra.Command {
 // it: confirm (unless --yes/$ABCTL_APPROVE) → archive-before-overwrite apply →
 // save the updated baseline. Dry-run is the default and writes nothing.
 func runSync(fl syncFlags) error {
-	pc, err := loadPlan()
+	pc, err := loadPlan(fl.gitSourceOfTruth)
 	if err != nil {
 		return err
+	}
+	if fl.apply && fl.gitSourceOfTruth {
+		fl.prune = true
 	}
 	planFmt := planFormat(fl.asJSON) // "", "json", or "yaml" — honors -o and --json (P7)
 	machine := planFmt != ""
@@ -169,12 +176,34 @@ func runSync(fl syncFlags) error {
 	// Phase 2: blueprint membership. Recompute with config IDs from the post-apply
 	// baseline so a config just created in phase 1 resolves and can be attached.
 	cfgIDByName := make(map[string]string, len(pc.base.Configs))
+	cfgNameByID := make(map[string]string, len(pc.base.Configs))
 	for name, e := range pc.base.Configs {
 		if e.ABMID != "" {
 			cfgIDByName[name] = e.ABMID
+			cfgNameByID[e.ABMID] = name
 		}
 	}
-	bpPlan := reconcile.ComputeBlueprints(pc.bpDesired, pc.liveBPs, cfgIDByName)
+	liveBPs := pc.liveBPs
+	if fl.gitSourceOfTruth {
+		fmt.Fprintln(os.Stderr, "refreshing live state after config writes for git-source-of-truth blueprint reconciliation...")
+		liveAfter, err := pc.c.FetchCustomSettingsWithProgress(func(line string) {
+			fmt.Fprintln(os.Stderr, "refreshing live state: "+line)
+		})
+		if err != nil {
+			return err
+		}
+		for _, l := range liveAfter {
+			if l.ID != "" {
+				cfgIDByName[l.Name] = l.ID
+				cfgNameByID[l.ID] = l.Name
+			}
+		}
+		liveBPs, err = fetchLiveBlueprintsForPlan(pc.c, cfgNameByID)
+		if err != nil {
+			return err
+		}
+	}
+	bpPlan := reconcile.ComputeBlueprints(pc.bpDesired, liveBPs, cfgIDByName)
 	bpRes := eng.ApplyBlueprints(bpPlan, opts, res.Writes)
 
 	if machine {
@@ -320,10 +349,8 @@ func runSeed() error {
 	if err != nil {
 		return err
 	}
-	fmt.Fprintln(os.Stderr, "building plan: fetching live configurations from Apple...")
-	live, err := c.FetchCustomSettingsWithProgress(func(line string) {
-		fmt.Fprintln(os.Stderr, "building plan: "+line)
-	})
+	fmt.Fprintln(os.Stderr, "fetching live configurations...")
+	live, err := c.FetchCustomSettings()
 	if err != nil {
 		return err
 	}
@@ -446,7 +473,7 @@ type planCtx struct {
 
 // loadPlan reads git desired + baseline + live for both configs and blueprints and
 // computes the two 3-way plans. Shared by diff and sync so both see an identical plan.
-func loadPlan() (*planCtx, error) {
+func loadPlan(gitSourceOfTruth bool) (*planCtx, error) {
 	fmt.Fprintln(os.Stderr, "building plan: loading connection and workspace settings...")
 	c, cfg, err := mustClient()
 	if err != nil {
@@ -466,7 +493,9 @@ func loadPlan() (*planCtx, error) {
 	}
 	fmt.Fprintf(os.Stderr, "building plan: loaded %d baseline configuration record(s).\n", len(base.Configs))
 	fmt.Fprintln(os.Stderr, "building plan: fetching live configurations from Apple...")
-	live, err := c.FetchCustomSettings()
+	live, err := c.FetchCustomSettingsWithProgress(func(line string) {
+		fmt.Fprintln(os.Stderr, "building plan: "+line)
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -484,6 +513,14 @@ func loadPlan() (*planCtx, error) {
 			cfgNameByID[e.ABMID] = name
 		}
 	}
+	if gitSourceOfTruth {
+		for _, l := range live {
+			if l.ID != "" {
+				cfgIDByName[l.Name] = l.ID
+				cfgNameByID[l.ID] = l.Name
+			}
+		}
+	}
 	fmt.Fprintf(os.Stderr, "building plan: resolved %d managed configuration id(s).\n", len(cfgIDByName))
 	fmt.Fprintln(os.Stderr, "building plan: reading desired blueprint manifests from gitops/blueprints...")
 	bpDesired, err := t.LoadBlueprints()
@@ -496,7 +533,13 @@ func loadPlan() (*planCtx, error) {
 		return nil, err
 	}
 	fmt.Fprintln(os.Stderr, "building plan: computing configuration drift...")
-	cfgPlan := reconcile.Compute(desired, base, live)
+	var cfgPlan *reconcile.Plan
+	if gitSourceOfTruth {
+		fmt.Fprintln(os.Stderr, "building plan: git-source-of-truth mode is enabled; live-only Apple configs will not be pulled into git.")
+		cfgPlan = reconcile.ComputeGitSourceOfTruth(desired, live)
+	} else {
+		cfgPlan = reconcile.Compute(desired, base, live)
+	}
 	fmt.Fprintf(os.Stderr, "building plan: computed %d configuration change(s).\n", len(cfgPlan.Items))
 	fmt.Fprintln(os.Stderr, "building plan: computing blueprint membership drift...")
 	bpPlan := reconcile.ComputeBlueprints(bpDesired, liveBPs, cfgIDByName)

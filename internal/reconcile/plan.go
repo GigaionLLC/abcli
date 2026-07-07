@@ -100,6 +100,45 @@ func Compute(desired map[string][]byte, base *state.State, live []ab.LiveConfig)
 	return p
 }
 
+// ComputeGitSourceOfTruth treats git as the complete desired state. Live Apple
+// Business configs are only inspected to decide which POST/PATCH/DELETE writes
+// are needed; live-only configs are not pulled into git.
+func ComputeGitSourceOfTruth(desired map[string][]byte, live []ab.LiveConfig) *Plan {
+	liveByName := make(map[string]ab.LiveConfig, len(live))
+	for _, l := range live {
+		liveByName[l.Name] = l
+	}
+	names := map[string]struct{}{}
+	for n := range desired {
+		names[n] = struct{}{}
+	}
+	for n := range liveByName {
+		names[n] = struct{}{}
+	}
+	ordered := make([]string, 0, len(names))
+	for n := range names {
+		ordered = append(ordered, n)
+	}
+	sort.Strings(ordered)
+
+	p := &Plan{Items: []Item{}}
+	for _, n := range ordered {
+		d, hasD := desired[n]
+		l, hasL := liveByName[n]
+		switch {
+		case hasD && hasL:
+			if hash.Raw(d) != hash.Raw([]byte(l.XML)) {
+				p.add(n, Update, "git source of truth: differs in ABM -> PATCH ABM")
+			}
+		case hasD && !hasL:
+			p.add(n, Create, "git source of truth: missing in ABM -> POST ABM")
+		case !hasD && hasL:
+			p.add(n, DeleteABM, "git source of truth: absent from git -> DELETE ABM")
+		}
+	}
+	return p
+}
+
 func (p *Plan) add(name string, a Action, detail string) {
 	p.Items = append(p.Items, Item{Name: name, Action: a, Detail: detail})
 }

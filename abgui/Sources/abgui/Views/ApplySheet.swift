@@ -13,6 +13,7 @@ struct ApplySheet: View {
     @State private var limitText = ""
 
     var body: some View {
+        @Bindable var model = model
         VStack(alignment: .leading, spacing: 12) {
             HStack {
                 Text("Apply to the tenant").font(.headline)
@@ -26,7 +27,17 @@ struct ApplySheet: View {
                     .foregroundStyle(.secondary)
             }
 
+            Toggle("Git source of truth", isOn: $model.gitSourceOfTruth)
+                .onChange(of: model.gitSourceOfTruth) { _, enabled in
+                    if enabled { prune = true }
+                }
+            if model.gitSourceOfTruth {
+                Text("Apple Business will be changed to match gitops/, including deleting live-only configurations.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
             Toggle("Allow deletes / detaches (--prune)", isOn: $prune)
+                .disabled(model.gitSourceOfTruth)
             HStack {
                 Text("Limit writes")
                 TextField("unlimited", text: $limitText)

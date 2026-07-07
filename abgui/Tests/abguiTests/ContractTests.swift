@@ -62,6 +62,25 @@ final class ContractTests: XCTestCase {
         XCTAssertTrue(plan.isEmpty)
     }
 
+    func testPlanArgsIncludeGitSourceOfTruth() async throws {
+        actor Recorder {
+            var args: [String] = []
+            func record(_ a: [String]) { args = a }
+        }
+        struct RecordingRunner: AbctlRunner {
+            let recorder: Recorder
+            func run(_ args: [String], cwd: URL?, stdin: Data?, timeout: Duration) async throws -> AbctlResult {
+                await recorder.record(args)
+                return MockAbctlRunner.ok(#"{"configs":[],"blueprints":[]}"#)
+            }
+        }
+        let recorder = Recorder()
+        let client = AbctlClient(runner: RecordingRunner(recorder: recorder))
+        _ = try await client.plan(gitSourceOfTruth: true)
+        let args = await recorder.args
+        XCTAssertTrue(args.contains("--git-source-of-truth"), "missing --git-source-of-truth in \(args)")
+    }
+
     func testPlanCountsMissingIDBlueprintAttachAsBlocked() async throws {
         let json = """
         {"configs":[],
@@ -162,9 +181,9 @@ final class ContractTests: XCTestCase {
         }
         let recorder = Recorder()
         let client = AbctlClient(runner: RecordingRunner(recorder: recorder))
-        _ = try await client.syncApply(prune: true, limitWrites: 5)
+        _ = try await client.syncApply(prune: true, limitWrites: 5, gitSourceOfTruth: true)
         let args = await recorder.args
-        for token in ["sync", "--apply", "--yes", "--json", "--prune", "--limit-writes", "5"] {
+        for token in ["sync", "--apply", "--yes", "--json", "--git-source-of-truth", "--prune", "--limit-writes", "5"] {
             XCTAssertTrue(args.contains(token), "missing \(token) in \(args)")
         }
     }
