@@ -65,7 +65,7 @@ final class ContractTests: XCTestCase {
     func testPlanCountsMissingIDBlueprintAttachAsBlocked() async throws {
         let json = """
         {"configs":[],
-         "blueprints":[{"blueprint":"Fleet","action":"attach-config","config":"New.mobileconfig","detail":"config in git but not yet in ABM"},
+         "blueprints":[{"blueprint":"Fleet","action":"attach-config","config":"New.mobileconfig","detail":"blocked: config is listed on this blueprint but has no ABM id"},
                        {"blueprint":"Fleet","action":"attach-config","config":"WiFi.mobileconfig","config_id":"c1","detail":"attach"}]}
         """
         let client = AbctlClient(runner: MockAbctlRunner(responses: ["diff": MockAbctlRunner.ok(json)]))

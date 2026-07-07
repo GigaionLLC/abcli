@@ -9,7 +9,7 @@ struct ApplySheet: View {
     @Environment(AppModel.self) private var model
     @Environment(\.dismiss) private var dismiss
 
-    @State private var prune = false
+    @State private var prune = true
     @State private var limitText = ""
 
     var body: some View {

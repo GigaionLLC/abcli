@@ -110,7 +110,7 @@ func ComputeBlueprints(desired map[string]gitops.BlueprintSpec, live []ab.LiveBl
 				}
 				it := BlueprintItem{Blueprint: n, BPID: l.ID, Action: Attach, Config: cfg, ConfigID: cfgIDByName[cfg]}
 				if it.ConfigID == "" {
-					it.Detail = "config in git but not yet in ABM — will attach once the config is created"
+					it.Detail = "blocked: config is listed on this blueprint but has no ABM id; create/sync the config first, or remove it from the blueprint manifest if obsolete"
 				} else {
 					it.Detail = "config in git, not attached in ABM → attach"
 				}
@@ -186,7 +186,7 @@ func (e *Engine) ApplyBlueprints(p *BlueprintPlan, opts Opts, priorWrites int) *
 				// The config isn't in ABM yet (brand-new in git, throttled by
 				// --limit-writes in phase 1, or a dangling manifest reference). This
 				// is a benign, resumable state — a skip, not an error that aborts.
-				e.bpSkip(res, it, "skipped: config "+it.Config+" not yet in ABM — will attach on a later sync")
+				e.bpSkip(res, it, "skipped: config "+it.Config+" has no ABM id; create/sync the config first, or remove it from the blueprint manifest if obsolete")
 				continue
 			}
 			if !e.budget(opts, priorWrites+res.Writes) {

@@ -321,7 +321,9 @@ func runSeed() error {
 		return err
 	}
 	fmt.Fprintln(os.Stderr, "building plan: fetching live configurations from Apple...")
-	live, err := c.FetchCustomSettings()
+	live, err := c.FetchCustomSettingsWithProgress(func(line string) {
+		fmt.Fprintln(os.Stderr, "building plan: "+line)
+	})
 	if err != nil {
 		return err
 	}

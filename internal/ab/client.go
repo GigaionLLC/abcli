@@ -159,6 +159,10 @@ type oneResp struct {
 
 // list follows cursor pagination (meta.paging.nextCursor), capped at 100 pages.
 func (c *Client) list(path string) ([]Resource, error) {
+	return c.listWithProgress(path, nil)
+}
+
+func (c *Client) listWithProgress(path string, progress func(string)) ([]Resource, error) {
 	var all []Resource
 	cursor := ""
 	for i := 0; i < 100; i++ {
@@ -170,16 +174,29 @@ func (c *Client) list(path string) ([]Resource, error) {
 			}
 			p += sep + "cursor=" + url.QueryEscape(cursor)
 		}
+		if progress != nil {
+			progress(fmt.Sprintf("requesting Apple API page %d: %s", i+1, pathSummary(path)))
+		}
 		var lr listResp
 		if err := c.getJSON(p, &lr); err != nil {
 			return nil, err
 		}
 		all = append(all, lr.Data...)
+		if progress != nil {
+			progress(fmt.Sprintf("received %d item(s) from Apple API page %d; %d total so far", len(lr.Data), i+1, len(all)))
+		}
 		if cursor = lr.Meta.Paging.NextCursor; cursor == "" {
 			break
 		}
 	}
 	return all, nil
+}
+
+func pathSummary(path string) string {
+	if before, _, ok := strings.Cut(path, "?"); ok {
+		return before
+	}
+	return path
 }
 
 // --- read methods ---
@@ -375,6 +392,54 @@ func (c *Client) FetchCustomSettings() ([]LiveConfig, error) {
 			}
 		}
 		out = append(out, lc)
+	}
+	return out, nil
+}
+
+func (c *Client) FetchCustomSettingsWithProgress(progress func(string)) ([]LiveConfig, error) {
+	if progress != nil {
+		progress("requesting configurations list from Apple with profile XML fields")
+	}
+	list, err := c.listWithProgress("configurations?fields[configurations]=name,type,updatedDateTime,customSettingsValues&limit=1000", progress)
+	if err != nil {
+		return nil, err
+	}
+	if progress != nil {
+		progress(fmt.Sprintf("examining %d configuration record(s) from Apple", len(list)))
+	}
+	var out []LiveConfig
+	for i, r := range list {
+		name := r.AttrStr("name")
+		if name == "" {
+			name = r.ID
+		}
+		if !strings.EqualFold(r.AttrStr("type"), "CUSTOM_SETTING") {
+			if progress != nil {
+				progress(fmt.Sprintf("skipping non-CUSTOM_SETTING configuration %d/%d: %s", i+1, len(list), name))
+			}
+			continue
+		}
+		if progress != nil {
+			progress(fmt.Sprintf("processing CUSTOM_SETTING configuration %d/%d: %s", i+1, len(list), name))
+		}
+		lc := LiveConfig{Name: r.AttrStr("name"), ID: r.ID, Updated: r.AttrStr("updatedDateTime")}
+		if csv, ok := r.Attr()["customSettingsValues"].(map[string]any); ok {
+			lc.XML, _ = csv["configurationProfile"].(string)
+		}
+		if lc.XML == "" { // list was sparse for this one; fetch its detail.
+			if progress != nil {
+				progress("profile XML missing from list response; fetching configuration detail: " + name)
+			}
+			if full, err := c.GetConfiguration(r.ID); err == nil {
+				if csv, ok := full.Attr()["customSettingsValues"].(map[string]any); ok {
+					lc.XML, _ = csv["configurationProfile"].(string)
+				}
+			}
+		}
+		out = append(out, lc)
+	}
+	if progress != nil {
+		progress(fmt.Sprintf("collected %d live CUSTOM_SETTING configuration profile(s)", len(out)))
 	}
 	return out, nil
 }
