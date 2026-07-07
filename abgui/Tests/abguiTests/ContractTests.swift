@@ -62,6 +62,21 @@ final class ContractTests: XCTestCase {
         XCTAssertTrue(plan.isEmpty)
     }
 
+    func testPlanCountsMissingIDBlueprintAttachAsBlocked() async throws {
+        let json = """
+        {"configs":[],
+         "blueprints":[{"blueprint":"Fleet","action":"attach-config","config":"New.mobileconfig","detail":"config in git but not yet in ABM"},
+                       {"blueprint":"Fleet","action":"attach-config","config":"WiFi.mobileconfig","config_id":"c1","detail":"attach"}]}
+        """
+        let client = AbctlClient(runner: MockAbctlRunner(responses: ["diff": MockAbctlRunner.ok(json)]))
+        let plan = try await client.plan()
+        XCTAssertEqual(plan.changeCount, 2)
+        XCTAssertEqual(plan.actionableChangeCount, 1)
+        XCTAssertEqual(plan.blockedChangeCount, 1)
+        XCTAssertFalse(plan.blueprints[0].isActionable)
+        XCTAssertTrue(plan.blueprints[1].isActionable)
+    }
+
     func testSeedRunsSeedInWorkspaceWithContext() async throws {
         actor Recorder { var args: [String] = []; var cwd: URL?; func set(_ a: [String], _ c: URL?) { args = a; cwd = c } }
         struct RecordingRunner: AbctlRunner {

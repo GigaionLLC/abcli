@@ -17,6 +17,28 @@ func bpItem(p *BlueprintPlan, bp, cfg string) (BlueprintItem, bool) {
 	return BlueprintItem{}, false
 }
 
+func TestApplyBlueprintsReportsProgress(t *testing.T) {
+	f := newFakes()
+	plan := &BlueprintPlan{Items: []BlueprintItem{
+		{Blueprint: "Sales", BPID: "bp-sales", Action: Attach, Config: "vpn.mobileconfig", ConfigID: "c-vpn"},
+	}}
+	var progress []string
+
+	res := engineWith(f).ApplyBlueprints(plan, Opts{
+		Progress: func(line string) { progress = append(progress, line) },
+	}, 0)
+
+	if res.Errors != 0 || res.Writes != 1 {
+		t.Fatalf("apply blueprints = errors %d writes %d, want 0/1", res.Errors, res.Writes)
+	}
+	if indexOf(progress, "applying blueprint attach-config: Sales / vpn.mobileconfig") < 0 {
+		t.Fatalf("missing blueprint apply progress line: %v", progress)
+	}
+	if indexOf(progress, "attaching configuration to blueprint: Sales / vpn.mobileconfig") < 0 {
+		t.Fatalf("missing blueprint attach progress line: %v", progress)
+	}
+}
+
 // bpOutcome finds the outcome for a (blueprint, config) pair.
 func bpOutcome(res *BlueprintResult, bp, cfg string) (BlueprintOutcome, bool) {
 	for _, o := range res.Outcomes {
@@ -140,18 +162,20 @@ func TestApplyBlueprintsAttachMissingConfigID(t *testing.T) {
 	}
 }
 
-// TestBlueprintReconcilable checks that reported-only advisories don't count as
-// reconcilable changes (so --exit-on-diff / --apply don't act on them).
+// TestBlueprintReconcilable checks that reported-only rows and missing-id
+// attaches don't count as reconcilable changes (so --exit-on-diff / --apply
+// don't act on them).
 func TestBlueprintReconcilable(t *testing.T) {
 	reported := &BlueprintPlan{Items: []BlueprintItem{
 		{Blueprint: "NewBP", Action: BlueprintNew},
 		{Blueprint: "Ghost", Action: BlueprintGone},
+		{Blueprint: "Sales", Action: Attach, Config: "new.mobileconfig", ConfigID: ""},
 	}}
 	if reported.HasReconcilableChanges() || reported.ReconcilableCount() != 0 {
-		t.Error("reported-only advisories must not be reconcilable")
+		t.Error("reported rows and missing-id attaches must not be reconcilable")
 	}
 	if !reported.HasChanges() {
-		t.Error("HasChanges still counts advisories (for display)")
+		t.Error("HasChanges still counts blocked/reported rows (for display)")
 	}
 	actionable := &BlueprintPlan{Items: []BlueprintItem{
 		{Blueprint: "Sales", Action: Attach, Config: "vpn.mobileconfig", ConfigID: "c-vpn"},
@@ -159,7 +183,7 @@ func TestBlueprintReconcilable(t *testing.T) {
 		{Blueprint: "Ghost", Action: BlueprintGone},
 	}}
 	if !actionable.HasReconcilableChanges() || actionable.ReconcilableCount() != 2 {
-		t.Errorf("reconcilable count = %d, want 2 (attach+detach, not the advisory)", actionable.ReconcilableCount())
+		t.Errorf("reconcilable count = %d, want 2 (attach+detach, not the reported row)", actionable.ReconcilableCount())
 	}
 }
 

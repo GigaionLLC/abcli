@@ -44,24 +44,30 @@ type BlueprintPlan struct {
 // HasChanges reports whether the plan contains any items (actionable or reported).
 func (p *BlueprintPlan) HasChanges() bool { return len(p.Items) > 0 }
 
-// HasReconcilableChanges reports whether the plan has drift that sync can act on —
-// an attach or a detach. Reported-only advisories (blueprint-new / blueprint-adopt,
-// which sync never applies) are excluded, so they don't make --exit-on-diff loop
-// forever or trigger a confirm-then-do-nothing apply.
+// IsActionable reports whether sync can perform this item in the current run.
+// Attach needs a known ABM config id; an empty id means the row is only an
+// blocked until the config is created or adopted into the baseline.
+func (it BlueprintItem) IsActionable() bool {
+	return it.Action == Detach || (it.Action == Attach && it.ConfigID != "")
+}
+
+// HasReconcilableChanges reports whether the plan has drift that sync can act on.
+// Reported-only rows and attach rows without a config id are excluded, so
+// --exit-on-diff does not loop forever and --apply does not confirm then skip.
 func (p *BlueprintPlan) HasReconcilableChanges() bool {
 	for _, it := range p.Items {
-		if it.Action == Attach || it.Action == Detach {
+		if it.IsActionable() {
 			return true
 		}
 	}
 	return false
 }
 
-// ReconcilableCount is the number of attach/detach items (for a confirm prompt).
+// ReconcilableCount is the number of items apply can perform (for a confirm prompt).
 func (p *BlueprintPlan) ReconcilableCount() int {
 	n := 0
 	for _, it := range p.Items {
-		if it.Action == Attach || it.Action == Detach {
+		if it.IsActionable() {
 			n++
 		}
 	}
@@ -169,6 +175,11 @@ func (e *Engine) ApplyBlueprints(p *BlueprintPlan, opts Opts, priorWrites int) *
 
 	res := &BlueprintResult{Outcomes: []BlueprintOutcome{}}
 	for _, it := range items {
+		target := it.Blueprint
+		if it.Config != "" {
+			target += " / " + it.Config
+		}
+		progress(opts, "applying blueprint "+string(it.Action)+": "+target)
 		switch it.Action {
 		case Attach:
 			if it.ConfigID == "" {
@@ -182,6 +193,7 @@ func (e *Engine) ApplyBlueprints(p *BlueprintPlan, opts Opts, priorWrites int) *
 				e.bpSkip(res, it, "skipped: --limit-writes reached")
 				continue
 			}
+			progress(opts, "attaching configuration to blueprint: "+target)
 			if err := e.Client.AddBlueprintMembers(it.BPID, "configurations", "configurations", []string{it.ConfigID}); err != nil {
 				e.bpFail(res, it, "attach failed: "+err.Error())
 				continue
@@ -201,6 +213,7 @@ func (e *Engine) ApplyBlueprints(p *BlueprintPlan, opts Opts, priorWrites int) *
 				e.bpSkip(res, it, "skipped: --limit-writes reached")
 				continue
 			}
+			progress(opts, "detaching configuration from blueprint: "+target)
 			if err := e.Client.RemoveBlueprintMembers(it.BPID, "configurations", "configurations", []string{it.ConfigID}); err != nil {
 				e.bpFail(res, it, "detach failed: "+err.Error())
 				continue

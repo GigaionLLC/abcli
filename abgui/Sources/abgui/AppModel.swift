@@ -62,6 +62,7 @@ final class AppModel {
     var isLoading = false
     var loadError: String?
     var progressLog: [String] = [] // live stderr narration from abctl during diff/seed
+    var applyProgressLog: [String] = [] // live sync/apply progress, separate from final outcomes
     var lastCheckedAt: Date?       // when the plan was last successfully computed (refresh confirmation)
     private var workTask: Task<Void, Never>? // the in-flight diff/seed, so a Cancel button can stop it
 
@@ -69,6 +70,17 @@ final class AppModel {
     func appendProgress(_ line: String) {
         progressLog.append(line)
         if progressLog.count > 200 { progressLog.removeFirst(progressLog.count - 200) }
+    }
+
+    func appendApplyProgress(_ line: String) {
+        applyProgressLog.append(line)
+        if applyProgressLog.count > 300 { applyProgressLog.removeFirst(applyProgressLog.count - 300) }
+    }
+
+    func clearApplyOutput() {
+        applyProgressLog = []
+        applyResult = nil
+        lastWriteError = nil
     }
 
     // Write state (v2)
@@ -88,6 +100,10 @@ final class AppModel {
     /// A progress sink that streams abctl's stderr into `progressLog` on the main actor.
     private var progressSink: (@Sendable (String) -> Void) {
         { [weak self] line in Task { @MainActor in self?.appendProgress(line) } }
+    }
+
+    private var applyProgressSink: (@Sendable (String) -> Void) {
+        { [weak self] line in Task { @MainActor in self?.appendApplyProgress(line) } }
     }
 
     private static let workspaceKey = "abgui.workspacePath"
@@ -143,21 +159,39 @@ final class AppModel {
 
     /// Reconcile the tenant to the workspace git state. Returns true on a clean apply.
     func apply(prune: Bool, limitWrites: Int?) async -> Bool {
-        guard let client = makeClient() else {
+        guard let client = makeClient(onProgress: applyProgressSink) else {
             lastWriteError = "abctl was not found in the app bundle."
             return false
         }
         isWriting = true
         lastWriteError = nil
+        applyResult = nil
+        applyProgressLog = []
+        appendApplyProgress("starting sync --apply")
+        if let plan {
+            for item in plan.configs {
+                appendApplyProgress("planned config \(item.action): \(item.name)")
+            }
+            for item in plan.blueprints {
+                let target = item.config.map { "\(item.blueprint) / \($0)" } ?? item.blueprint
+                let prefix = item.isActionable ? "planned blueprint" : "blocked blueprint"
+                appendApplyProgress("\(prefix) \(item.action): \(target)")
+            }
+        }
         defer { isWriting = false }
         do {
             let result = try await client.syncApply(prune: prune, limitWrites: limitWrites)
             applyResult = result
+            appendApplyProgress("sync --apply finished: \(result.totalWrites) write(s), \(result.totalErrors) error(s), \(result.totalSkipped) skipped")
+            for row in result.rows {
+                appendApplyProgress("\(row.status): \(row.action) \(row.name) - \(row.detail)")
+            }
             await loadPlan()           // refresh drift
             await loadConfigurations() // the tenant changed
             return result.totalErrors == 0
         } catch {
             lastWriteError = error.localizedDescription
+            appendApplyProgress("sync --apply failed: \(error.localizedDescription)")
             return false
         }
     }

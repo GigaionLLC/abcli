@@ -126,7 +126,7 @@ func runSync(fl syncFlags) error {
 	}
 
 	// --apply path.
-	if !pc.hasChanges() { // nothing to act on (reported-only advisories, if any, still shown)
+	if !pc.hasChanges() { // nothing to act on (reported-only rows, if any, still shown)
 		if machine {
 			return render(planFmt, map[string]any{"configs": &reconcile.Result{Outcomes: []reconcile.Outcome{}}, "blueprints": &reconcile.BlueprintResult{Outcomes: []reconcile.BlueprintOutcome{}}}, nil, nil)
 		}
@@ -155,7 +155,10 @@ func runSync(fl syncFlags) error {
 		Prune:       fl.prune,
 		LimitWrites: fl.limitWrites,
 		Platforms:   parsePlatforms(fl.platforms),
-		GitTime:     gitTimeResolver(pc.tree),
+		Progress: func(line string) {
+			fmt.Fprintln(os.Stderr, line)
+		},
+		GitTime: gitTimeResolver(pc.tree),
 	}
 	// Phase 1: configs. Save the baseline even on partial success.
 	res := eng.Apply(pc.plan, pc.desired, pc.live, pc.base, opts)
@@ -317,7 +320,7 @@ func runSeed() error {
 	if err != nil {
 		return err
 	}
-	fmt.Fprintln(os.Stderr, "fetching live configurations…")
+	fmt.Fprintln(os.Stderr, "building plan: fetching live configurations from Apple...")
 	live, err := c.FetchCustomSettings()
 	if err != nil {
 		return err
@@ -442,24 +445,30 @@ type planCtx struct {
 // loadPlan reads git desired + baseline + live for both configs and blueprints and
 // computes the two 3-way plans. Shared by diff and sync so both see an identical plan.
 func loadPlan() (*planCtx, error) {
+	fmt.Fprintln(os.Stderr, "building plan: loading connection and workspace settings...")
 	c, cfg, err := mustClient()
 	if err != nil {
 		return nil, err
 	}
 	t := gitops.NewTree(cfg.EnvDir)
+	fmt.Fprintln(os.Stderr, "building plan: reading desired configuration profiles from gitops/lib...")
 	desired, err := t.LoadDesired()
 	if err != nil {
 		return nil, err
 	}
+	fmt.Fprintf(os.Stderr, "building plan: loaded %d desired configuration profile(s).\n", len(desired))
+	fmt.Fprintln(os.Stderr, "building plan: reading sync baseline from gitops/state...")
 	base, err := state.Load(t.StateFile)
 	if err != nil {
 		return nil, err
 	}
-	fmt.Fprintln(os.Stderr, "fetching live configurations…")
+	fmt.Fprintf(os.Stderr, "building plan: loaded %d baseline configuration record(s).\n", len(base.Configs))
+	fmt.Fprintln(os.Stderr, "building plan: fetching live configurations from Apple...")
 	live, err := c.FetchCustomSettings()
 	if err != nil {
 		return nil, err
 	}
+	fmt.Fprintf(os.Stderr, "building plan: fetched %d live CUSTOM_SETTING configuration(s).\n", len(live))
 	// Resolve config name↔id from the committed BASELINE (the configs abctl manages),
 	// not from every live config. This keeps the blueprint detach gate (C5: never
 	// touch a config we don't own) consistent between `diff` and `--apply`, and lets
@@ -473,28 +482,68 @@ func loadPlan() (*planCtx, error) {
 			cfgNameByID[e.ABMID] = name
 		}
 	}
+	fmt.Fprintf(os.Stderr, "building plan: resolved %d managed configuration id(s).\n", len(cfgIDByName))
+	fmt.Fprintln(os.Stderr, "building plan: reading desired blueprint manifests from gitops/blueprints...")
 	bpDesired, err := t.LoadBlueprints()
 	if err != nil {
 		return nil, err
 	}
-	fmt.Fprintln(os.Stderr, "fetching blueprints…")
-	liveBPs, err := c.FetchBlueprints(cfgNameByID)
+	fmt.Fprintf(os.Stderr, "building plan: loaded %d desired blueprint manifest(s).\n", len(bpDesired))
+	liveBPs, err := fetchLiveBlueprintsForPlan(c, cfgNameByID)
 	if err != nil {
 		return nil, err
 	}
+	fmt.Fprintln(os.Stderr, "building plan: computing configuration drift...")
+	cfgPlan := reconcile.Compute(desired, base, live)
+	fmt.Fprintf(os.Stderr, "building plan: computed %d configuration change(s).\n", len(cfgPlan.Items))
+	fmt.Fprintln(os.Stderr, "building plan: computing blueprint membership drift...")
+	bpPlan := reconcile.ComputeBlueprints(bpDesired, liveBPs, cfgIDByName)
+	fmt.Fprintf(os.Stderr, "building plan: computed %d blueprint membership change(s).\n", len(bpPlan.Items))
 	return &planCtx{
 		c: c, cfg: cfg, tree: t, desired: desired, base: base, live: live,
-		plan:        reconcile.Compute(desired, base, live),
+		plan:        cfgPlan,
 		bpDesired:   bpDesired,
 		liveBPs:     liveBPs,
 		cfgIDByName: cfgIDByName,
-		bpPlan:      reconcile.ComputeBlueprints(bpDesired, liveBPs, cfgIDByName),
+		bpPlan:      bpPlan,
 	}, nil
+}
+
+func fetchLiveBlueprintsForPlan(c *ab.Client, configNameByID map[string]string) ([]ab.LiveBlueprint, error) {
+	fmt.Fprintln(os.Stderr, "building plan: fetching live blueprints from Apple...")
+	bps, err := c.ListBlueprints()
+	if err != nil {
+		return nil, err
+	}
+	fmt.Fprintf(os.Stderr, "building plan: fetched %d live blueprint(s).\n", len(bps))
+	out := make([]ab.LiveBlueprint, 0, len(bps))
+	for i, bp := range bps {
+		name := bp.AttrStr("name")
+		if name == "" {
+			name = bp.ID
+		}
+		fmt.Fprintf(os.Stderr, "building plan: fetching blueprint membership %d/%d: %s\n", i+1, len(bps), name)
+		links, err := c.BlueprintRelationship(bp.ID, "configurations")
+		if err != nil {
+			return nil, err
+		}
+		names := make([]string, 0, len(links))
+		for _, l := range links {
+			if n, ok := configNameByID[l.ID]; ok {
+				names = append(names, n)
+			} else {
+				names = append(names, l.ID)
+			}
+		}
+		sort.Strings(names)
+		out = append(out, ab.LiveBlueprint{Name: bp.AttrStr("name"), ID: bp.ID, Configs: names})
+	}
+	return out, nil
 }
 
 // hasChanges reports whether sync has anything to *act on* — config changes or
 // reconcilable (attach/detach) blueprint changes. Reported-only blueprint
-// advisories (blueprint-new / blueprint-adopt) are excluded so they don't force
+// rows (blueprint-new / blueprint-adopt) are excluded so they don't force
 // --exit-on-diff to loop or make --apply confirm-then-do-nothing.
 func (pc *planCtx) hasChanges() bool {
 	return pc.plan.HasChanges() || pc.bpPlan.HasReconcilableChanges()
@@ -502,7 +551,7 @@ func (pc *planCtx) hasChanges() bool {
 
 // printFullPlan renders both plans: a combined JSON object under --json, else a
 // config table followed by a blueprint table. It shows ALL items, including
-// reported-only advisories (which are useful even though sync won't apply them).
+// reported-only rows (which are useful even though sync won't apply them).
 func printFullPlan(pc *planCtx, format string) error {
 	if format == "json" || format == "yaml" {
 		return render(format, map[string]any{"configs": asList(pc.plan.Items), "blueprints": asList(pc.bpPlan.Items)}, nil, nil)

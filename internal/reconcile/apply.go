@@ -44,6 +44,7 @@ type Opts struct {
 	Prune       bool     // enable DeleteABM (off by default — never prune unasked)
 	LimitWrites int      // circuit breaker: max tenant writes per run (0 = unlimited)
 	Platforms   []string // configuredForPlatforms for newly-created configs
+	Progress    func(string)
 	// GitTime resolves the git-side timestamp of a config (last commit time, else
 	// file mtime) for newest-wins conflict resolution. ok=false → the timestamp is
 	// unknown, so the conflict is skipped rather than guessed (never clobber a side
@@ -105,6 +106,7 @@ func (e *Engine) Apply(p *Plan, desired map[string][]byte, live []ab.LiveConfig,
 
 	res := &Result{Outcomes: []Outcome{}}
 	for _, it := range items {
+		progress(opts, "applying config "+string(it.Action)+": "+it.Name)
 		l := liveByName[it.Name]
 		switch it.Action {
 		case Create:
@@ -114,9 +116,9 @@ func (e *Engine) Apply(p *Plan, desired map[string][]byte, live []ab.LiveConfig,
 		case Conflict:
 			e.conflict(res, opts, it.Name, desired[it.Name], l, base)
 		case Pull, PullNew:
-			e.pull(res, it.Name, it.Action, l, base)
+			e.pull(res, opts, it.Name, it.Action, l, base)
 		case DeleteGit:
-			e.deleteGit(res, it.Name, base)
+			e.deleteGit(res, opts, it.Name, base)
 		case DeleteABM:
 			e.deleteABM(res, opts, it.Name, l, base)
 		}
@@ -141,7 +143,7 @@ func (e *Engine) conflict(res *Result, opts Opts, name string, want []byte, l ab
 		return
 	}
 	if gitT.Before(liveT) { // live is strictly newer → live wins → pull into git
-		e.pull(res, name, Pull, l, base)
+		e.pull(res, opts, name, Pull, l, base)
 		return
 	}
 	// git is newer or exactly ties → git wins → push over live (archive first)
@@ -156,6 +158,7 @@ func (e *Engine) push(res *Result, opts Opts, name string, act Action, want []by
 		return
 	}
 	if act == Create {
+		progress(opts, "creating configuration in ABM: "+name)
 		id, updated, err := e.Client.CreateConfiguration(name, string(want), opts.Platforms)
 		if err != nil {
 			e.fail(res, name, act, "create failed: "+err.Error())
@@ -167,6 +170,7 @@ func (e *Engine) push(res *Result, opts Opts, name string, act Action, want []by
 		return
 	}
 	// Update: archive the live version before overwriting it.
+	progress(opts, "archiving current ABM configuration: "+name)
 	archPath, err := e.Archiver.Archive(name, reason, []byte(l.XML), map[string]string{
 		"abm_id": l.ID, "hash": hash.Raw([]byte(l.XML)), "updatedDateTime": l.Updated,
 	})
@@ -174,6 +178,7 @@ func (e *Engine) push(res *Result, opts Opts, name string, act Action, want []by
 		e.fail(res, name, act, "archive failed (write skipped to preserve the audit trail): "+err.Error())
 		return
 	}
+	progress(opts, "patching configuration in ABM: "+name)
 	updated, err := e.Client.UpdateConfiguration(l.ID, name, string(want))
 	if err != nil {
 		e.fail(res, name, act, "update failed: "+err.Error())
@@ -185,7 +190,8 @@ func (e *Engine) push(res *Result, opts Opts, name string, act Action, want []by
 }
 
 // pull writes the live version into the git tree (no tenant write).
-func (e *Engine) pull(res *Result, name string, act Action, l ab.LiveConfig, base *state.State) {
+func (e *Engine) pull(res *Result, opts Opts, name string, act Action, l ab.LiveConfig, base *state.State) {
+	progress(opts, "writing live configuration into git: "+name)
 	if err := e.Files.WriteConfig(name, []byte(l.XML)); err != nil {
 		e.fail(res, name, act, "pull (write git file) failed: "+err.Error())
 		return
@@ -195,7 +201,8 @@ func (e *Engine) pull(res *Result, name string, act Action, l ab.LiveConfig, bas
 }
 
 // deleteGit removes a git file whose config vanished from ABM (no tenant write).
-func (e *Engine) deleteGit(res *Result, name string, base *state.State) {
+func (e *Engine) deleteGit(res *Result, opts Opts, name string, base *state.State) {
+	progress(opts, "removing git file for missing ABM configuration: "+name)
 	if err := e.Files.RemoveConfig(name); err != nil {
 		e.fail(res, name, DeleteGit, "delete git file failed: "+err.Error())
 		return
@@ -214,6 +221,7 @@ func (e *Engine) deleteABM(res *Result, opts Opts, name string, l ab.LiveConfig,
 		e.skip(res, name, DeleteABM, "skipped: --limit-writes reached")
 		return
 	}
+	progress(opts, "archiving configuration before ABM delete: "+name)
 	archPath, err := e.Archiver.Archive(name, reasonPruned, []byte(l.XML), map[string]string{
 		"abm_id": l.ID, "hash": hash.Raw([]byte(l.XML)), "updatedDateTime": l.Updated,
 	})
@@ -221,6 +229,7 @@ func (e *Engine) deleteABM(res *Result, opts Opts, name string, l ab.LiveConfig,
 		e.fail(res, name, DeleteABM, "archive failed (delete skipped to preserve the audit trail): "+err.Error())
 		return
 	}
+	progress(opts, "deleting configuration from ABM: "+name)
 	if err := e.Client.DeleteConfiguration(l.ID); err != nil {
 		e.fail(res, name, DeleteABM, "delete ABM failed: "+err.Error())
 		return
@@ -243,4 +252,10 @@ func (e *Engine) skip(res *Result, name string, act Action, detail string) {
 func (e *Engine) fail(res *Result, name string, act Action, detail string) {
 	res.Errors++
 	res.Outcomes = append(res.Outcomes, Outcome{Name: name, Action: act, Status: "error", Detail: detail})
+}
+
+func progress(opts Opts, line string) {
+	if opts.Progress != nil {
+		opts.Progress(line)
+	}
 }

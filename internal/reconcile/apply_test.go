@@ -409,6 +409,28 @@ func TestApplyDeleteGitFailure(t *testing.T) {
 	}
 }
 
+func TestApplyReportsProgress(t *testing.T) {
+	f := newFakes()
+	desired := map[string][]byte{"new.mobileconfig": []byte("NEW")}
+	base := &state.State{Configs: map[string]state.Entry{}}
+	plan := &Plan{Items: []Item{{Name: "new.mobileconfig", Action: Create}}}
+	var progress []string
+
+	res := engineWith(f).Apply(plan, desired, nil, base, Opts{
+		Progress: func(line string) { progress = append(progress, line) },
+	})
+
+	if res.Errors != 0 || res.Writes != 1 {
+		t.Fatalf("apply = errors %d writes %d, want 0/1", res.Errors, res.Writes)
+	}
+	if indexOf(progress, "applying config create-abm: new.mobileconfig") < 0 {
+		t.Fatalf("missing apply progress line: %v", progress)
+	}
+	if indexOf(progress, "creating configuration in ABM: new.mobileconfig") < 0 {
+		t.Fatalf("missing create progress line: %v", progress)
+	}
+}
+
 func indexOf(ss []string, want string) int {
 	for i, s := range ss {
 		if s == want {

@@ -10,6 +10,8 @@ struct Plan: Decodable, Equatable {
 
     var isEmpty: Bool { configs.isEmpty && blueprints.isEmpty }
     var changeCount: Int { configs.count + blueprints.count }
+    var actionableChangeCount: Int { configs.count + blueprints.filter(\.isActionable).count }
+    var blockedChangeCount: Int { changeCount - actionableChangeCount }
 
     enum CodingKeys: String, CodingKey { case configs, blueprints }
 
@@ -43,6 +45,9 @@ struct BlueprintChange: Decodable, Identifiable, Equatable {
     let config: String?
     let configID: String?
     let detail: String
+    var isActionable: Bool {
+        action == "detach-config" || (action == "attach-config" && !(configID ?? "").isEmpty)
+    }
 
     enum CodingKeys: String, CodingKey {
         case blueprint, action, config, detail
