@@ -170,12 +170,16 @@ final class ContractTests: XCTestCase {
     func testApplyArgsIncludePruneAndLimit() async throws {
         actor Recorder {
             var args: [String] = []
-            func record(_ a: [String]) { args = a }
+            var timeoutSeconds: Int = 0
+            func record(_ a: [String], timeout: Duration) {
+                args = a
+                timeoutSeconds = Int(timeout.components.seconds)
+            }
         }
         struct RecordingRunner: AbctlRunner {
             let recorder: Recorder
             func run(_ args: [String], cwd: URL?, stdin: Data?, timeout: Duration) async throws -> AbctlResult {
-                await recorder.record(args)
+                await recorder.record(args, timeout: timeout)
                 return MockAbctlRunner.ok(#"{"configs":{"outcomes":[],"writes":0,"errors":0,"skipped":0},"blueprints":{"outcomes":[],"writes":0,"errors":0,"skipped":0}}"#)
             }
         }
@@ -186,6 +190,8 @@ final class ContractTests: XCTestCase {
         for token in ["sync", "--apply", "--yes", "--json", "--git-source-of-truth", "--prune", "--limit-writes", "5"] {
             XCTAssertTrue(args.contains(token), "missing \(token) in \(args)")
         }
+        let timeoutSeconds = await recorder.timeoutSeconds
+        XCTAssertGreaterThanOrEqual(timeoutSeconds, 1_200, "apply needs a tenant-scale timeout")
     }
 
     func testArchiveScannerParsesTree() throws {

@@ -23,6 +23,8 @@ enum AbctlError: Error, LocalizedError {
             var msg = "abctl ran for \(waited) without finishing and was stopped. It reaches Apple's API "
                 + "(api-business.apple.com and account.apple.com) for live data, so this is usually a slow or "
                 + "blocked network (VPN/proxy/firewall), a rate-limited token, or credentials that aren't set. "
+                + "This limit is abgui's command guardrail, not an Apple timeout; large tenants can spend several "
+                + "minutes fetching per-profile detail before writes begin. "
                 + "Check the connection dot in the sidebar; for diff/apply, also confirm the chosen folder "
                 + "contains a gitops/ tree."
             let tail = lastOutput.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -44,6 +46,8 @@ struct AbctlClient {
     var repoRoot: URL?
 
     private static let decoder = JSONDecoder()
+    private static let planTimeout: Duration = .seconds(600)
+    private static let applyTimeout: Duration = .seconds(1_200)
 
     // MARK: reads
 
@@ -108,7 +112,7 @@ struct AbctlClient {
     func plan(gitSourceOfTruth: Bool = false) async throws -> Plan {
         var args = ["diff", "--json"]
         if gitSourceOfTruth { args.append("--git-source-of-truth") }
-        return try await decodeJSON(Plan.self, args, cwd: repoRoot, timeout: .seconds(120))
+        return try await decodeJSON(Plan.self, args, cwd: repoRoot, timeout: Self.planTimeout)
     }
 
     /// Initialize (or refresh) the workspace's GitOps tree from live tenant state: `abctl seed`
@@ -129,7 +133,7 @@ struct AbctlClient {
         if gitSourceOfTruth { args.append("--git-source-of-truth") }
         if prune { args.append("--prune") }
         if let limitWrites, limitWrites > 0 { args += ["--limit-writes", String(limitWrites)] }
-        return try await decodeJSON(ApplyResult.self, args, cwd: repoRoot, timeout: .seconds(180))
+        return try await decodeJSON(ApplyResult.self, args, cwd: repoRoot, timeout: Self.applyTimeout)
     }
 
     /// The raw `.mobileconfig` XML for a config (stdout is XML, not JSON).
