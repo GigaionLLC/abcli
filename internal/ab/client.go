@@ -408,6 +408,7 @@ func (c *Client) FetchCustomSettingsWithProgress(progress func(string)) ([]LiveC
 		progress(fmt.Sprintf("examining %d configuration record(s) from Apple", len(list)))
 	}
 	var out []LiveConfig
+	missingProfileXML := 0
 	for i, r := range list {
 		name := r.AttrStr("name")
 		if name == "" {
@@ -427,8 +428,12 @@ func (c *Client) FetchCustomSettingsWithProgress(progress func(string)) ([]LiveC
 			lc.XML, _ = csv["configurationProfile"].(string)
 		}
 		if lc.XML == "" { // list was sparse for this one; fetch its detail.
+			missingProfileXML++
 			if progress != nil {
-				progress("profile XML missing from list response; fetching configuration detail: " + name)
+				if missingProfileXML == 1 {
+					progress("Apple's configuration list omitted profile XML; fetching per-profile detail as needed")
+				}
+				progress(fmt.Sprintf("fetching profile XML detail %d/%d: %s", i+1, len(list), name))
 			}
 			if full, err := c.GetConfiguration(r.ID); err == nil {
 				if csv, ok := full.Attr()["customSettingsValues"].(map[string]any); ok {
@@ -439,6 +444,9 @@ func (c *Client) FetchCustomSettingsWithProgress(progress func(string)) ([]LiveC
 		out = append(out, lc)
 	}
 	if progress != nil {
+		if missingProfileXML > 0 {
+			progress(fmt.Sprintf("fetched profile XML detail for %d configuration profile(s)", missingProfileXML))
+		}
 		progress(fmt.Sprintf("collected %d live CUSTOM_SETTING configuration profile(s)", len(out)))
 	}
 	return out, nil
