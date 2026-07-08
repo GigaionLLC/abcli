@@ -70,7 +70,7 @@ The Apply sheet exposes an **Advanced sync behavior** section:
 - **Verify: None** trusts successful write responses and skips post-apply verification.
 
 Progress and final results are shown in separate panes; once results are posted, the apply spinner stops and
-the close button reads **Exit**.
+the close button reads **Done**.
 
 ## Layout
 

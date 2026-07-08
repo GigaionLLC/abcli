@@ -15,77 +15,96 @@ struct ApplySheet: View {
     var body: some View {
         @Bindable var model = model
         VStack(alignment: .leading, spacing: 12) {
-            HStack {
-                Text("Apply to the tenant").font(.headline)
-                Spacer()
-                Button("Clear") { model.clearApplyOutput() }
-                    .disabled(model.isWriting || (model.applyProgressLog.isEmpty && model.applyResult == nil && model.lastWriteError == nil))
-            }
+            header
 
-            if let plan = model.plan {
-                Text(applySummary(plan))
-                    .foregroundStyle(.secondary)
-            }
+            Divider()
 
-            Toggle("Git source of truth", isOn: $model.gitSourceOfTruth)
-                .onChange(of: model.gitSourceOfTruth) { _, enabled in
-                    if enabled { prune = true }
-                }
-            if model.gitSourceOfTruth {
-                Text("Apple Business will be changed to match gitops/, including deleting live-only configurations.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-            Toggle("Allow deletes / detaches (--prune)", isOn: $prune)
-                .disabled(model.gitSourceOfTruth)
-            DisclosureGroup("Advanced sync behavior") {
-                Picker("Refresh", selection: $model.refreshMode) {
-                    Text("Smart").tag("smart")
-                    Text("Full Apple refresh").tag("full")
-                    Text("Metadata/cache only").tag("metadata-only")
-                }
-                Picker("Verify", selection: $model.verifyMode) {
-                    Text("Targeted").tag("targeted")
-                    Text("Full").tag("full")
-                    Text("None").tag("none")
-                }
-            }
-            HStack {
-                Text("Limit writes")
-                TextField("unlimited", text: $limitText)
-                    .frame(width: 90)
-                    .textFieldStyle(.roundedBorder)
-                Text("(circuit breaker)").foregroundStyle(.secondary).font(.caption)
-            }
+            ScrollView {
+                VStack(alignment: .leading, spacing: 12) {
+                    if let plan = model.plan {
+                        Text(applySummary(plan))
+                            .foregroundStyle(.secondary)
+                    }
 
-            if model.isWriting || !model.applyProgressLog.isEmpty {
-                logView(title: "Progress", lines: model.applyProgressLog)
-            }
+                    Toggle("Git source of truth", isOn: $model.gitSourceOfTruth)
+                        .onChange(of: model.gitSourceOfTruth) { _, enabled in
+                            if enabled { prune = true }
+                        }
+                    if model.gitSourceOfTruth {
+                        Text("Apple Business will be changed to match gitops/, including deleting live-only configurations.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    Toggle("Allow deletes / detaches (--prune)", isOn: $prune)
+                        .disabled(model.gitSourceOfTruth)
+                    DisclosureGroup("Advanced sync behavior") {
+                        Picker("Refresh", selection: $model.refreshMode) {
+                            Text("Smart").tag("smart")
+                            Text("Full Apple refresh").tag("full")
+                            Text("Metadata/cache only").tag("metadata-only")
+                        }
+                        Picker("Verify", selection: $model.verifyMode) {
+                            Text("Targeted").tag("targeted")
+                            Text("Full").tag("full")
+                            Text("None").tag("none")
+                        }
+                    }
+                    HStack {
+                        Text("Limit writes")
+                        TextField("unlimited", text: $limitText)
+                            .frame(width: 90)
+                            .textFieldStyle(.roundedBorder)
+                        Text("(circuit breaker)").foregroundStyle(.secondary).font(.caption)
+                    }
 
-            if let result = model.applyResult {
-                resultView(result)
-            }
-            if let error = model.lastWriteError {
-                Text(error).foregroundStyle(.red).font(.caption).textSelection(.enabled)
-            }
+                    if model.isWriting || !model.applyProgressLog.isEmpty {
+                        logView(title: "Progress", lines: model.applyProgressLog)
+                    }
 
-            HStack {
-                if model.isWriting { ProgressView().controlSize(.small) }
-                Spacer()
-                Button(model.applyResult == nil ? "Cancel" : "Exit") { dismiss() }
-                    .keyboardShortcut(.cancelAction)
-                Button("Apply") {
-                    Task {
-                        _ = await model.apply(prune: prune,
-                                              limitWrites: Int(limitText.trimmingCharacters(in: .whitespaces)))
+                    if let result = model.applyResult {
+                        resultView(result)
+                    }
+                    if let error = model.lastWriteError {
+                        Text(error).foregroundStyle(.red).font(.caption).textSelection(.enabled)
                     }
                 }
-                .keyboardShortcut(.defaultAction)
-                .disabled(model.isWriting || (model.plan?.actionableChangeCount ?? 0) == 0)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.vertical, 2)
             }
+            .scrollIndicators(.visible)
+
+            Divider()
+
+            footer
         }
         .padding()
-        .frame(minWidth: 640, minHeight: 440)
+        .frame(minWidth: 640, minHeight: 320, idealHeight: 520)
+    }
+
+    private var header: some View {
+        HStack {
+            Text("Apply to the tenant").font(.headline)
+            Spacer()
+            Button("Clear") { model.clearApplyOutput() }
+                .disabled(model.isWriting || (model.applyProgressLog.isEmpty && model.applyResult == nil && model.lastWriteError == nil))
+        }
+    }
+
+    private var footer: some View {
+        HStack {
+            if model.isWriting { ProgressView().controlSize(.small) }
+            Spacer()
+            Button(model.applyResult == nil ? "Cancel" : "Done") { dismiss() }
+                .keyboardShortcut(.cancelAction)
+            Button("Apply") {
+                Task {
+                    _ = await model.apply(prune: prune,
+                                          limitWrites: Int(limitText.trimmingCharacters(in: .whitespaces)))
+                }
+            }
+            .keyboardShortcut(.defaultAction)
+            .disabled(model.isWriting || (model.plan?.actionableChangeCount ?? 0) == 0)
+        }
     }
 
     private func applySummary(_ plan: Plan) -> String {
