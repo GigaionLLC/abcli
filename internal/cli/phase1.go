@@ -22,6 +22,16 @@ import (
 	"github.com/GigaionLLC/abcli/internal/state"
 )
 
+const (
+	refreshSmart    = "smart"
+	refreshFull     = "full"
+	refreshMetadata = "metadata-only"
+
+	verifyTargeted = "targeted"
+	verifyFull     = "full"
+	verifyNone     = "none"
+)
+
 func newSeedCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "seed",
@@ -42,12 +52,16 @@ func newValidateCmd() *cobra.Command {
 
 func newDiffCmd() *cobra.Command {
 	var asJSON, exitOnDiff, gitSourceOfTruth bool
+	var refresh string
 	c := &cobra.Command{
 		Use:   "diff",
 		Short: "3-way plan: git desired vs baseline vs live ABM (configs + blueprint membership)",
 		Args:  cobra.NoArgs,
 		RunE: func(*cobra.Command, []string) error {
-			pc, err := loadPlan(gitSourceOfTruth)
+			if err := validateRefreshMode(refresh); err != nil {
+				return err
+			}
+			pc, err := loadPlan(gitSourceOfTruth, refresh)
 			if err != nil {
 				return err
 			}
@@ -63,6 +77,7 @@ func newDiffCmd() *cobra.Command {
 	c.Flags().BoolVar(&asJSON, "json", false, "JSON output")
 	c.Flags().BoolVar(&exitOnDiff, "exit-on-diff", false, "exit 3 if changes are pending")
 	c.Flags().BoolVar(&gitSourceOfTruth, "git-source-of-truth", false, "treat gitops/ as authoritative; do not pull live-only Apple configs into git")
+	c.Flags().StringVar(&refresh, "refresh", refreshSmart, "live refresh mode: smart, full, metadata-only")
 	return c
 }
 
@@ -76,6 +91,8 @@ type syncFlags struct {
 	limitWrites      int
 	platforms        string
 	gitSourceOfTruth bool
+	refresh          string
+	verify           string
 }
 
 func newSyncCmd() *cobra.Command {
@@ -104,6 +121,8 @@ func newSyncCmd() *cobra.Command {
 	c.Flags().IntVar(&fl.limitWrites, "limit-writes", 0, "circuit breaker: max tenant writes this run (0 = unlimited)")
 	c.Flags().StringVar(&fl.platforms, "platforms", "", "comma-separated configuredForPlatforms for created configs (default PLATFORM_MACOS)")
 	c.Flags().BoolVar(&fl.gitSourceOfTruth, "git-source-of-truth", false, "treat gitops/ as authoritative; apply implies --prune so Apple matches git")
+	c.Flags().StringVar(&fl.refresh, "refresh", refreshSmart, "live refresh mode: smart, full, metadata-only")
+	c.Flags().StringVar(&fl.verify, "verify", verifyTargeted, "post-apply verification: targeted, full, none")
 	return c
 }
 
@@ -111,7 +130,13 @@ func newSyncCmd() *cobra.Command {
 // it: confirm (unless --yes/$ABCTL_APPROVE) → archive-before-overwrite apply →
 // save the updated baseline. Dry-run is the default and writes nothing.
 func runSync(fl syncFlags) error {
-	pc, err := loadPlan(fl.gitSourceOfTruth)
+	if err := validateRefreshMode(fl.refresh); err != nil {
+		return err
+	}
+	if err := validateVerifyMode(fl.verify); err != nil {
+		return err
+	}
+	pc, err := loadPlan(fl.gitSourceOfTruth, fl.refresh)
 	if err != nil {
 		return err
 	}
@@ -184,10 +209,11 @@ func runSync(fl syncFlags) error {
 		}
 	}
 	liveBPs := pc.liveBPs
-	if fl.gitSourceOfTruth {
-		fmt.Fprintln(os.Stderr, "refreshing live state after config writes for git-source-of-truth blueprint reconciliation...")
-		liveAfter, err := pc.c.FetchCustomSettingsWithProgress(func(line string) {
-			fmt.Fprintln(os.Stderr, "refreshing live state: "+line)
+	switch fl.verify {
+	case verifyFull:
+		fmt.Fprintln(os.Stderr, "post-apply verification: full live configuration and blueprint refresh...")
+		liveAfter, err := fetchLiveConfigsForPlan(pc.c, pc.desired, pc.base, fl.gitSourceOfTruth, refreshFull, func(line string) {
+			fmt.Fprintln(os.Stderr, "post-apply verification: "+line)
 		})
 		if err != nil {
 			return err
@@ -202,6 +228,15 @@ func runSync(fl syncFlags) error {
 		if err != nil {
 			return err
 		}
+	case verifyTargeted:
+		fmt.Fprintln(os.Stderr, "post-apply verification: refreshing blueprint membership only...")
+		var err error
+		liveBPs, err = fetchLiveBlueprintsForPlan(pc.c, cfgNameByID)
+		if err != nil {
+			return err
+		}
+	case verifyNone:
+		fmt.Fprintln(os.Stderr, "post-apply verification: skipped by --verify=none.")
 	}
 	bpPlan := reconcile.ComputeBlueprints(pc.bpDesired, liveBPs, cfgIDByName)
 	bpRes := eng.ApplyBlueprints(bpPlan, opts, res.Writes)
@@ -454,6 +489,114 @@ func resolveValidator() []string {
 	return nil
 }
 
+func validateRefreshMode(mode string) error {
+	switch mode {
+	case refreshSmart, refreshFull, refreshMetadata:
+		return nil
+	default:
+		return fmt.Errorf("invalid --refresh %q (want smart, full, or metadata-only)", mode)
+	}
+}
+
+func validateVerifyMode(mode string) error {
+	switch mode {
+	case verifyTargeted, verifyFull, verifyNone:
+		return nil
+	default:
+		return fmt.Errorf("invalid --verify %q (want targeted, full, or none)", mode)
+	}
+}
+
+func fetchLiveConfigsForPlan(c *ab.Client, desired map[string][]byte, base *state.State, gitSourceOfTruth bool, refresh string, progress func(string)) ([]ab.LiveConfig, error) {
+	switch refresh {
+	case refreshFull:
+		return c.FetchCustomSettingsWithProgress(progress)
+	case refreshMetadata:
+		live, err := c.FetchCustomSettingsMetadata(progress)
+		if err != nil {
+			return nil, err
+		}
+		reuseCachedLiveHashes(live, base, progress)
+		return live, nil
+	case refreshSmart:
+		return fetchLiveConfigsSmart(c, desired, base, gitSourceOfTruth, progress)
+	default:
+		return nil, fmt.Errorf("invalid refresh mode %q", refresh)
+	}
+}
+
+func fetchLiveConfigsSmart(c *ab.Client, desired map[string][]byte, base *state.State, gitSourceOfTruth bool, progress func(string)) ([]ab.LiveConfig, error) {
+	live, err := c.FetchCustomSettingsMetadata(progress)
+	if err != nil {
+		return nil, err
+	}
+	fetched, cached := 0, 0
+	for i := range live {
+		l := &live[i]
+		baseEntry, hasBase := base.Configs[l.Name]
+		desiredXML, hasDesired := desired[l.Name]
+		if hasBase && baseEntry.ABMID == l.ID && sameAppleTime(baseEntry.UpdatedDateTime, l.Updated) {
+			l.Hash = baseEntry.Hash
+		}
+		needDetail := l.Hash == ""
+		if hasDesired && l.Hash != "" && hash.Raw(desiredXML) != l.Hash {
+			needDetail = true
+		}
+		if !hasDesired {
+			// Pulls and prunes need the actual live XML for writing or archiving.
+			needDetail = true
+		}
+		if gitSourceOfTruth && !hasDesired {
+			needDetail = true
+		}
+		if !needDetail {
+			cached++
+			if progress != nil {
+				progress("reusing cached profile hash: " + l.Name)
+			}
+			continue
+		}
+		if progress != nil {
+			progress(fmt.Sprintf("fetching profile XML detail %d/%d: %s", i+1, len(live), l.Name))
+		}
+		full, err := c.FetchCustomSettingDetail(l.ID)
+		if err != nil {
+			return nil, err
+		}
+		live[i] = full
+		fetched++
+	}
+	if progress != nil {
+		progress(fmt.Sprintf("smart refresh reused %d cached profile hash(es), fetched %d profile detail(s)", cached, fetched))
+	}
+	return live, nil
+}
+
+func reuseCachedLiveHashes(live []ab.LiveConfig, base *state.State, progress func(string)) {
+	reused := 0
+	for i := range live {
+		if b, ok := base.Configs[live[i].Name]; ok && b.ABMID == live[i].ID && sameAppleTime(b.UpdatedDateTime, live[i].Updated) {
+			live[i].Hash = b.Hash
+			reused++
+		}
+	}
+	if progress != nil {
+		progress(fmt.Sprintf("metadata-only refresh reused %d cached profile hash(es); uncached profiles have unknown content", reused))
+	}
+}
+
+func sameAppleTime(a, b string) bool {
+	if a == "" || b == "" {
+		return a == b
+	}
+	at, errA := time.Parse(time.RFC3339Nano, a)
+	bt, errB := time.Parse(time.RFC3339Nano, b)
+	if errA == nil && errB == nil {
+		return at.Equal(bt)
+	}
+	return a == b
+}
+
 // planCtx bundles everything a reconcile needs: the client, the on-disk tree, the
 // three inputs to the diff (git desired / committed baseline / live), and the plan.
 type planCtx struct {
@@ -473,7 +616,7 @@ type planCtx struct {
 
 // loadPlan reads git desired + baseline + live for both configs and blueprints and
 // computes the two 3-way plans. Shared by diff and sync so both see an identical plan.
-func loadPlan(gitSourceOfTruth bool) (*planCtx, error) {
+func loadPlan(gitSourceOfTruth bool, refresh string) (*planCtx, error) {
 	fmt.Fprintln(os.Stderr, "building plan: loading connection and workspace settings...")
 	c, cfg, err := mustClient()
 	if err != nil {
@@ -492,8 +635,8 @@ func loadPlan(gitSourceOfTruth bool) (*planCtx, error) {
 		return nil, err
 	}
 	fmt.Fprintf(os.Stderr, "building plan: loaded %d baseline configuration record(s).\n", len(base.Configs))
-	fmt.Fprintln(os.Stderr, "building plan: fetching live configurations from Apple...")
-	live, err := c.FetchCustomSettingsWithProgress(func(line string) {
+	fmt.Fprintf(os.Stderr, "building plan: fetching live configurations from Apple (%s refresh)...\n", refresh)
+	live, err := fetchLiveConfigsForPlan(c, desired, base, gitSourceOfTruth, refresh, func(line string) {
 		fmt.Fprintln(os.Stderr, "building plan: "+line)
 	})
 	if err != nil {

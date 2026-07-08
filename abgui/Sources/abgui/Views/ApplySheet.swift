@@ -38,6 +38,18 @@ struct ApplySheet: View {
             }
             Toggle("Allow deletes / detaches (--prune)", isOn: $prune)
                 .disabled(model.gitSourceOfTruth)
+            DisclosureGroup("Advanced sync behavior") {
+                Picker("Refresh", selection: $model.refreshMode) {
+                    Text("Smart").tag("smart")
+                    Text("Full Apple refresh").tag("full")
+                    Text("Metadata/cache only").tag("metadata-only")
+                }
+                Picker("Verify", selection: $model.verifyMode) {
+                    Text("Targeted").tag("targeted")
+                    Text("Full").tag("full")
+                    Text("None").tag("none")
+                }
+            }
             HStack {
                 Text("Limit writes")
                 TextField("unlimited", text: $limitText)

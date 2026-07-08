@@ -56,6 +56,8 @@ final class AppModel {
     var applyResult: ApplyResult?
     var archiveEntries: [ArchiveEntry] = []
     var gitSourceOfTruth = true
+    var refreshMode = "smart"
+    var verifyMode = "targeted"
     var needsSeed = false  // workspace chosen but has no gitops/ tree yet → offer to initialize
     var isSeeding = false  // `abctl seed` in flight
 
@@ -180,7 +182,11 @@ final class AppModel {
             }
         }
         do {
-            let result = try await client.syncApply(prune: prune || gitSourceOfTruth, limitWrites: limitWrites, gitSourceOfTruth: gitSourceOfTruth)
+            let result = try await client.syncApply(prune: prune || gitSourceOfTruth,
+                                                    limitWrites: limitWrites,
+                                                    gitSourceOfTruth: gitSourceOfTruth,
+                                                    refresh: refreshMode,
+                                                    verify: verifyMode)
             applyResult = result
             appendApplyProgress("sync --apply finished: \(result.totalWrites) write(s), \(result.totalErrors) error(s), \(result.totalSkipped) skipped")
             for row in result.rows {
@@ -368,7 +374,7 @@ final class AppModel {
         progressLog = []
         defer { isLoading = false }
         do {
-            plan = try await client.plan(gitSourceOfTruth: gitSourceOfTruth)
+            plan = try await client.plan(gitSourceOfTruth: gitSourceOfTruth, refresh: refreshMode)
             lastCheckedAt = Date() // stamp every successful check, so a refresh confirms even when in sync
         } catch is CancellationError {
             // user cancelled — clear the in-flight state, no error shown

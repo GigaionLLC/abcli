@@ -109,9 +109,10 @@ struct AbctlClient {
     /// The 3-way plan. `diff --json` prints it and exits 0 — drift is a non-empty plan.
     /// Resolved against the workspace (cwd), where the `gitops/` tree lives. Diff makes live
     /// API calls (and may mint/refresh a token), so it gets a longer budget than a plain read.
-    func plan(gitSourceOfTruth: Bool = false) async throws -> Plan {
+    func plan(gitSourceOfTruth: Bool = false, refresh: String = "smart") async throws -> Plan {
         var args = ["diff", "--json"]
         if gitSourceOfTruth { args.append("--git-source-of-truth") }
+        args += ["--refresh", refresh]
         return try await decodeJSON(Plan.self, args, cwd: repoRoot, timeout: Self.planTimeout)
     }
 
@@ -128,10 +129,11 @@ struct AbctlClient {
 
     /// Reconcile the tenant to the workspace's git desired state (gated; abgui confirms
     /// first, so --yes). `--prune` allows deletes/detaches; `--limit-writes` caps writes.
-    func syncApply(prune: Bool, limitWrites: Int?, gitSourceOfTruth: Bool = false) async throws -> ApplyResult {
+    func syncApply(prune: Bool, limitWrites: Int?, gitSourceOfTruth: Bool = false, refresh: String = "smart", verify: String = "targeted") async throws -> ApplyResult {
         var args = ["sync", "--apply", "--yes", "--json"]
         if gitSourceOfTruth { args.append("--git-source-of-truth") }
         if prune { args.append("--prune") }
+        args += ["--refresh", refresh, "--verify", verify]
         if let limitWrites, limitWrites > 0 { args += ["--limit-writes", String(limitWrites)] }
         return try await decodeJSON(ApplyResult.self, args, cwd: repoRoot, timeout: Self.applyTimeout)
     }

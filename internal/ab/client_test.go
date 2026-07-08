@@ -119,6 +119,47 @@ func TestCreateConfigurationRejectsMissingID(t *testing.T) {
 	}
 }
 
+func TestFetchCustomSettingsMetadataOmitsProfileXML(t *testing.T) {
+	var gotFields string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != "GET" || r.URL.Path != "/configurations" {
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+		gotFields = r.URL.Query().Get("fields[configurations]")
+		fmt.Fprint(w, `{"data":[{"type":"configurations","id":"id-1","attributes":{"name":"A.mobileconfig","type":"CUSTOM_SETTING","updatedDateTime":"t1"}},{"type":"configurations","id":"id-2","attributes":{"name":"Native","type":"OTHER"}}]}`)
+	}))
+	defer srv.Close()
+
+	live, err := testClient(srv.URL).FetchCustomSettingsMetadata(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotFields != "name,type,updatedDateTime" {
+		t.Fatalf("fields = %q, want metadata-only fields", gotFields)
+	}
+	if len(live) != 1 || live[0].Name != "A.mobileconfig" || live[0].XML != "" || live[0].Hash != "" {
+		t.Fatalf("unexpected metadata result: %#v", live)
+	}
+}
+
+func TestFetchCustomSettingDetailIncludesHash(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != "GET" || r.URL.Path != "/configurations/id-1" {
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+		fmt.Fprint(w, `{"data":{"type":"configurations","id":"id-1","attributes":{"name":"A.mobileconfig","type":"CUSTOM_SETTING","updatedDateTime":"t1","customSettingsValues":{"configurationProfile":"<xml/>"}}}}`)
+	}))
+	defer srv.Close()
+
+	live, err := testClient(srv.URL).FetchCustomSettingDetail("id-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if live.XML != "<xml/>" || live.ContentHash() == "" || live.Hash != live.ContentHash() {
+		t.Fatalf("detail did not include XML/hash: %#v", live)
+	}
+}
+
 // TestUpdateConfiguration checks the PATCH path and that updatedDateTime is returned.
 func TestUpdateConfiguration(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

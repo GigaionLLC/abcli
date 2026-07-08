@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/GigaionLLC/abcli/internal/config"
+	"github.com/GigaionLLC/abcli/internal/hash"
 )
 
 // Client is a thin Apple Business API client (read methods for Phase 0).
@@ -364,7 +365,19 @@ type LiveConfig struct {
 	Name    string
 	ID      string
 	XML     string
+	Hash    string
 	Updated string
+}
+
+// ContentHash returns the known normalized profile hash, deriving it from XML when present.
+func (l LiveConfig) ContentHash() string {
+	if l.Hash != "" {
+		return l.Hash
+	}
+	if l.XML == "" {
+		return ""
+	}
+	return hash.Raw([]byte(l.XML))
 }
 
 // FetchCustomSettings returns all CUSTOM_SETTING configs with their raw XML.
@@ -391,9 +404,53 @@ func (c *Client) FetchCustomSettings() ([]LiveConfig, error) {
 				}
 			}
 		}
+		lc.Hash = lc.ContentHash()
 		out = append(out, lc)
 	}
 	return out, nil
+}
+
+// FetchCustomSettingsMetadata returns CUSTOM_SETTING configurations without requesting profile XML.
+func (c *Client) FetchCustomSettingsMetadata(progress func(string)) ([]LiveConfig, error) {
+	if progress != nil {
+		progress("requesting configurations metadata list from Apple")
+	}
+	list, err := c.listWithProgress("configurations?fields[configurations]=name,type,updatedDateTime&limit=1000", progress)
+	if err != nil {
+		return nil, err
+	}
+	var out []LiveConfig
+	for i, r := range list {
+		name := r.AttrStr("name")
+		if name == "" {
+			name = r.ID
+		}
+		if !strings.EqualFold(r.AttrStr("type"), "CUSTOM_SETTING") {
+			if progress != nil {
+				progress(fmt.Sprintf("skipping non-CUSTOM_SETTING configuration %d/%d: %s", i+1, len(list), name))
+			}
+			continue
+		}
+		if progress != nil {
+			progress(fmt.Sprintf("read CUSTOM_SETTING metadata %d/%d: %s", i+1, len(list), name))
+		}
+		out = append(out, LiveConfig{Name: r.AttrStr("name"), ID: r.ID, Updated: r.AttrStr("updatedDateTime")})
+	}
+	return out, nil
+}
+
+// FetchCustomSettingDetail returns one CUSTOM_SETTING configuration with profile XML.
+func (c *Client) FetchCustomSettingDetail(id string) (LiveConfig, error) {
+	full, err := c.GetConfiguration(id)
+	if err != nil {
+		return LiveConfig{}, err
+	}
+	lc := LiveConfig{Name: full.AttrStr("name"), ID: full.ID, Updated: full.AttrStr("updatedDateTime")}
+	if csv, ok := full.Attr()["customSettingsValues"].(map[string]any); ok {
+		lc.XML, _ = csv["configurationProfile"].(string)
+	}
+	lc.Hash = lc.ContentHash()
+	return lc, nil
 }
 
 // FetchCustomSettingsWithProgress returns live CUSTOM_SETTING configurations while reporting
@@ -443,6 +500,7 @@ func (c *Client) FetchCustomSettingsWithProgress(progress func(string)) ([]LiveC
 				}
 			}
 		}
+		lc.Hash = lc.ContentHash()
 		out = append(out, lc)
 	}
 	if progress != nil {

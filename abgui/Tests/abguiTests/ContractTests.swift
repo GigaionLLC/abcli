@@ -76,9 +76,10 @@ final class ContractTests: XCTestCase {
         }
         let recorder = Recorder()
         let client = AbctlClient(runner: RecordingRunner(recorder: recorder))
-        _ = try await client.plan(gitSourceOfTruth: true)
+        _ = try await client.plan(gitSourceOfTruth: true, refresh: "full")
         let args = await recorder.args
         XCTAssertTrue(args.contains("--git-source-of-truth"), "missing --git-source-of-truth in \(args)")
+        XCTAssertTrue(args.contains("--refresh") && args.contains("full"), "missing refresh mode in \(args)")
     }
 
     func testPlanCountsMissingIDBlueprintAttachAsBlocked() async throws {
@@ -185,9 +186,9 @@ final class ContractTests: XCTestCase {
         }
         let recorder = Recorder()
         let client = AbctlClient(runner: RecordingRunner(recorder: recorder))
-        _ = try await client.syncApply(prune: true, limitWrites: 5, gitSourceOfTruth: true)
+        _ = try await client.syncApply(prune: true, limitWrites: 5, gitSourceOfTruth: true, refresh: "full", verify: "none")
         let args = await recorder.args
-        for token in ["sync", "--apply", "--yes", "--json", "--git-source-of-truth", "--prune", "--limit-writes", "5"] {
+        for token in ["sync", "--apply", "--yes", "--json", "--git-source-of-truth", "--prune", "--limit-writes", "5", "--refresh", "full", "--verify", "none"] {
             XCTAssertTrue(args.contains(token), "missing \(token) in \(args)")
         }
         let timeoutSeconds = await recorder.timeoutSeconds

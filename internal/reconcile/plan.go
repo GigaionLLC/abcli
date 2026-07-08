@@ -71,7 +71,7 @@ func Compute(desired map[string][]byte, base *state.State, live []ab.LiveConfig)
 		l, hasL := liveByName[n]
 
 		gitChanged := hasD && (!hasB || hash.Raw(d) != b.Hash)
-		abmChanged := hasL && (!hasB || hash.Raw([]byte(l.XML)) != b.Hash || liveTimeChanged(b.UpdatedDateTime, l.Updated))
+		abmChanged := hasL && (!hasB || l.ContentHash() != b.Hash || liveTimeChanged(b.UpdatedDateTime, l.Updated))
 
 		switch {
 		case hasD && hasL:
@@ -127,7 +127,7 @@ func ComputeGitSourceOfTruth(desired map[string][]byte, live []ab.LiveConfig) *P
 		l, hasL := liveByName[n]
 		switch {
 		case hasD && hasL:
-			if hash.Raw(d) != hash.Raw([]byte(l.XML)) {
+			if hash.Raw(d) != l.ContentHash() {
 				p.add(n, Update, "git source of truth: differs in ABM -> PATCH ABM")
 			}
 		case hasD && !hasL:

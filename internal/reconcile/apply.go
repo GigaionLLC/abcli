@@ -170,9 +170,13 @@ func (e *Engine) push(res *Result, opts Opts, name string, act Action, want []by
 		return
 	}
 	// Update: archive the live version before overwriting it.
+	if l.XML == "" {
+		e.fail(res, name, act, "live profile XML unavailable for archive (use --refresh=full or smart refresh)")
+		return
+	}
 	progress(opts, "archiving current ABM configuration: "+name)
 	archPath, err := e.Archiver.Archive(name, reason, []byte(l.XML), map[string]string{
-		"abm_id": l.ID, "hash": hash.Raw([]byte(l.XML)), "updatedDateTime": l.Updated,
+		"abm_id": l.ID, "hash": l.ContentHash(), "updatedDateTime": l.Updated,
 	})
 	if err != nil {
 		e.fail(res, name, act, "archive failed (write skipped to preserve the audit trail): "+err.Error())
@@ -191,12 +195,16 @@ func (e *Engine) push(res *Result, opts Opts, name string, act Action, want []by
 
 // pull writes the live version into the git tree (no tenant write).
 func (e *Engine) pull(res *Result, opts Opts, name string, act Action, l ab.LiveConfig, base *state.State) {
+	if l.XML == "" {
+		e.fail(res, name, act, "live profile XML unavailable for pull (use --refresh=full or smart refresh)")
+		return
+	}
 	progress(opts, "writing live configuration into git: "+name)
 	if err := e.Files.WriteConfig(name, []byte(l.XML)); err != nil {
 		e.fail(res, name, act, "pull (write git file) failed: "+err.Error())
 		return
 	}
-	base.Configs[name] = state.Entry{ABMID: l.ID, Hash: hash.Raw([]byte(l.XML)), UpdatedDateTime: l.Updated}
+	base.Configs[name] = state.Entry{ABMID: l.ID, Hash: l.ContentHash(), UpdatedDateTime: l.Updated}
 	res.Outcomes = append(res.Outcomes, Outcome{Name: name, Action: act, Status: "done", Detail: "pulled into git"})
 }
 
@@ -221,9 +229,13 @@ func (e *Engine) deleteABM(res *Result, opts Opts, name string, l ab.LiveConfig,
 		e.skip(res, name, DeleteABM, "skipped: --limit-writes reached")
 		return
 	}
+	if l.XML == "" {
+		e.fail(res, name, DeleteABM, "live profile XML unavailable for archive (use --refresh=full or smart refresh)")
+		return
+	}
 	progress(opts, "archiving configuration before ABM delete: "+name)
 	archPath, err := e.Archiver.Archive(name, reasonPruned, []byte(l.XML), map[string]string{
-		"abm_id": l.ID, "hash": hash.Raw([]byte(l.XML)), "updatedDateTime": l.Updated,
+		"abm_id": l.ID, "hash": l.ContentHash(), "updatedDateTime": l.Updated,
 	})
 	if err != nil {
 		e.fail(res, name, DeleteABM, "archive failed (delete skipped to preserve the audit trail): "+err.Error())
