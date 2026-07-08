@@ -396,6 +396,8 @@ func (c *Client) FetchCustomSettings() ([]LiveConfig, error) {
 	return out, nil
 }
 
+// FetchCustomSettingsWithProgress returns live CUSTOM_SETTING configurations while reporting
+// long-running list and per-profile detail fetch progress through progress.
 func (c *Client) FetchCustomSettingsWithProgress(progress func(string)) ([]LiveConfig, error) {
 	if progress != nil {
 		progress("requesting configurations list from Apple with profile XML fields")
