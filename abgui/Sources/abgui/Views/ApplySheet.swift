@@ -60,7 +60,7 @@ struct ApplySheet: View {
             HStack {
                 if model.isWriting { ProgressView().controlSize(.small) }
                 Spacer()
-                Button(model.applyResult == nil ? "Cancel" : "Done") { dismiss() }
+                Button(model.applyResult == nil ? "Cancel" : "Exit") { dismiss() }
                     .keyboardShortcut(.cancelAction)
                 Button("Apply") {
                     Task {

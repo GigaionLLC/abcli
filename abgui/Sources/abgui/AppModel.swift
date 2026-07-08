@@ -179,7 +179,6 @@ final class AppModel {
                 appendApplyProgress("\(prefix) \(item.action): \(target)")
             }
         }
-        defer { isWriting = false }
         do {
             let result = try await client.syncApply(prune: prune || gitSourceOfTruth, limitWrites: limitWrites, gitSourceOfTruth: gitSourceOfTruth)
             applyResult = result
@@ -187,12 +186,14 @@ final class AppModel {
             for row in result.rows {
                 appendApplyProgress("\(row.status): \(row.action) \(row.name) - \(row.detail)")
             }
+            isWriting = false
             await loadPlan()           // refresh drift
             await loadConfigurations() // the tenant changed
             return result.totalErrors == 0
         } catch {
             lastWriteError = error.localizedDescription
             appendApplyProgress("sync --apply failed: \(error.localizedDescription)")
+            isWriting = false
             return false
         }
     }
