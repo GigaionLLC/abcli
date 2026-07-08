@@ -153,7 +153,8 @@ struct AbctlClient {
     func attach(config: String, blueprint: String) async throws -> WriteOutcome
     func detach(config: String, blueprint: String) async throws -> WriteOutcome
     func applySpec(file: URL, dryRun: Bool) async throws -> Plan
-    func syncApply(prune: Bool, limitWrites: Int?) async throws -> ApplyResult  // --apply --yes --json
+    func syncApply(prune: Bool, limitWrites: Int?, gitSourceOfTruth: Bool,
+                   refresh: String, verify: String) async throws -> ApplyResult
     func api(path: String, method: String, fields: [String], input: Data?) async throws -> Data
 }
 ```
@@ -274,7 +275,7 @@ over a blanket `ABCTL_APPROVE=1` on the child env).
 | Delete | `delete config <id> --yes` | archives, then DELETE |
 | Attach / detach | `attach\|detach config <id> --blueprint <bp> --yes` | membership |
 | Apply spec | `apply -f <spec.yml> --yes` (`--dry-run` to preview) | upsert-only; never deletes |
-| Full reconcile | `sync --apply --yes --json [--prune] [--limit-writes N]` | `--prune` and `--limit-writes` are explicit dialog toggles |
+| Full reconcile | `sync --apply --yes --json [--git-source-of-truth] [--prune] [--refresh MODE] [--verify MODE] [--limit-writes N]` | abgui defaults to Git source-of-truth, prune on, smart refresh, targeted verification; advanced controls expose the knobs |
 | Raw write | `api <path> -X POST -F k=v --yes` | body via `-F` or `--input -` |
 
 > **`edit config` is not GUI-drivable** — it opens `$EDITOR` interactively. abgui implements "edit" as
@@ -349,7 +350,7 @@ Legend: **v1** read-only browse + GitOps view · **v2** writes · **v3** GitOps 
 | **Blueprint membership editor** (drag configs onto blueprints) | `attach`/`detach … --yes`; declarative `sync` (detach gated by `--prune`) | v2 | Never touches console-only configs it doesn't own. |
 | **Declarative spec apply / preview** | `apply -f <spec.yml> [--dry-run] --yes` | v2 | Import/preview `abctl/v1` resource specs (upsert-only). |
 | **Validation** | `validate` (`--json` via **N2**) | v2 | Lint profiles before apply. |
-| **Apply / converge with gating** | `sync --apply --yes --json [--prune] [--limit-writes N]` | v3 | abgui shows its own confirm, exposes `--prune`/`--limit-writes` as visible toggles / circuit breaker. |
+| **Apply / converge with gating** | `sync --apply --yes --json [--git-source-of-truth] [--prune] [--refresh MODE] [--verify MODE] [--limit-writes N]` | v3 | abgui shows its own confirm and exposes source-of-truth, prune, refresh, verify, and write-limit controls. |
 | **Streaming apply progress** | `sync --apply --stream` (**N1**) | v3 | Live per-item outcome list. |
 | **Archive / rollback browser** | `gitops/archive/<name>/<ts>--<reason>.mobileconfig` (+ `.json` sidecar); restore via `replace config -f - --yes` | v3 | One-click restore of a prior live version — a true undo history. |
 | **Seed / adopt-from-live** | `seed`, `pull [config <name>]` | v3 | Bootstrap the git tree, or adopt an individual console edit. |
@@ -562,7 +563,7 @@ gui-clean: ; ./scripts/build-gui.sh clean   ## remove Swift build products + the
 
 ### 7.3 CI — a macOS job gated on GUI changes
 
-New `.github/workflows/gui.yml` on `macos-latest`, gated on `paths: ['abgui/**', 'scripts/build-gui.sh',
+New `.github/workflows/gui.yml` on `macos-15`, gated on `paths: ['abgui/**', 'scripts/build-gui.sh',
 '.github/workflows/gui.yml']` (mirrors how CD gates on `gitops/**`). A GUI app can't fully launch headless,
 so the smoke test is: `swift test` (Backend/Models decode + exit-code logic, no display), `lipo -info` (prove
 the bundle is universal), and running the **embedded** `abctl --version` (prove path resolution + the ad-hoc
@@ -577,17 +578,17 @@ on:
 permissions: { contents: read }
 jobs:
   build-gui:
-    runs-on: macos-latest
+    runs-on: macos-15
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v6
         with: { go-version-file: go.mod, cache: true }        # to compile the embedded abctl
       - run: make gui-test
       - run: make gui-app
       - run: |
           lipo -info bin/abgui.app/Contents/MacOS/abgui         # expect: arm64 x86_64
           bin/abgui.app/Contents/Resources/abctl --version      # embedded CLI execs, exit 0
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with: { name: abgui-app, path: bin/abgui.app, if-no-files-found: error }
 ```
 
@@ -603,11 +604,11 @@ GoReleaser just created:
 ```yaml
   gui-release:
     needs: goreleaser                       # goreleaser creates the GitHub Release first
-    runs-on: macos-latest
+    runs-on: macos-15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with: { fetch-depth: 0 }             # full history → matching git describe
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v6
         with: { go-version-file: go.mod, cache: true }
       - run: ./scripts/build-gui.sh zip      # → bin/abgui-<ver>-macos.zip + the run-note
       - env: { GH_TOKEN: '${{ secrets.GITHUB_TOKEN }}' }

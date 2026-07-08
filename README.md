@@ -60,8 +60,9 @@ CLI, decodes its JSON, and renders it.
   views of Devices, Users (with roles), User Groups, Apps (catalog), Packages, MDM Servers, and the audit
   log — each with a full-resource inspector, grouped in the sidebar as *GitOps* vs *Read-only*. (The separate
   VPP content-token *Apps & Books* screen is disabled — see the built-in-MDM note below.)
-- **The GitOps hero:** a visual 3-way **diff / drift** view and a gated **`sync --apply`** with `--prune`
-  and `--limit-writes` as explicit toggles.
+- **The GitOps hero:** a visual 3-way **diff / drift** view and a gated **`sync --apply`**. abgui defaults
+  to Git source-of-truth with deletes/detaches enabled, uses smart Apple refresh by default, and exposes
+  `--prune`, `--limit-writes`, refresh mode, and verification mode in the apply sheet.
 - **Write, gated:** create / edit / delete configs and attach / detach blueprint membership — each behind an
   in-app confirm (abctl is still invoked with its own `--yes` gate and archive-on-overwrite).
 - **Archive / rollback:** browse every pre-overwrite live version abctl archived and restore one in a click.
@@ -132,6 +133,19 @@ abctl sync --apply         # 5. execute it: archive-before-overwrite, confirm be
 membership** (so a profile created in step 5 can be attached in the same run). It asks you to type `yes`
 before touching the tenant unless `--yes` (or `$ABCTL_APPROVE=1` for CI) is set.
 
+For a one-way GitOps converge where the repo is authoritative, use:
+
+```sh
+abctl diff --git-source-of-truth
+abctl sync --apply --git-source-of-truth --prune
+```
+
+`--git-source-of-truth` means live-only Apple configs are deleted instead of pulled into git; on apply it
+implies prune in the engine, and spelling `--prune` keeps the intent obvious. The default live-read behavior
+is `--refresh=smart`: abctl performs a cheap Apple metadata list, reuses cached profile hashes when the Apple
+ID and `updatedDateTime` match the committed baseline, and fetches profile XML only when comparison,
+pulling, pruning, or archive-before-overwrite safety requires it.
+
 ### On-disk layout (`gitops/`)
 
 ```
@@ -173,8 +187,8 @@ abctl get configuration <name|id> [--profile]       # show one (--profile dumps 
 # GitOps (declarative, whole-tree)
 abctl seed                                          # live tenant → gitops/ tree + baseline
 abctl validate                                      # validate lib/ profiles
-abctl diff | sync [--exit-on-diff]                  # 3-way plan (configs + blueprint membership)
-abctl sync --apply [--prune] [--yes] [--limit-writes N]   # gated execute
+abctl diff | sync [--exit-on-diff] [--refresh smart|full|metadata-only]
+abctl sync --apply [--git-source-of-truth] [--prune] [--yes] [--limit-writes N] [--verify targeted|full|none]
 
 # imperative (one resource at a time)
 abctl create  config <name> -f profile.mobileconfig # POST a new CUSTOM_SETTING config
@@ -200,6 +214,10 @@ abctl version | completion | help
 default**) · `--yes` / `$ABCTL_APPROVE=1` (skip the confirm, for CI) · `--limit-writes N` (circuit breaker on
 tenant writes, shared across configs + blueprints) · `--exit-on-diff` (exit `3` when changes are pending —
 for PR gating).
+
+Current sync controls also include `--git-source-of-truth` (treat `gitops/` as authoritative),
+`--refresh smart|full|metadata-only` (`smart` is the default cheap-list/cache mode), and
+`--verify targeted|full|none` after apply (`targeted` is the default).
 
 **Exit codes:** `0` ok · `1` error · `2` usage · `3` changes pending (with `--exit-on-diff`).
 Data → stdout, diagnostics → stderr; `--json` for machine output.

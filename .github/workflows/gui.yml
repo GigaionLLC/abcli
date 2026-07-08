@@ -20,12 +20,12 @@ permissions:
 jobs:
   build-gui:
     name: build + test abgui (macOS)
-    runs-on: macos-latest
+    runs-on: macos-15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0 # full history → a matching `git describe` version
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
           cache: true # to compile the embedded abctl
@@ -44,7 +44,7 @@ jobs:
           bin/abgui.app/Contents/Resources/abctl --version   # embedded CLI runs, exit 0
           ls -la bin/abgui-*-macos.dmg bin/abgui-*-macos.zip # installer + zip built
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: abgui-macos
           path: |

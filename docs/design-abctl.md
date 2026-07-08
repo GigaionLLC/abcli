@@ -65,8 +65,9 @@ abctl
 │   └── audit                       # CONFIG_SETTINGS_* audit events
 ├── seed                            # bootstrap: download the live tenant → gitops/ tree + committed baseline
 ├── validate                        # validate the gitops/ profiles ($ABCTL_VALIDATOR, else a built-in check)
-├── diff                            # PLAN ONLY: 3-way (git ↔ baseline ↔ live) → per-item action
-├── sync [--dry-run(default)] [--apply] [--prune] [--yes] [--limit-writes N]   # bidirectional reconcile
+├── diff [--git-source-of-truth] [--refresh smart|full|metadata-only]
+├── sync [--dry-run(default)] [--apply] [--git-source-of-truth] [--prune] [--yes]
+│       [--limit-writes N] [--refresh smart|full|metadata-only] [--verify targeted|full|none]
 ├── api <path>                      # raw authenticated GET (escape hatch)
 └── version | completion | help
 ```
@@ -129,6 +130,16 @@ side change / who's newer" signal.
 **Membership convergence:** always GET-current → compute add/remove → per-member POST/DELETE. The
 relationship POST is **additive (merges), verified live 2026-07-05** (POST B to `{A}` → `{A,B}`; DELETE A →
 `{B}`), so this converges correctly and makes "move device A from Blueprint X → Y" deterministic.
+
+### Refresh and Verification Modes
+
+`diff` and `sync` default to `--refresh=smart`: a cheap Apple metadata list first, baseline hash reuse when
+Apple ID + `updatedDateTime` still match, and profile XML detail fetches only when exact comparison,
+pull/prune, or archive-before-overwrite safety needs the body. `--refresh=full` re-downloads every live
+profile XML; `--refresh=metadata-only` is fastest but depends on a complete baseline cache.
+
+After apply, `--verify=targeted` refreshes blueprint membership only, `--verify=full` performs a full live
+config + blueprint refresh, and `--verify=none` trusts successful write responses.
 
 ## 6. Package architecture (Go)
 Module `github.com/GigaionLLC/abcli`; binary `abctl` (`cmd/abctl`). Requires Go 1.26+.

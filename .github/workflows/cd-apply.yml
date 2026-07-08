@@ -25,6 +25,20 @@ on:
         description: 'Allow deletes/detaches (--prune)'
         type: boolean
         default: false
+      git_source_of_truth:
+        description: 'Treat gitops/ as authoritative (--git-source-of-truth)'
+        type: boolean
+        default: false
+      refresh:
+        description: 'Live refresh mode'
+        type: choice
+        options: [smart, full, metadata-only]
+        default: smart
+      verify:
+        description: 'Post-apply verification'
+        type: choice
+        options: [targeted, full, none]
+        default: targeted
 
 permissions:
   contents: write # to commit the reconciled baseline back to main
@@ -39,8 +53,8 @@ jobs:
     runs-on: ubuntu-latest
     environment: production # protected — required reviewers approve here
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
           cache: true
@@ -53,6 +67,9 @@ jobs:
           AB_CLIENT_ID: ${{ secrets.AB_CLIENT_ID }}
           AB_PRIVATE_KEY_PEM: ${{ secrets.AB_PRIVATE_KEY_PEM }}
           PRUNE: ${{ github.event.inputs.prune }}
+          GIT_SOURCE_OF_TRUTH: ${{ github.event.inputs.git_source_of_truth }}
+          REFRESH: ${{ github.event.inputs.refresh || 'smart' }}
+          VERIFY: ${{ github.event.inputs.verify || 'targeted' }}
         run: |
           if [ -z "$AB_CLIENT_ID" ] || [ -z "$AB_PRIVATE_KEY_PEM" ]; then
             echo "::notice::Live API secrets not set — skipping apply."
@@ -64,8 +81,9 @@ jobs:
           export AB_PRIVATE_KEY="$RUNNER_TEMP/abctl-key.pem"
           export ABCTL_APPROVE=1 # CI escape past the interactive confirm
 
-          FLAGS=""
-          if [ "$PRUNE" = "true" ]; then FLAGS="--prune"; fi
+          FLAGS="--refresh ${REFRESH:-smart} --verify ${VERIFY:-targeted}"
+          if [ "$GIT_SOURCE_OF_TRUTH" = "true" ]; then FLAGS="$FLAGS --git-source-of-truth"; fi
+          if [ "$PRUNE" = "true" ]; then FLAGS="$FLAGS --prune"; fi
 
           set +e
           ./bin/abctl sync --apply $FLAGS >apply.out 2>apply.err
@@ -90,7 +108,7 @@ jobs:
 
       - name: retain archive (audit trail — may carry secrets, so NOT committed)
         if: steps.apply.outputs.ran == 'true'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: abctl-archive-${{ github.run_id }}
           path: gitops/archive/

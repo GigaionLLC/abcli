@@ -50,6 +50,28 @@ xattr -dr com.apple.quarantine /Applications/abgui.app
 Then double-click. This is expected for an unsigned build. See the design doc §6 for why
 the app is intentionally **not** sandboxed.
 
+## Sync behavior
+
+The Diff / Drift screen computes the same plan as `abctl diff --json`. By default abgui treats the selected
+workspace's `gitops/` tree as the source of truth and the Apply sheet keeps deletes/detaches enabled so the
+tenant can converge to the repo.
+
+The Apply sheet exposes an **Advanced sync behavior** section:
+
+- **Refresh: Smart** (default) does a cheap Apple metadata list, reuses cached profile hashes when the
+  baseline ID and `updatedDateTime` still match, and fetches profile XML only when needed for comparison,
+  pull/prune, or archive-before-overwrite.
+- **Refresh: Full Apple refresh** re-downloads profile XML for every live custom configuration.
+- **Refresh: Metadata/cache only** is fastest, but should be used only when the local baseline cache is
+  complete enough for the operation.
+- **Verify: Targeted** (default) refreshes blueprint membership after apply without re-downloading every
+  profile XML body.
+- **Verify: Full** performs a full post-apply live configuration and blueprint refresh.
+- **Verify: None** trusts successful write responses and skips post-apply verification.
+
+Progress and final results are shown in separate panes; once results are posted, the apply spinner stops and
+the close button reads **Exit**.
+
 ## Layout
 
 ```

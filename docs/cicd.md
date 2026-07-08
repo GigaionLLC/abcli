@@ -49,7 +49,7 @@ workflows use (it's written to be callable both ways, so local and CI never dive
   what CI does. `--prune` (deletes/detaches) stays off unless you pass it. As always,
   `gitops/archive/` is **never** committed.
 - Any extra flags pass straight through to `abctl`:
-  `./scripts/pipeline.sh apply --prune --limit-writes 5`.
+  `./scripts/pipeline.sh apply --git-source-of-truth --prune --refresh smart --verify targeted --limit-writes 5`.
 
 In short: `pipeline.sh` **is** the pipeline. CI just calls the same stages on a schedule
 and behind a protected environment; locally you drive them by hand.
@@ -115,6 +115,9 @@ reconcile still happened, but you'd re-see the drift until the baseline is commi
 - **Prune (deletes/detaches):** off by default. Run the **Apply** workflow via *Run
   workflow* (workflow_dispatch) with `prune: true` when you intend to remove configs /
   detach blueprint members that were dropped from git. Never automatic.
+- **Source-of-truth / refresh / verify:** manual Apply also exposes `git_source_of_truth`,
+  `refresh` (`smart`, `full`, `metadata-only`), and `verify` (`targeted`, `full`, `none`).
+  `smart` refresh and `targeted` verification are the default API-light choices.
 - **A drift alert fired:** someone changed the console, or a git change is due. Run
   `abctl diff` locally (or re-run **Drift**) to see it, then either `abctl seed` to adopt
   the console edit into git, or merge/apply the pending git change.

@@ -26,8 +26,8 @@ jobs:
     name: sync --dry-run (plan only, no writes)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
           cache: true
@@ -85,7 +85,7 @@ jobs:
 
       - name: comment plan on PR
         if: github.event_name == 'pull_request' && steps.plan.outputs.commented == 'true'
-        uses: actions/github-script@v7
+        uses: actions/github-script@v9
         with:
           script: |
             const fs = require('fs');
