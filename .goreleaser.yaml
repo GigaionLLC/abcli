@@ -78,8 +78,7 @@ release:
     `cosign verify-blob --bundle checksums.txt.sigstore.json checksums.txt`
 
     ### abgui — macOS app (self-contained; a universal abctl is embedded inside it)
-    Download **`abgui-*-macos.dmg`**, open it, and drag **abgui.app** to Applications.
-    Release builds are Developer ID-signed immediately; a follow-up job replaces these assets after Apple notarization completes.
+    Prefer **`abgui-*-macos-notarized.dmg`** when present. **`abgui-*-macos-signed.dmg`** is uploaded first while Apple notarization runs.
 
     ---
     Licensed **AGPL-3.0-or-later**. Copyright 2026 Gigaion, LLC.

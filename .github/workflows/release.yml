@@ -88,17 +88,21 @@ jobs:
         env:
           APPLE_NOTARIZE: "0"
         run: ./scripts/build-gui.sh dist
+      - name: label signed abgui artifacts
+        run: |
+          for f in bin/abgui-*-macos.dmg; do mv "$f" "${f%.dmg}-signed.dmg"; done
+          for f in bin/abgui-*-macos.zip; do mv "$f" "${f%.zip}-signed.zip"; done
       - name: upload abgui to the release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           gh release upload "${GITHUB_REF_NAME}" \
-            bin/abgui-*-macos.dmg \
-            bin/abgui-*-macos.zip \
+            bin/abgui-*-macos-signed.dmg \
+            bin/abgui-*-macos-signed.zip \
             --clobber
 
   gui-notarize:
-    name: abgui notarize + replace release assets
+    name: abgui notarize + upload notarized assets
     needs: gui-release
     runs-on: macos-15
     timeout-minutes: 45
@@ -146,12 +150,17 @@ jobs:
           APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: ./scripts/build-gui.sh dist
-      - name: replace abgui release assets with notarized builds
+      - name: label notarized abgui artifacts
+        if: ${{ env.HAS_APPLE_SIGNING_CERT == 'true' && env.HAS_APPLE_NOTARY_CREDS == 'true' }}
+        run: |
+          for f in bin/abgui-*-macos.dmg; do mv "$f" "${f%.dmg}-notarized.dmg"; done
+          for f in bin/abgui-*-macos.zip; do mv "$f" "${f%.zip}-notarized.zip"; done
+      - name: upload notarized abgui assets
         if: ${{ env.HAS_APPLE_SIGNING_CERT == 'true' && env.HAS_APPLE_NOTARY_CREDS == 'true' }}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           gh release upload "${GITHUB_REF_NAME}" \
-            bin/abgui-*-macos.dmg \
-            bin/abgui-*-macos.zip \
+            bin/abgui-*-macos-notarized.dmg \
+            bin/abgui-*-macos-notarized.zip \
             --clobber
