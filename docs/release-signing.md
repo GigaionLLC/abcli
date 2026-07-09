@@ -40,13 +40,14 @@ On `v*` tags, `.github/workflows/release.yml`:
 1. Imports the `.p12` into a temporary macOS keychain.
 2. Builds `abgui.app` with the universal embedded `abctl`.
 3. Signs nested executables first, then the `.app`, using hardened runtime and timestamping.
-4. Notarizes and staples the `.app` when `APPLE_ID`, `APPLE_APP_SPECIFIC_PASSWORD`, and `APPLE_TEAM_ID` are present.
-5. Builds the zip and DMG from that app.
-6. Signs, notarizes, and staples the DMG.
+4. Builds and immediately uploads signed zip + DMG release assets.
+5. Runs a separate best-effort notarization job when `APPLE_ID`, `APPLE_APP_SPECIFIC_PASSWORD`, and
+   `APPLE_TEAM_ID` are present.
+6. Rebuilds, notarizes, staples, and replaces the release assets with `gh release upload --clobber`.
 
-The notarization secrets are what make the downloaded DMG open cleanly for users. A Developer ID signature
-without notarization is useful for provenance, but modern macOS Gatekeeper still expects notarization for
-internet-distributed apps.
+The split keeps the release page from waiting on Apple's notary queue. A Developer ID signature without
+notarization is useful for provenance, but modern macOS Gatekeeper still expects notarization for
+internet-distributed apps; once notarization finishes, the signed assets are replaced in place.
 
 ## App IDs and provisioning profiles
 
