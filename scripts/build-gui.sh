@@ -28,12 +28,20 @@ log()  { printf '%s==>%s %s\n'      "$c_g" "$c_r" "$*" >&2; }
 warn() { printf '%swarning:%s %s\n' "$c_y" "$c_r" "$*" >&2; }
 die()  { printf '%serror:%s %s\n'   "$c_e" "$c_r" "$*" >&2; exit 1; }
 have() { command -v "$1" >/dev/null 2>&1; }
+truthy() {
+  case "${1:-}" in
+    1|true|TRUE|yes|YES|on|ON) return 0 ;;
+    *) return 1 ;;
+  esac
+}
 
 GUIDIR="$repo/abgui"
 APP="$repo/bin/abgui.app"
 PKG="abgui" # SwiftPM executable target → binary name
 VERSION="$(git describe --tags --always --dirty 2>/dev/null || echo dev)"
 LDFLAGS="-s -w -X github.com/GigaionLLC/abcli/internal/cli.version=$VERSION"
+CODESIGN_IDENTITY="${APPLE_CODESIGN_IDENTITY:-${CODESIGN_IDENTITY:-}}"
+NOTARIZE="${APPLE_NOTARIZE:-${NOTARIZE:-0}}"
 
 require_macos() {
   [ "$(uname -s)" = "Darwin" ] || die "abgui builds on macOS only (this host is $(uname -s))."
@@ -65,6 +73,84 @@ build_universal_abctl() {
   GOOS=darwin GOARCH=amd64 go build -trimpath -ldflags "$LDFLAGS" -o "$repo/bin/abctl-amd64" ./cmd/abctl
   lipo -create -output "$repo/bin/abctl" "$repo/bin/abctl-arm64" "$repo/bin/abctl-amd64"
   rm -f "$repo/bin/abctl-arm64" "$repo/bin/abctl-amd64"
+}
+
+sign_one() {
+  local target="$1"
+  if [ -n "$CODESIGN_IDENTITY" ]; then
+    codesign --force --timestamp --options runtime --sign "$CODESIGN_IDENTITY" "$target"
+  else
+    codesign --force --sign - "$target"
+  fi
+}
+
+verify_signature() {
+  local target="$1"
+  codesign --verify --strict --verbose=2 "$target"
+}
+
+sign_app() {
+  # Sign inside-out; avoid deprecated --deep so every executable has an explicit signature.
+  sign_one "$APP/Contents/Resources/abctl"
+  sign_one "$APP/Contents/MacOS/abgui"
+  sign_one "$APP"
+  verify_signature "$APP/Contents/Resources/abctl"
+  verify_signature "$APP/Contents/MacOS/abgui"
+  verify_signature "$APP"
+  if [ -n "$CODESIGN_IDENTITY" ]; then
+    log "signed $APP with Developer ID identity: $CODESIGN_IDENTITY"
+  else
+    log "ad-hoc signed $APP"
+  fi
+}
+
+sign_dmg() {
+  local dmg="$1"
+  [ -n "$CODESIGN_IDENTITY" ] || return 0
+  codesign --force --timestamp --sign "$CODESIGN_IDENTITY" "$dmg"
+  verify_signature "$dmg"
+  log "signed $dmg with Developer ID identity"
+}
+
+notarize_dmg() {
+  local dmg="$1"
+  truthy "$NOTARIZE" || return 0
+  [ -n "$CODESIGN_IDENTITY" ] || die "APPLE_NOTARIZE is enabled, but no APPLE_CODESIGN_IDENTITY/CODESIGN_IDENTITY is set."
+  [ -n "${APPLE_ID:-}" ] || die "APPLE_NOTARIZE is enabled, but APPLE_ID is not set."
+  [ -n "${APPLE_APP_SPECIFIC_PASSWORD:-}" ] || die "APPLE_NOTARIZE is enabled, but APPLE_APP_SPECIFIC_PASSWORD is not set."
+  [ -n "${APPLE_TEAM_ID:-}" ] || die "APPLE_NOTARIZE is enabled, but APPLE_TEAM_ID is not set."
+  have xcrun || die "xcrun is required for notarization."
+  log "submitting $dmg for Apple notarization"
+  xcrun notarytool submit "$dmg" \
+    --apple-id "$APPLE_ID" \
+    --password "$APPLE_APP_SPECIFIC_PASSWORD" \
+    --team-id "$APPLE_TEAM_ID" \
+    --wait
+  xcrun stapler staple "$dmg"
+  xcrun stapler validate "$dmg"
+  log "notarized + stapled $dmg"
+}
+
+notarize_app() {
+  truthy "$NOTARIZE" || return 0
+  [ -n "$CODESIGN_IDENTITY" ] || die "APPLE_NOTARIZE is enabled, but no APPLE_CODESIGN_IDENTITY/CODESIGN_IDENTITY is set."
+  [ -n "${APPLE_ID:-}" ] || die "APPLE_NOTARIZE is enabled, but APPLE_ID is not set."
+  [ -n "${APPLE_APP_SPECIFIC_PASSWORD:-}" ] || die "APPLE_NOTARIZE is enabled, but APPLE_APP_SPECIFIC_PASSWORD is not set."
+  [ -n "${APPLE_TEAM_ID:-}" ] || die "APPLE_NOTARIZE is enabled, but APPLE_TEAM_ID is not set."
+  have xcrun || die "xcrun is required for notarization."
+  local app_zip="$repo/bin/abgui-$VERSION-app-notary.zip"
+  rm -f "$app_zip"
+  ( cd "$repo/bin" && ditto -c -k --keepParent "abgui.app" "$app_zip" )
+  log "submitting $APP for Apple notarization"
+  xcrun notarytool submit "$app_zip" \
+    --apple-id "$APPLE_ID" \
+    --password "$APPLE_APP_SPECIFIC_PASSWORD" \
+    --team-id "$APPLE_TEAM_ID" \
+    --wait
+  xcrun stapler staple "$APP"
+  xcrun stapler validate "$APP"
+  rm -f "$app_zip"
+  log "notarized + stapled $APP"
 }
 
 # make_icns builds AppIcon.icns from the master PNG (macOS: sips + iconutil) into the
@@ -109,10 +195,8 @@ assemble() {
 
   # Ad-hoc sign inside-out (nested binary first) — an Apple-Silicon Mach-O needs at least
   # an ad-hoc signature to execute. NOT Developer ID / notarized (see design §6.1).
-  codesign -s - --force "$APP/Contents/Resources/abctl"
-  codesign -s - --force "$APP/Contents/MacOS/abgui"
-  codesign -s - --force "$APP"
-  log "assembled $APP  (abctl $VERSION embedded, unsigned/ad-hoc)"
+  sign_app
+  log "assembled $APP  (abctl $VERSION embedded)"
 }
 
 write_run_note() {
@@ -120,8 +204,8 @@ write_run_note() {
 abgui — running this unsigned build
 ===================================
 
-This build is ad-hoc signed but NOT notarized (no Apple Developer account), so macOS
-quarantines it on first download. One-time setup:
+This build is NOT notarized, so macOS may quarantine it on first download.
+One-time setup:
 
   1. Move abgui.app to /Applications.
   2. Strip the download quarantine (covers the embedded abctl too):
@@ -134,6 +218,14 @@ If you skip step 2, first launch is blocked; then open:
 abgui is self-contained: a universal abctl is embedded at Contents/Resources/abctl.
 Your credentials are NOT bundled — abgui reuses ~/.abctl/contexts.yaml.
 EOF
+}
+
+maybe_write_run_note() {
+  if truthy "$NOTARIZE"; then
+    rm -f "$repo/docs/HOW-TO-RUN-UNSIGNED.txt"
+    return 0
+  fi
+  write_run_note
 }
 
 cmd_test() { require_macos; log "swift test"; swift test --package-path "$GUIDIR"; }
@@ -162,13 +254,15 @@ make_dmg() {
   rm -f "$dmg"
   hdiutil create -volname "abgui $VERSION" -srcfolder "$staging" -ov -format UDZO "$dmg" >/dev/null
   rm -rf "$staging"
+  sign_dmg "$dmg"
+  notarize_dmg "$dmg"
   log "packaged $dmg  (drag abgui.app → Applications)"
 }
 
-cmd_zip() { assemble; write_run_note; make_zip; }
-cmd_dmg() { assemble; write_run_note; make_dmg; }
+cmd_zip() { assemble; notarize_app; maybe_write_run_note; make_zip; }
+cmd_dmg() { assemble; notarize_app; maybe_write_run_note; make_dmg; }
 # dist: assemble ONCE, then produce the DMG installer + the zip (the release path).
-cmd_dist() { assemble; write_run_note; make_dmg; make_zip; }
+cmd_dist() { assemble; notarize_app; maybe_write_run_note; make_dmg; make_zip; }
 
 cmd_clean() {
   rm -rf "$GUIDIR/.build" "$APP" "$repo/bin/dmg-staging"

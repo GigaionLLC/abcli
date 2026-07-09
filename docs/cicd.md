@@ -79,6 +79,9 @@ never fire — a safe no-op.
 | `AB_PRIVATE_KEY_PEM` | plan, apply, drift | the **contents** of the EC P-256 key (SEC1 or PKCS#8) |
 | `AB_CLIENT_ID_WRITE` / `AB_PRIVATE_KEY_PEM_WRITE` | the gated live-write **test** job in `ci.yml` | optional; a dedicated configurations-write-only key |
 
+For macOS `abgui` release signing and notarization secrets, see
+[`release-signing.md`](release-signing.md).
+
 CI reads config from the **environment** (no `.env` needed): `abctl` falls back to the
 `AB_*` process variables when no `.env` is present. The workflows write the PEM to a
 `umask 077` temp file and point `AB_PRIVATE_KEY` at it — the key is never echoed.

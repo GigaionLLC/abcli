@@ -76,8 +76,7 @@ release:
 
     ### abgui — macOS app (self-contained; a universal abctl is embedded inside it)
     Download **`abgui-*-macos.dmg`**, open it, and drag **abgui.app** to Applications.
-    This is an unsigned build, so the first launch needs one command:
-    `xattr -dr com.apple.quarantine /Applications/abgui.app`
+    Release builds are Developer ID-signed and notarized when the Apple signing secrets are configured.
 
     ---
     Licensed **AGPL-3.0-or-later**. 🤖 abctl and abgui are AI-authored under Gigaion, LLC's direction.

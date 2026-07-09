@@ -50,6 +50,8 @@ jobs:
     name: abgui installer (.dmg)
     needs: goreleaser # the GitHub Release must exist before we upload to it
     runs-on: macos-15
+    env:
+      HAS_APPLE_SIGNING_CERT: ${{ secrets.APPLE_DEVELOPER_ID_APPLICATION_P12_BASE64 != '' }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -58,7 +60,36 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
+      - name: import Developer ID certificate
+        if: ${{ env.HAS_APPLE_SIGNING_CERT == 'true' }}
+        env:
+          APPLE_DEVELOPER_ID_APPLICATION_P12_BASE64: ${{ secrets.APPLE_DEVELOPER_ID_APPLICATION_P12_BASE64 }}
+          APPLE_DEVELOPER_ID_APPLICATION_P12_PASSWORD: ${{ secrets.APPLE_DEVELOPER_ID_APPLICATION_P12_PASSWORD }}
+          APPLE_CODESIGN_IDENTITY: ${{ secrets.APPLE_CODESIGN_IDENTITY }}
+          APPLE_KEYCHAIN_PASSWORD: ${{ secrets.APPLE_KEYCHAIN_PASSWORD || github.run_id }}
+        run: |
+          set -euo pipefail
+          CERTIFICATE_PATH="$RUNNER_TEMP/developer_id_application.p12"
+          KEYCHAIN_PATH="$RUNNER_TEMP/app-signing.keychain-db"
+
+          echo "$APPLE_DEVELOPER_ID_APPLICATION_P12_BASE64" | base64 --decode > "$CERTIFICATE_PATH"
+          security create-keychain -p "$APPLE_KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$APPLE_KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security import "$CERTIFICATE_PATH" \
+            -P "$APPLE_DEVELOPER_ID_APPLICATION_P12_PASSWORD" \
+            -A -t cert -f pkcs12 \
+            -k "$KEYCHAIN_PATH"
+          security list-keychains -d user -s "$KEYCHAIN_PATH" $(security list-keychains -d user | sed 's/"//g')
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$APPLE_KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security find-identity -v -p codesigning "$KEYCHAIN_PATH"
+          echo "APPLE_CODESIGN_IDENTITY=${APPLE_CODESIGN_IDENTITY:-Developer ID Application}" >> "$GITHUB_ENV"
       - name: build + package abgui (DMG + zip, universal abctl embedded)
+        env:
+          APPLE_NOTARIZE: ${{ secrets.APPLE_ID != '' && secrets.APPLE_APP_SPECIFIC_PASSWORD != '' && secrets.APPLE_TEAM_ID != '' && '1' || '0' }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: ./scripts/build-gui.sh dist
       - name: upload abgui to the release
         env:
@@ -67,5 +98,4 @@ jobs:
           gh release upload "${GITHUB_REF_NAME}" \
             bin/abgui-*-macos.dmg \
             bin/abgui-*-macos.zip \
-            docs/HOW-TO-RUN-UNSIGNED.txt \
             --clobber

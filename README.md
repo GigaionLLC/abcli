@@ -66,8 +66,8 @@ CLI, decodes its JSON, and renders it.
 - **Write, gated:** create / edit / delete configs and attach / detach blueprint membership — each behind an
   in-app confirm (abctl is still invoked with its own `--yes` gate and archive-on-overwrite).
 - **Archive / rollback:** browse every pre-overwrite live version abctl archived and restore one in a click.
-- **Unsigned, zero-cost distribution:** an ad-hoc-signed universal app you launch after one `xattr` command
-  — no Apple Developer account. Build it with `make gui-app` (macOS 14+).
+- **Mac distribution:** local builds are ad-hoc signed; tagged GitHub releases can be Developer ID-signed
+  and notarized when the Apple signing secrets are configured. Build it with `make gui-app` (macOS 14+).
 
 See **[abgui/README.md](abgui/README.md)** and the design plan in **[docs/abgui-design.md](docs/abgui-design.md)**.
 

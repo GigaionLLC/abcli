@@ -28,7 +28,7 @@ in [`../scripts/build-gui.sh`](../scripts/build-gui.sh); drive it from the repo 
 
 ```sh
 make gui-test    # swift test — decode + exit-code logic, offline, no credentials
-make gui-app     # assemble the unsigned universal abgui.app (embeds a universal abctl)
+make gui-app     # assemble the universal abgui.app (embeds a universal abctl)
 make gui-run     # build + launch locally
 ```
 
@@ -38,17 +38,19 @@ During development you can point abgui at a locally-built CLI instead of the bun
 export ABGUI_ABCTL=/path/to/abctl        # dev override; the shipped app always uses the embedded binary
 ```
 
-## Running an unsigned build
+## Release signing
 
-Distributed builds are **ad-hoc signed, not notarized** (no Apple Developer account). On
-first launch macOS quarantines a downloaded app; strip it once:
+Local builds are ad-hoc signed. Tagged GitHub releases can be Developer ID-signed and
+notarized when the Apple signing secrets are configured; see
+[`../docs/release-signing.md`](../docs/release-signing.md).
+
+If you download a non-notarized development artifact, macOS may quarantine it. Strip it once:
 
 ```sh
 xattr -dr com.apple.quarantine /Applications/abgui.app
 ```
 
-Then double-click. This is expected for an unsigned build. See the design doc §6 for why
-the app is intentionally **not** sandboxed.
+Then double-click. See the design doc section 6 for why the app is intentionally **not** sandboxed.
 
 ## Sync behavior
 
