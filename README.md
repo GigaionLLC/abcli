@@ -1,14 +1,17 @@
 <img src="docs/assets/abgui-icon.png" alt="ab" width="116" align="right"/>
 
-# abctl · abgui
+# abcli
 
-**GitOps for Apple Business — now with a native macOS app.** `abctl` keeps your organization's built-in-MDM
-**Configurations** (custom `.mobileconfig` profiles) and **Blueprint** membership in sync with a
-git-declarative desired state — read-only by default, every write gated, with an archive-on-overwrite audit
-trail. **[abgui](#abgui--native-macos-app)** is a native SwiftUI desktop app that drives the same engine.
+**abcli** is the home for Gigaion's Apple Business command-line and desktop tooling. It ships two tools:
+**`abctl`**, the GitOps/imperative CLI, and **`abgui`**, a native macOS app that drives the same engine.
+
+`abctl` keeps your organization's built-in-MDM **Configurations** (custom `.mobileconfig` profiles) and
+**Blueprint** membership in sync with a git-declarative desired state — read-only by default, every write
+gated, with an archive-on-overwrite audit trail. **[abgui](#abgui--native-macos-app)** is a native SwiftUI
+desktop app that bundles and shells out to `abctl`.
 
 > ### 🤖 Built by AI
-> **abctl was designed, written, tested, and documented end-to-end by an autonomous AI coding agent
+> **abcli, including `abctl` and `abgui`, was designed, written, tested, and documented end-to-end by an autonomous AI coding agent
 > (Anthropic's Claude), directed by Gigaion, LLC.** That includes reverse-engineering the Apple Business
 > API and verifying every behavior live against a real production tenant. Essentially every line — code,
 > tests, and docs — is AI-authored. Review it with that in mind: it is thoroughly tested and live-verified,
@@ -21,6 +24,13 @@ trail. **[abgui](#abgui--native-macos-app)** is a native SwiftUI desktop app tha
 > and CI-green on macOS. See **[HANDOFF.md](HANDOFF.md)** for exact state and **[TODO.md](TODO.md)** for the roadmap.
 
 ---
+
+## Tools
+
+| Tool | What it is | Ships as |
+|---|---|---|
+| `abctl` | GitOps + imperative CLI for the Apple Business API | Cross-platform Go binary |
+| `abgui` | Native macOS GUI on top of the embedded `abctl` engine | Signed/notarized macOS `.app` + DMG |
 
 ## Why abctl
 

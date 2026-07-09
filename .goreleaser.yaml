@@ -70,6 +70,9 @@ release:
   prerelease: auto # a -rc/-beta tag → pre-release
   footer: |
     ---
+    ### abcli
+    `abcli` is the repository/project that ships the tools below.
+
     ### abctl — command-line tool
     Cross-platform binaries are attached below. Verify a download:
     `cosign verify-blob --bundle checksums.txt.sigstore.json checksums.txt`
@@ -79,13 +82,13 @@ release:
     Release builds are Developer ID-signed and notarized when the Apple signing secrets are configured.
 
     ---
-    Licensed **AGPL-3.0-or-later**. 🤖 abctl and abgui are AI-authored under Gigaion, LLC's direction.
+    Licensed **AGPL-3.0-or-later**. 🤖 abcli, abctl, and abgui are AI-authored under Gigaion, LLC's direction.
 
 # Distribution taps — enable once the tap repos + a HOMEBREW_TAP_TOKEN secret exist:
 # homebrew_casks:
 #   - repository: { owner: GigaionLLC, name: homebrew-tap, token: "{{ .Env.HOMEBREW_TAP_TOKEN }}" }
 #     homepage: https://github.com/GigaionLLC/abcli
-#     description: GitOps + imperative CLI for the Apple Business API
+#     description: abcli toolset: abctl CLI + abgui desktop app for Apple Business
 # scoops:
 #   - repository: { owner: GigaionLLC, name: scoop-bucket, token: "{{ .Env.SCOOP_BUCKET_TOKEN }}" }
-#     description: GitOps + imperative CLI for the Apple Business API
+#     description: abcli toolset: abctl CLI + abgui desktop app for Apple Business

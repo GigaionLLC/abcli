@@ -6,6 +6,9 @@ shells out to an **embedded** `abctl` (`-o json`), decodes the output, and rende
 Every Apple Business behaviour — auth, the reconcile engine, archive-on-overwrite — stays
 in `abctl`.
 
+`abgui` is one of the tools shipped by the [`abcli`](../README.md) repository, alongside
+the cross-platform `abctl` CLI.
+
 > ### 🤖 Built by AI
 > abgui is designed, written, tested, and documented by an autonomous AI coding agent
 > (Anthropic's Claude), directed by Gigaion, LLC — the same openly-disclosed, AI-built,
