@@ -2,21 +2,13 @@
 
 # abcli
 
-**abcli** is the home for Gigaion's Apple Business command-line and desktop tooling. It ships two tools:
+**abcli** is Apple Business command-line and desktop tooling from Gigaion, LLC. It ships two tools:
 **`abctl`**, the GitOps/imperative CLI, and **`abgui`**, a native macOS app that drives the same engine.
 
 `abctl` keeps your organization's built-in-MDM **Configurations** (custom `.mobileconfig` profiles) and
 **Blueprint** membership in sync with a git-declarative desired state — read-only by default, every write
 gated, with an archive-on-overwrite audit trail. **[abgui](#abgui--native-macos-app)** is a native SwiftUI
 desktop app that bundles and shells out to `abctl`.
-
-> ### 🤖 Built by AI
-> **abcli, including `abctl` and `abgui`, was designed, written, tested, and documented end-to-end by an autonomous AI coding agent
-> (Anthropic's Claude), directed by Gigaion, LLC.** That includes reverse-engineering the Apple Business
-> API and verifying every behavior live against a real production tenant. Essentially every line — code,
-> tests, and docs — is AI-authored. Review it with that in mind: it is thoroughly tested and live-verified,
-> but it is not a substitute for your own judgment before you point it at a production tenant. This is the
-> same "AI-built, human-directed, openly disclosed" approach Gigaion, LLC uses across its open-source projects.
 
 > **Status:** pre-1.0. Auth + read + plan are live-verified. Config CRUD and blueprint config-membership
 > GitOps are built, unit-tested, and their core write operations verified live against a production Apple
@@ -81,8 +73,7 @@ CLI, decodes its JSON, and renders it.
 
 See **[abgui/README.md](abgui/README.md)** and the design plan in **[docs/abgui-design.md](docs/abgui-design.md)**.
 
-> The image above is a UI preview. abgui is macOS-only and builds on a macOS runner; like the rest of this
-> repo it is AI-authored under Gigaion, LLC's direction.
+> The image above is a UI preview. abgui is macOS-only and builds on a macOS runner.
 
 ## Install & build
 
@@ -302,6 +293,11 @@ It's the same logic the workflows run, so local and CI never disagree.
 - **[HANDOFF.md](HANDOFF.md)** / **[TODO.md](TODO.md)** — current state and roadmap.
 - **[AGENT.md](AGENT.md)** — instructions for AI agents working in this repo.
 - **[CONTRIBUTING.md](CONTRIBUTING.md)** · **[SECURITY.md](SECURITY.md)**
+
+## Built by AI
+
+`abcli`, including `abctl` and `abgui`, is AI-authored under Gigaion, LLC's direction.
+Review it with the same judgment you would apply to any production infrastructure tool.
 
 ## License
 

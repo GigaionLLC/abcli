@@ -82,7 +82,7 @@ release:
     Release builds are Developer ID-signed and notarized when the Apple signing secrets are configured.
 
     ---
-    Licensed **AGPL-3.0-or-later**. 🤖 abcli, abctl, and abgui are AI-authored under Gigaion, LLC's direction.
+    Licensed **AGPL-3.0-or-later**. Copyright 2026 Gigaion, LLC.
 
 # Distribution taps — enable once the tap repos + a HOMEBREW_TAP_TOKEN secret exist:
 # homebrew_casks:
