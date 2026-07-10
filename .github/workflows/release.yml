@@ -105,7 +105,11 @@ jobs:
     name: abgui notarize + upload notarized assets
     needs: gui-release
     runs-on: macos-15
+    # Safety net only: the real fast-fail guard is APPLE_NOTARY_TIMEOUT (per Apple submit).
     timeout-minutes: 45
+    # Best-effort: gui-release already shipped usable *-signed assets, so a notary failure
+    # must not fail the release. With `notarytool log` now always dumped, inspect this job's
+    # log to see Apple's verdict when it goes yellow.
     continue-on-error: true
     env:
       HAS_APPLE_SIGNING_CERT: ${{ secrets.APPLE_DEVELOPER_ID_APPLICATION_P12_BASE64 != '' }}
@@ -149,6 +153,14 @@ jobs:
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          # Per-submission cap: fail fast with a `notarytool log` dump instead of hanging
+          # to the 45-min job SIGKILL. The app zip + DMG are submitted concurrently, so the
+          # release waits on Apple roughly once (max), not twice (sum). Retries fire ONLY on
+          # fast upload failures (never after a polling timeout), so worst-case notary
+          # wall-clock is ~20m + brief retries — under the job cap even with the rebuild.
+          # See notary_submit in scripts/build-gui.sh.
+          APPLE_NOTARY_TIMEOUT: "20m"
+          APPLE_NOTARY_RETRIES: "2"
         run: ./scripts/build-gui.sh dist
       - name: label notarized abgui artifacts
         if: ${{ env.HAS_APPLE_SIGNING_CERT == 'true' && env.HAS_APPLE_NOTARY_CREDS == 'true' }}

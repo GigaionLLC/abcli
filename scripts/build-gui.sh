@@ -42,6 +42,15 @@ VERSION="$(git describe --tags --always --dirty 2>/dev/null || echo dev)"
 LDFLAGS="-s -w -X github.com/GigaionLLC/abcli/internal/cli.version=$VERSION"
 CODESIGN_IDENTITY="${APPLE_CODESIGN_IDENTITY:-${CODESIGN_IDENTITY:-}}"
 NOTARIZE="${APPLE_NOTARIZE:-${NOTARIZE:-0}}"
+# Per-submission wall-clock cap for `notarytool submit --wait`, so a stuck Apple
+# submission fails fast with diagnostics instead of hanging until the CI job SIGKILL.
+NOTARY_TIMEOUT="${APPLE_NOTARY_TIMEOUT:-20m}"
+# Extra attempts, used ONLY when an upload never registered with Apple (5xx/network).
+NOTARY_RETRIES="${APPLE_NOTARY_RETRIES:-2}"
+# A failed submit is retried ONLY if it failed FAST (upload/network error, seconds). Any
+# attempt that ran at least this many seconds is a polling timeout and is NEVER re-uploaded,
+# so worst-case notary wall-clock stays ~NOTARY_TIMEOUT + brief retries — under the CI cap.
+NOTARY_RETRY_WINDOW="${APPLE_NOTARY_RETRY_WINDOW:-120}"
 
 require_macos() {
   [ "$(uname -s)" = "Darwin" ] || die "abgui builds on macOS only (this host is $(uname -s))."
@@ -112,45 +121,131 @@ sign_dmg() {
   log "signed $dmg with Developer ID identity"
 }
 
-notarize_dmg() {
-  local dmg="$1"
-  truthy "$NOTARIZE" || return 0
+require_notary_creds() {
   [ -n "$CODESIGN_IDENTITY" ] || die "APPLE_NOTARIZE is enabled, but no APPLE_CODESIGN_IDENTITY/CODESIGN_IDENTITY is set."
   [ -n "${APPLE_ID:-}" ] || die "APPLE_NOTARIZE is enabled, but APPLE_ID is not set."
   [ -n "${APPLE_APP_SPECIFIC_PASSWORD:-}" ] || die "APPLE_NOTARIZE is enabled, but APPLE_APP_SPECIFIC_PASSWORD is not set."
   [ -n "${APPLE_TEAM_ID:-}" ] || die "APPLE_NOTARIZE is enabled, but APPLE_TEAM_ID is not set."
   have xcrun || die "xcrun is required for notarization."
-  log "submitting $dmg for Apple notarization"
-  xcrun notarytool submit "$dmg" \
-    --apple-id "$APPLE_ID" \
-    --password "$APPLE_APP_SPECIFIC_PASSWORD" \
-    --team-id "$APPLE_TEAM_ID" \
-    --wait
-  xcrun stapler staple "$dmg"
-  xcrun stapler validate "$dmg"
-  log "notarized + stapled $dmg"
 }
 
-notarize_app() {
-  truthy "$NOTARIZE" || return 0
-  [ -n "$CODESIGN_IDENTITY" ] || die "APPLE_NOTARIZE is enabled, but no APPLE_CODESIGN_IDENTITY/CODESIGN_IDENTITY is set."
-  [ -n "${APPLE_ID:-}" ] || die "APPLE_NOTARIZE is enabled, but APPLE_ID is not set."
-  [ -n "${APPLE_APP_SPECIFIC_PASSWORD:-}" ] || die "APPLE_NOTARIZE is enabled, but APPLE_APP_SPECIFIC_PASSWORD is not set."
-  [ -n "${APPLE_TEAM_ID:-}" ] || die "APPLE_NOTARIZE is enabled, but APPLE_TEAM_ID is not set."
-  have xcrun || die "xcrun is required for notarization."
+# notary_submit <artifact> <tag>: submit ONE artifact and block up to $NOTARY_TIMEOUT.
+# Captures the submission id from JSON, ALWAYS runs `notarytool log` so Apple's verdict
+# is visible in CI, and exits non-zero on any non-Accepted status or timeout — so a stuck
+# submission fails fast with diagnostics instead of hanging to the job SIGKILL. Retries
+# ONLY when the upload never registered with Apple (transient 5xx/network), detected as a
+# FAST failure (< NOTARY_RETRY_WINDOW seconds); a real verdict (Rejected/Invalid) or a
+# polling timeout is never re-uploaded — even when notarytool's timeout output carries no
+# submission id, the elapsed-time guard prevents a re-upload. Safe to run backgrounded (&).
+notary_submit() {
+  local artifact="$1" tag="$2"
+  local out="$repo/bin/notary-$tag.json" err="$repo/bin/notary-$tag.err"
+  local attempt=1 rc=0 status="" subid="" started=0 elapsed=0
+  while :; do
+    rm -f "$out" "$err"
+    started=$SECONDS
+    set +e
+    xcrun notarytool submit "$artifact" \
+      --apple-id "$APPLE_ID" \
+      --password "$APPLE_APP_SPECIFIC_PASSWORD" \
+      --team-id "$APPLE_TEAM_ID" \
+      --timeout "$NOTARY_TIMEOUT" \
+      --wait \
+      --output-format json >"$out" 2>"$err"
+    rc=$?
+    set -e
+    elapsed=$((SECONDS - started))
+    subid="$(/usr/bin/plutil -extract id raw -o - "$out" 2>/dev/null || true)"
+    [ -n "$subid" ] || subid="$(sed -n 's/.*"id"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$out" 2>/dev/null | head -n1 || true)"
+    status="$(/usr/bin/plutil -extract status raw -o - "$out" 2>/dev/null || true)"
+    [ -n "$status" ] || status="$(sed -n 's/.*"status"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$out" 2>/dev/null | head -n1 || true)"
+
+    if [ "$rc" -eq 0 ] && [ "$status" = "Accepted" ]; then
+      break                       # success
+    elif [ -n "$subid" ]; then
+      break                       # registered but Rejected/Invalid/timed out — report, do NOT re-upload
+    elif [ "$elapsed" -ge "$NOTARY_RETRY_WINDOW" ]; then
+      break                       # ran long → polling timeout, NOT a failed upload; never re-upload
+    elif [ "$attempt" -ge "$((NOTARY_RETRIES + 1))" ]; then
+      break                       # exhausted retries for an upload that never registered
+    fi
+    warn "notarize $tag: submit failed fast without registering (attempt $attempt, rc=$rc, ${elapsed}s) — retrying after backoff"
+    attempt=$((attempt + 1))
+    sleep $((attempt * 15))
+  done
+
+  if [ -n "$subid" ]; then
+    log "notary $tag: submission $subid → status ${status:-unknown}"
+    xcrun notarytool log "$subid" \
+      --apple-id "$APPLE_ID" \
+      --password "$APPLE_APP_SPECIFIC_PASSWORD" \
+      --team-id "$APPLE_TEAM_ID" >&2 || warn "notarize $tag: could not fetch notary log for $subid"
+  else
+    warn "notarize $tag: no submission id captured after ${elapsed}s — raw notarytool output follows"
+    warn "notarize $tag: check \`xcrun notarytool history\` for this team to see if the submission registered"
+    cat "$out" "$err" >&2 2>/dev/null || true
+  fi
+
+  [ "$status" = "Accepted" ] || die "notarize $tag: not Accepted (status ${status:-none}, rc $rc, last attempt ${elapsed}s)"
+}
+
+# build_app_notary_zip prints the path to a fresh zip of bin/abgui.app for notarytool.
+build_app_notary_zip() {
   local app_zip="$repo/bin/abgui-$VERSION-app-notary.zip"
   rm -f "$app_zip"
   ( cd "$repo/bin" && ditto -c -k --keepParent "abgui.app" "$app_zip" )
+  printf '%s\n' "$app_zip"
+}
+
+# notarize_app_only: notarize + staple just bin/abgui.app (the zip-only path).
+notarize_app_only() {
+  truthy "$NOTARIZE" || return 0
+  require_notary_creds
+  local app_zip; app_zip="$(build_app_notary_zip)"
   log "submitting $APP for Apple notarization"
-  xcrun notarytool submit "$app_zip" \
-    --apple-id "$APPLE_ID" \
-    --password "$APPLE_APP_SPECIFIC_PASSWORD" \
-    --team-id "$APPLE_TEAM_ID" \
-    --wait
-  xcrun stapler staple "$APP"
-  xcrun stapler validate "$APP"
+  notary_submit "$app_zip" app
+  xcrun stapler staple "$APP"; xcrun stapler validate "$APP"
   rm -f "$app_zip"
   log "notarized + stapled $APP"
+}
+
+# notarize_dmg_only: notarize + staple just the DMG (the dmg-only path).
+notarize_dmg_only() {
+  local dmg="$1"
+  truthy "$NOTARIZE" || return 0
+  require_notary_creds
+  [ -f "$dmg" ] || die "notarize_dmg_only: no DMG at $dmg"
+  log "submitting $dmg for Apple notarization"
+  notary_submit "$dmg" dmg
+  xcrun stapler staple "$dmg"; xcrun stapler validate "$dmg"
+  log "notarized + stapled $dmg"
+}
+
+# notarize_release: submit the app zip AND the DMG CONCURRENTLY (one wall-clock wait,
+# not the sum of two), then staple both. The .app is stapled before it is zipped by
+# make_zip; the DMG is stapled after it is notarized.
+notarize_release() {
+  local dmg="$1"
+  truthy "$NOTARIZE" || return 0
+  require_notary_creds
+  [ -f "$dmg" ] || die "notarize_release: no DMG at $dmg"
+  local app_zip; app_zip="$(build_app_notary_zip)"
+  local app_pid dmg_pid app_rc=0 dmg_rc=0
+
+  log "submitting app zip + DMG for Apple notarization (concurrent)"
+  notary_submit "$app_zip" app &
+  app_pid=$!
+  notary_submit "$dmg" dmg &
+  dmg_pid=$!
+  wait "$app_pid" || app_rc=$?
+  wait "$dmg_pid" || dmg_rc=$?
+  [ "$app_rc" -eq 0 ] || die "app notarization failed (rc $app_rc) — see notary log above"
+  [ "$dmg_rc" -eq 0 ] || die "DMG notarization failed (rc $dmg_rc) — see notary log above"
+
+  xcrun stapler staple "$APP"; xcrun stapler validate "$APP"   # .app → packaged by make_zip
+  xcrun stapler staple "$dmg"; xcrun stapler validate "$dmg"
+  rm -f "$app_zip"
+  log "notarized + stapled app + DMG"
 }
 
 # make_icns builds AppIcon.icns from the master PNG (macOS: sips + iconutil) into the
@@ -255,14 +350,22 @@ make_dmg() {
   hdiutil create -volname "abgui $VERSION" -srcfolder "$staging" -ov -format UDZO "$dmg" >/dev/null
   rm -rf "$staging"
   sign_dmg "$dmg"
-  notarize_dmg "$dmg"
+  # Notarization is decoupled from packaging so a release can notarize the app zip and
+  # the DMG concurrently — see notarize_release / cmd_dist.
   log "packaged $dmg  (drag abgui.app → Applications)"
 }
 
-cmd_zip() { assemble; notarize_app; maybe_write_run_note; make_zip; }
-cmd_dmg() { assemble; notarize_app; maybe_write_run_note; make_dmg; }
-# dist: assemble ONCE, then produce the DMG installer + the zip (the release path).
-cmd_dist() { assemble; notarize_app; maybe_write_run_note; make_dmg; make_zip; }
+cmd_zip() { assemble; maybe_write_run_note; notarize_app_only; make_zip; }
+cmd_dmg() { assemble; maybe_write_run_note; make_dmg; notarize_dmg_only "$repo/bin/abgui-$VERSION-macos.dmg"; }
+# dist: assemble ONCE, build the DMG + notarize the app zip and DMG CONCURRENTLY, then
+# staple both and produce the (stapled) zip — one Apple wait, not two serial ones.
+cmd_dist() {
+  assemble
+  maybe_write_run_note
+  make_dmg
+  notarize_release "$repo/bin/abgui-$VERSION-macos.dmg"
+  make_zip
+}
 
 cmd_clean() {
   rm -rf "$GUIDIR/.build" "$APP" "$repo/bin/dmg-staging"
