@@ -2,18 +2,20 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import SwiftUI
 
-/// The app shell: a sidebar grouped into GitOps (write-capable) and Read-only sections,
-/// a detail pane, and a live connection footer.
+/// The app shell: a sidebar grouped into Overview (the dashboard), GitOps (write-capable)
+/// and Read-only sections, a detail pane, and a live connection footer.
 struct RootView: View {
     @Environment(AppModel.self) private var model
-    @State private var selection: SidebarItem? = .configurations
+    @State private var selection: SidebarItem? = .dashboard
 
     /// A sidebar entry. (Named SidebarItem, not Section, to avoid shadowing SwiftUI.Section.)
     enum SidebarItem: String, CaseIterable, Identifiable, Hashable {
+        // Overview — the stat-tile dashboard (the landing screen)
+        case dashboard
         // GitOps — write-capable
         case configurations, blueprints, diff, archive
         // Read-only — live views abgui never mutates
-        case devices, users, userGroups, apps, packages, mdmServers, audit
+        case devices, mdmDevices, users, userGroups, apps, packages, mdmServers, audit
         case appsBooks // Apps & Books (VPP) — a separate service; routes to VPPView
 
         var id: String { rawValue }
@@ -22,6 +24,7 @@ struct RootView: View {
         var readOnly: ReadOnlyKind? {
             switch self {
             case .devices: return .devices
+            case .mdmDevices: return .mdmDevices
             case .users: return .users
             case .userGroups: return .userGroups
             case .apps: return .apps
@@ -35,6 +38,7 @@ struct RootView: View {
         var title: String {
             if let kind = readOnly { return kind.title }
             switch self {
+            case .dashboard: return "Dashboard"
             case .configurations: return "Configurations"
             case .blueprints: return "Blueprints"
             case .diff: return "Diff / Drift"
@@ -47,6 +51,7 @@ struct RootView: View {
         var symbol: String {
             if let kind = readOnly { return kind.symbol }
             switch self {
+            case .dashboard: return "square.grid.2x2"
             case .configurations: return "doc.text"
             case .blueprints: return "square.stack.3d.up"
             case .diff: return "arrow.triangle.branch"
@@ -60,12 +65,16 @@ struct RootView: View {
         // .appsBooks (VPP content-token screen) is intentionally omitted while the VPP path
         // is disabled — a content token isn't available under Apple Business Essentials.
         // The case + VPPView are kept so it can be re-enabled (add .appsBooks back here).
-        static let readOnlyItems: [SidebarItem] = [.devices, .users, .userGroups, .apps, .packages, .mdmServers, .audit]
+        static let readOnlyItems: [SidebarItem] = [.devices, .mdmDevices, .users, .userGroups, .apps, .packages, .mdmServers, .audit]
     }
 
     var body: some View {
         NavigationSplitView {
             List(selection: $selection) {
+                Section("Overview") {
+                    Label(SidebarItem.dashboard.title, systemImage: SidebarItem.dashboard.symbol)
+                        .tag(SidebarItem.dashboard)
+                }
                 Section("GitOps") {
                     ForEach(SidebarItem.gitopsItems) { item in
                         Label(item.title, systemImage: item.symbol).tag(item)
@@ -96,6 +105,7 @@ struct RootView: View {
             ReadOnlyListView(kind: kind)
         } else {
             switch selection {
+            case .dashboard: DashboardView(select: { selection = $0 })
             case .configurations: ConfigurationsView()
             case .blueprints: BlueprintsView()
             case .diff: DiffView()

@@ -302,6 +302,251 @@ final class ContractTests: XCTestCase {
         }
     }
 
+    // MARK: singular inspection payloads (Models/Inspect.swift) — fixtures mirror the
+    // Go marshaling in internal/cli/inspect.go / get.go / manage.go.
+
+    func testDeviceDetailDecodesAssignedServer() async throws {
+        let json = #"{"device":{"type":"orgDevices","id":"d1","attributes":{"serialNumber":"C02XYZ","deviceModel":"MacBook Pro","status":"ASSIGNED"}},"assignedServer":{"type":"mdmServers","id":"s1","attributes":{"serverName":"Built-in MDM"}}}"#
+        let client = AbctlClient(runner: MockAbctlRunner(responses: ["get device": MockAbctlRunner.ok(json)]))
+        let detail = try await client.deviceDetail("C02XYZ")
+        XCTAssertEqual(detail.device.attr("serialNumber"), "C02XYZ")
+        XCTAssertEqual(detail.device.attr("deviceModel"), "MacBook Pro")
+        XCTAssertEqual(detail.assignedServer?.attr("serverName"), "Built-in MDM")
+        XCTAssertNil(detail.appleCare, "appleCare key is absent without --applecare")
+    }
+
+    func testDeviceDetailUnassignedServerIsNull() async throws {
+        let json = #"{"device":{"type":"orgDevices","id":"d1","attributes":{"serialNumber":"C02XYZ","status":"UNASSIGNED"}},"assignedServer":null}"#
+        let client = AbctlClient(runner: MockAbctlRunner(responses: ["get device": MockAbctlRunner.ok(json)]))
+        let detail = try await client.deviceDetail("C02XYZ")
+        XCTAssertNil(detail.assignedServer)
+    }
+
+    func testDeviceDetailAppleCareFlagAndDecode() async throws {
+        actor Recorder { var args: [String] = []; func set(_ a: [String]) { args = a } }
+        struct RecordingRunner: AbctlRunner {
+            let recorder: Recorder
+            func run(_ args: [String], cwd: URL?, stdin: Data?, timeout: Duration) async throws -> AbctlResult {
+                await recorder.set(args)
+                return MockAbctlRunner.ok(#"{"device":{"type":"orgDevices","id":"d1","attributes":{"serialNumber":"C02XYZ"}},"assignedServer":null,"appleCare":[{"type":"appleCareCoverage","id":"cv1","attributes":{"description":"AppleCare+","status":"ACTIVE","endDateTime":"2027-01-01T00:00:00Z"}}]}"#)
+            }
+        }
+        let recorder = Recorder()
+        let client = AbctlClient(runner: RecordingRunner(recorder: recorder))
+        let detail = try await client.deviceDetail("C02XYZ", appleCare: true)
+        XCTAssertEqual(detail.appleCare?.count, 1)
+        XCTAssertEqual(detail.appleCare?.first?.attr("status"), "ACTIVE")
+        let args = await recorder.args
+        for token in ["get", "device", "C02XYZ", "--applecare", "--json"] {
+            XCTAssertTrue(args.contains(token), "missing \(token) in \(args)")
+        }
+    }
+
+    func testMDMDevicesListDecodes() async throws {
+        let json = #"[{"type":"mdmDevices","id":"m1","attributes":{"serialNumber":"C02XYZ","deviceName":"Kim's Mac","productFamily":"Mac","enrolledUserId":"u1"}}]"#
+        let client = AbctlClient(runner: MockAbctlRunner(responses: ["get mdmdevices": MockAbctlRunner.ok(json)]))
+        let devices = try await client.mdmDevices()
+        XCTAssertEqual(devices.count, 1)
+        XCTAssertEqual(devices.first?.attr("deviceName"), "Kim's Mac")
+        XCTAssertEqual(devices.first?.attr("enrolledUserId"), "u1")
+    }
+
+    func testMDMDeviceDetailDecodesPosture() async throws {
+        let json = #"{"device":{"type":"mdmDevices","id":"m1","attributes":{"serialNumber":"C02XYZ","deviceName":"Kim's Mac","productFamily":"Mac"}},"details":{"type":"mdmDeviceDetails","id":"m1","attributes":{"platform":"macOS","osVersion":"15.5","isFileVaultEnabled":true,"isFirewallEnabled":false,"lastCheckInDateTime":"2026-07-01T00:00:00Z","storageFreeCapacity":128000000000,"storageTotalCapacity":512000000000,"deviceLockStatus":"UNLOCKED"}}}"#
+        let client = AbctlClient(runner: MockAbctlRunner(responses: ["get mdmdevice": MockAbctlRunner.ok(json)]))
+        let detail = try await client.mdmDeviceDetail("C02XYZ")
+        XCTAssertEqual(detail.device.attr("deviceName"), "Kim's Mac")
+        XCTAssertEqual(detail.details.attr("osVersion"), "15.5")
+        XCTAssertEqual(detail.details.attr("deviceLockStatus"), "UNLOCKED")
+    }
+
+    func testUserDetailDecodesAsResource() async throws {
+        let json = #"{"type":"users","id":"u1","attributes":{"firstName":"Ada","lastName":"Lovelace","email":"ada@example.com","managedAppleAccount":"ada@x.appleid.com","status":"ACTIVE","isExternalUser":false,"roleOuList":[{"roleName":"Administrator","ouId":"ou1"}]}}"#
+        let client = AbctlClient(runner: MockAbctlRunner(responses: ["get user": MockAbctlRunner.ok(json)]))
+        let user = try await client.userDetail("ada@example.com")
+        XCTAssertEqual(user.attr("email"), "ada@example.com")
+        XCTAssertEqual(user.attr("managedAppleAccount"), "ada@x.appleid.com")
+    }
+
+    func testUserGroupMembersDecode() async throws {
+        let json = #"{"group":{"type":"userGroups","id":"g1","attributes":{"name":"Engineering","totalMemberCount":2}},"members":["ada@example.com","grace@example.com"]}"#
+        let client = AbctlClient(runner: MockAbctlRunner(responses: ["get usergroup": MockAbctlRunner.ok(json)]))
+        let detail = try await client.userGroupDetail("Engineering", members: true)
+        XCTAssertEqual(detail.group.attr("name"), "Engineering")
+        XCTAssertEqual(detail.members, ["ada@example.com", "grace@example.com"])
+    }
+
+    func testUserGroupWithoutMembersDecodes() async throws {
+        let client = AbctlClient(runner: MockAbctlRunner(responses: ["get usergroup": MockAbctlRunner.ok(#"{"group":{"type":"userGroups","id":"g1","attributes":{"name":"Engineering"}}}"#)]))
+        let detail = try await client.userGroupDetail("Engineering")
+        XCTAssertNil(detail.members, "members key is absent without --members")
+    }
+
+    func testAppDetailDecodesAsResource() async throws {
+        let json = #"{"type":"apps","id":"a1","attributes":{"name":"Numbers","bundleId":"com.apple.numbers","version":"14.1","isCustomApp":false,"platforms":["macOS","iOS"]}}"#
+        let client = AbctlClient(runner: MockAbctlRunner(responses: ["get app": MockAbctlRunner.ok(json)]))
+        let app = try await client.appDetail("Numbers")
+        XCTAssertEqual(app.attr("bundleId"), "com.apple.numbers")
+        XCTAssertEqual(app.attr("version"), "14.1")
+    }
+
+    func testPackageDetailDecodesAsResource() async throws {
+        let json = #"{"type":"packages","id":"p1","attributes":{"name":"LOB Installer","bundleId":"com.example.lob","version":"2.0","isCustomApp":true}}"#
+        let client = AbctlClient(runner: MockAbctlRunner(responses: ["get package": MockAbctlRunner.ok(json)]))
+        let pkg = try await client.packageDetail("LOB Installer")
+        XCTAssertEqual(pkg.attr("bundleId"), "com.example.lob")
+        XCTAssertEqual(pkg.attr("name"), "LOB Installer")
+    }
+
+    func testMDMServerDevicesDecode() async throws {
+        let json = #"{"server":{"type":"mdmServers","id":"s1","attributes":{"serverName":"Built-in MDM","serverType":"MDM"}},"devices":["C02AAA","C02BBB"],"deviceCount":2}"#
+        let client = AbctlClient(runner: MockAbctlRunner(responses: ["get mdmserver": MockAbctlRunner.ok(json)]))
+        let detail = try await client.mdmServerDetail("Built-in MDM", devices: true)
+        XCTAssertEqual(detail.server.attr("serverName"), "Built-in MDM")
+        XCTAssertEqual(detail.devices, ["C02AAA", "C02BBB"])
+        XCTAssertEqual(detail.deviceCount, 2)
+    }
+
+    func testBlueprintDetailDecodesRelationships() async throws {
+        let json = """
+        {"blueprint":{"type":"blueprints","id":"b1","attributes":{"name":"Fleet-A","status":"ACTIVE"}},
+         "configs":1,"apps":2,"devices":1,"appIds":["a1","a2"],"appLicenseDeficient":true,
+         "relationships":{"configurations":["WiFi-Corp.mobileconfig"],"apps":["Numbers","Pages"],"packages":[],
+                          "orgDevices":["C02AAA"],"users":[],"userGroups":["Engineering"]}}
+        """
+        let client = AbctlClient(runner: MockAbctlRunner(responses: ["get blueprint": MockAbctlRunner.ok(json)]))
+        let detail = try await client.blueprintDetail("Fleet-A")
+        XCTAssertEqual(detail.blueprint.attr("name"), "Fleet-A")
+        XCTAssertEqual(detail.configs, 1)
+        XCTAssertEqual(detail.apps, 2)
+        XCTAssertEqual(detail.appIds, ["a1", "a2"])
+        XCTAssertTrue(detail.appLicenseDeficient)
+        XCTAssertEqual(detail.relationships["orgDevices"], ["C02AAA"])
+        XCTAssertEqual(detail.relationships["packages"], [])
+        // Every key abctl emits is covered by the display order the sheets iterate.
+        XCTAssertEqual(Set(detail.relationships.keys), Set(BlueprintDetail.relationshipOrder))
+    }
+
+    func testDeviceStatusReportDecodes() async throws {
+        let json = """
+        {"device":{"type":"orgDevices","id":"d1","attributes":{"serialNumber":"C02XYZ","status":"ASSIGNED"}},
+         "assignedServer":{"type":"mdmServers","id":"s1","attributes":{"serverName":"Built-in MDM"}},
+         "blueprints":[{"blueprint":"Fleet-A","configurations":["VPN","WiFi-Corp"]}],
+         "mdm":{"device":{"type":"mdmDevices","id":"m1","attributes":{"serialNumber":"C02XYZ"}},
+                "details":{"type":"mdmDeviceDetails","id":"m1","attributes":{"osVersion":"15.5","isFileVaultEnabled":true}}}}
+        """
+        let client = AbctlClient(runner: MockAbctlRunner(responses: ["status device": MockAbctlRunner.ok(json)]))
+        let report = try await client.deviceStatus("C02XYZ")
+        XCTAssertEqual(report.device.attr("serialNumber"), "C02XYZ")
+        XCTAssertEqual(report.assignedServer?.attr("serverName"), "Built-in MDM")
+        XCTAssertEqual(report.blueprints.count, 1)
+        XCTAssertEqual(report.blueprints.first?.blueprint, "Fleet-A")
+        XCTAssertEqual(report.blueprints.first?.configurations, ["VPN", "WiFi-Corp"])
+        XCTAssertEqual(report.mdm?.details?.attr("osVersion"), "15.5")
+        XCTAssertNil(report.mdm?.error)
+        XCTAssertNil(report.appleCare)
+    }
+
+    func testDeviceStatusMDMVariantsDecode() async throws {
+        // Not enrolled: mdm is null. Denied: mdm carries only an error string.
+        let notEnrolled = #"{"device":{"type":"orgDevices","id":"d1","attributes":{}},"assignedServer":null,"blueprints":[],"mdm":null}"#
+        var client = AbctlClient(runner: MockAbctlRunner(responses: ["status device": MockAbctlRunner.ok(notEnrolled)]))
+        let bare = try await client.deviceStatus("C02XYZ")
+        XCTAssertNil(bare.mdm)
+        XCTAssertTrue(bare.blueprints.isEmpty)
+
+        let denied = #"{"device":{"type":"orgDevices","id":"d1","attributes":{}},"assignedServer":null,"blueprints":[],"mdm":{"error":"API 403 (grant device management)"}}"#
+        client = AbctlClient(runner: MockAbctlRunner(responses: ["status device": MockAbctlRunner.ok(denied)]))
+        let unavailable = try await client.deviceStatus("C02XYZ")
+        XCTAssertEqual(unavailable.mdm?.error, "API 403 (grant device management)")
+        XCTAssertNil(unavailable.mdm?.device)
+    }
+
+    func testDeviceStatusGetsFanOutTimeout() async throws {
+        actor Recorder { var timeoutSeconds = 0; func set(_ t: Duration) { timeoutSeconds = Int(t.components.seconds) } }
+        struct RecordingRunner: AbctlRunner {
+            let recorder: Recorder
+            func run(_ args: [String], cwd: URL?, stdin: Data?, timeout: Duration) async throws -> AbctlResult {
+                await recorder.set(timeout)
+                return MockAbctlRunner.ok(#"{"device":{"type":"orgDevices","id":"d1","attributes":{}},"assignedServer":null,"blueprints":[],"mdm":null}"#)
+            }
+        }
+        let recorder = Recorder()
+        _ = try await AbctlClient(runner: RecordingRunner(recorder: recorder)).deviceStatus("C02XYZ")
+        let timeoutSeconds = await recorder.timeoutSeconds
+        XCTAssertGreaterThanOrEqual(timeoutSeconds, 120, "status device fans out per-blueprint and needs a bigger budget")
+    }
+
+    func testFanOutFlagsGetExtendedTimeout() async throws {
+        // `get usergroup --members` (one API call per member) and `get mdmserver --devices`
+        // (a whole-inventory walk) are the same fan-out shape as `status device`, so the
+        // opt-in flags get the same doubled budget; the plain variants keep the 60s read one.
+        actor Recorder { var timeoutSeconds = 0; func set(_ t: Duration) { timeoutSeconds = Int(t.components.seconds) } }
+        struct RecordingRunner: AbctlRunner {
+            let recorder: Recorder
+            let json: String
+            func run(_ args: [String], cwd: URL?, stdin: Data?, timeout: Duration) async throws -> AbctlResult {
+                await recorder.set(timeout)
+                return MockAbctlRunner.ok(json)
+            }
+        }
+        let groupJSON = #"{"group":{"type":"userGroups","id":"g1","attributes":{"name":"Engineering"}},"members":[]}"#
+        let groupRecorder = Recorder()
+        let groupClient = AbctlClient(runner: RecordingRunner(recorder: groupRecorder, json: groupJSON))
+        _ = try await groupClient.userGroupDetail("Engineering", members: true)
+        var timeoutSeconds = await groupRecorder.timeoutSeconds
+        XCTAssertGreaterThanOrEqual(timeoutSeconds, 120, "--members fans out per member and needs a bigger budget")
+        _ = try await groupClient.userGroupDetail("Engineering")
+        timeoutSeconds = await groupRecorder.timeoutSeconds
+        XCTAssertEqual(timeoutSeconds, 60, "the plain read keeps the default budget")
+
+        let serverJSON = #"{"server":{"type":"mdmServers","id":"s1","attributes":{"serverName":"Built-in MDM"}},"devices":[],"deviceCount":0}"#
+        let serverRecorder = Recorder()
+        let serverClient = AbctlClient(runner: RecordingRunner(recorder: serverRecorder, json: serverJSON))
+        _ = try await serverClient.mdmServerDetail("Built-in MDM", devices: true)
+        timeoutSeconds = await serverRecorder.timeoutSeconds
+        XCTAssertGreaterThanOrEqual(timeoutSeconds, 120, "--devices walks the whole device inventory and needs a bigger budget")
+    }
+
+    func testAssignSendsGatedJSONAndDecodesActivity() async throws {
+        actor Recorder { var args: [String] = []; func set(_ a: [String]) { args = a } }
+        struct RecordingRunner: AbctlRunner {
+            let recorder: Recorder
+            func run(_ args: [String], cwd: URL?, stdin: Data?, timeout: Duration) async throws -> AbctlResult {
+                await recorder.set(args)
+                return MockAbctlRunner.ok(#"{"action":"assign","server":"Built-in MDM","devices":2,"activityId":"act-42"}"#)
+            }
+        }
+        let recorder = Recorder()
+        let client = AbctlClient(runner: RecordingRunner(recorder: recorder))
+        let outcome = try await client.assignDevices(serials: ["C02AAA", "C02BBB"], server: "Built-in MDM")
+        XCTAssertEqual(outcome.action, "assign")
+        XCTAssertEqual(outcome.devices, 2)
+        XCTAssertEqual(outcome.activityID, "act-42")
+        XCTAssertNil(outcome.status, "status is only present with --wait, which abgui never passes")
+        let args = await recorder.args
+        for token in ["assign", "--server", "Built-in MDM", "C02AAA", "C02BBB", "--yes", "--json"] {
+            XCTAssertTrue(args.contains(token), "missing \(token) in \(args)")
+        }
+    }
+
+    func testUnassignUsesUnassignVerb() async throws {
+        let json = #"{"action":"unassign","server":"Built-in MDM","devices":1,"activityId":"act-43"}"#
+        let client = AbctlClient(runner: MockAbctlRunner(responses: ["unassign": MockAbctlRunner.ok(json)]))
+        let outcome = try await client.unassignDevices(serials: ["C02AAA"], server: "Built-in MDM")
+        XCTAssertEqual(outcome.action, "unassign")
+        XCTAssertEqual(outcome.activityID, "act-43")
+    }
+
+    func testActivityStatusDecodesAsResource() async throws {
+        let json = #"{"type":"orgDeviceActivities","id":"act-42","attributes":{"status":"COMPLETED","subStatus":"SUBMITTED_TO_SERVER","createdDateTime":"2026-07-09T00:00:00Z"}}"#
+        let client = AbctlClient(runner: MockAbctlRunner(responses: ["status activity": MockAbctlRunner.ok(json)]))
+        let activity = try await client.activityStatus("act-42")
+        XCTAssertEqual(activity.id, "act-42")
+        XCTAssertEqual(activity.attr("status"), "COMPLETED")
+        XCTAssertEqual(activity.attr("subStatus"), "SUBMITTED_TO_SERVER")
+    }
+
     func testExitCodeMapping() throws {
         // exit 3 is a normal "changes pending", not an error.
         XCTAssertThrowsError(try AbctlClient.checkExit(AbctlResult(stdout: Data(), stderr: "", code: 3))) { error in

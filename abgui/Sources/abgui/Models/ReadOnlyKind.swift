@@ -9,11 +9,15 @@ struct ColumnSpec: Identifiable {
     var id: String { header }
 }
 
-/// A live, READ-ONLY Apple Business resource abgui can browse but never write. The API
-/// exposes these for reading only (users/groups are console/SCIM-managed; apps/packages/
-/// mdm-servers/audit are inventory) — so every screen for one is clearly badged read-only.
+/// A live Apple Business resource abgui browses. The API exposes these for reading
+/// only (users/groups are console/SCIM-managed; apps/packages/mdm-servers/audit are
+/// inventory), so every screen is badged read-only — with ONE disclosed exception:
+/// `.devices` also carries the gated Assign to MDM… write (device→server assignment
+/// is the API's only device write; it runs behind AssignSheet's explicit confirm, and
+/// the devices badge reads "Read-only · assignment gated").
 enum ReadOnlyKind: String, CaseIterable, Identifiable, Hashable {
     case devices
+    case mdmDevices
     case users
     case userGroups
     case apps
@@ -26,6 +30,7 @@ enum ReadOnlyKind: String, CaseIterable, Identifiable, Hashable {
     var title: String {
         switch self {
         case .devices: return "Devices"
+        case .mdmDevices: return "Enrolled Devices"
         case .users: return "Users"
         case .userGroups: return "User Groups"
         case .apps: return "Apps (catalog)"
@@ -38,6 +43,7 @@ enum ReadOnlyKind: String, CaseIterable, Identifiable, Hashable {
     var symbol: String {
         switch self {
         case .devices: return "laptopcomputer"
+        case .mdmDevices: return "checkmark.shield"
         case .users: return "person.2"
         case .userGroups: return "person.3"
         case .apps: return "bag"
@@ -50,7 +56,8 @@ enum ReadOnlyKind: String, CaseIterable, Identifiable, Hashable {
     /// A one-line note explaining WHY this is read-only / what it is.
     var note: String {
         switch self {
-        case .devices: return "Organization devices. Device→MDM-server assignment isn't wired yet."
+        case .devices: return "Organization devices. Details shows each device's assigned MDM server; select rows to assign/unassign a server (gated)."
+        case .mdmDevices: return "Devices enrolled in the built-in device management service, with their last-reported posture — not a live device query."
         case .users: return "Managed users + their roles. Identity is console/SCIM-managed — the API is read-only."
         case .userGroups: return "User groups. Created in the console or via federation/SCIM, not this API."
         case .apps: return "The organization's app catalog (Business API /v1/apps). VPP license counts are under Apps & Books."
@@ -68,6 +75,13 @@ enum ReadOnlyKind: String, CaseIterable, Identifiable, Hashable {
                 ColumnSpec(header: "Model") { $0.attr("deviceModel") ?? "—" },
                 ColumnSpec(header: "OS") { $0.attr("osVersion") ?? "—" },
                 ColumnSpec(header: "Family") { $0.attr("productFamily") ?? "—" },
+            ]
+        case .mdmDevices:
+            return [
+                ColumnSpec(header: "Serial") { $0.attr("serialNumber") ?? $0.id },
+                ColumnSpec(header: "Name") { $0.attr("deviceName") ?? "—" },
+                ColumnSpec(header: "Family") { $0.attr("productFamily") ?? "—" },
+                ColumnSpec(header: "Enrolled User") { $0.attr("enrolledUserId") ?? "—" },
             ]
         case .users:
             return [
