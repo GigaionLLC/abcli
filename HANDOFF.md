@@ -56,15 +56,42 @@ read-only by default, gated writes, bidirectional sync with newest-wins + archiv
 - **Blueprint membership** — `TestLiveBlueprintMembership` ran live and passed (config relation, via a
   throwaway user). Confirmed create-needs-member+content and that `relationships` POST **merges**.
 
+**Built and unit-tested (2026-07-09 — the API v2.0/v2.1 surface, branch `feature/abm-api-v2-surface`):**
+Apple shipped API **v2.0 (2026-04-14)** and **v2.1 (2026-06-03)**; every endpoint contract below was pinned
+verbatim from developer.apple.com's docs JSON (`applebusinessapi` slug). ⚠️ Two changelogs exist — the
+developer.apple.com API changelog (v2.1) and the business.apple.com *Partner Guides* changelog (1.5.x);
+only the first governs this API.
+- **Detail reads** (`internal/ab/detail.go`, `internal/cli/inspect.go`): `get device` (assigned server via
+  `orgDevices/{id}/assignedServer`, 404 = unassigned; `--applecare` via `…/appleCareCoverage`),
+  `get mdmdevices|mdmdevice` (`/v1/mdmDevices` + `…/{id}/details` — built-in-MDM last-reported posture incl.
+  FileVault/firewall/check-in/storage/lock/erase/lost-mode + `enrolledUserId`), `get user|usergroup
+  [--members]|app|package|mdmserver [--devices]`, `get blueprint` resolving all six relationship collections,
+  `status device <serial>` (blueprints containing it → their configs → posture), `-o csv` on list commands.
+- **Writes, gated** (`internal/ab/manage.go`, `internal/cli/manage.go`): blueprint create/edit/delete
+  (create **INLINES members** — a member-less POST 409s, live-verified 2026-07-05), `attach|detach` for
+  `config|app|package|device|user|group`, `assign|unassign --server [--wait]` via `POST orgDeviceActivities`
+  (`ASSIGN_DEVICES`/`UNASSIGN_DEVICES`), `status activity`, and MDM-server create/edit/delete (v2.1; Apple
+  409s delete while devices are assigned).
+- **GitOps membership for all six collections** — blueprint manifests take optional `apps:/packages:/
+  devices:/users:/groups:` keys (absent = unmanaged, never touched; present = reconciled, detach gated
+  `--prune`); git-only blueprints plan a real CREATE with resolvable members riding inside the POST (one
+  write converges the blueprint); GitOps never deletes a blueprint; `seed --blueprint-membership` adopts
+  live membership. Ambiguous member display names fail closed.
+- **abgui Phase B** — Dashboard (stat tiles), Enrolled Devices screen, entity detail sheets (device/user/
+  group/app/package/mdmserver/blueprint), search + sort + CSV export on every list, gated multi-select
+  device Assign/Unassign sheet. Go↔Swift JSON contract reviewed (0 mismatches); macOS CI is the compile gate.
+- **Users remain API-read-only** — no user/group write endpoints exist in v2.x (verified against the docs
+  index); user lifecycle stays portal/SCIM-only and the tools say so.
+
 **Built but NOT yet driven live / still gated out:**
 - **The `sync --apply` orchestration** — the apply *engine* (plan→confirm→Apply→save baseline) is unit-tested
   with fakes and calls the now-live-verified client methods, but the **full CLI apply flow has not itself
   been driven against a real tenant** (would need a seeded `gitops/` tree). The pieces are proven; the
   end-to-end CLI run is the remaining live check.
-- **Blueprint create/update/delete + device/user/group membership** — still out of the engine. Create needs
-  an identity member (console-managed) + content; device membership needs a real test device to confirm the
-  reassignment / one-blueprint-per-device question (`testuser1` has 0 devices). Config-membership reconcile
-  (above) is wired; these remain future work.
+- **The new v2 write verbs** — blueprint lifecycle, non-config membership sync, assign/unassign, MDM-server
+  lifecycle: all unit-tested + gated, none has touched the tenant yet. Assign/unassign and the
+  one-blueprint-per-device reassignment question additionally need a **real test device** (`testuser1` has 0
+  devices). The new read commands are safe to run anytime.
 
 ## Build / run / test
 ```sh
@@ -125,9 +152,11 @@ Full breakdown in **[TODO.md](TODO.md)**. Short version:
    commit) `gitops/`, set the `AB_*` Actions secrets, and create the `production` environment with reviewers.
    Remaining Phase 3: a *scheduled apply* that auto-commits pulled console edits back to git (needs `abctl`
    to run `git add/commit` itself — the merge-apply job already commits the baseline back, just not on a timer).
-3. **Blueprint membership + device moves** — blocked twice over (Included-MDM 403 **and** 0 devices). Needs
-   a throwaway test device before `relationships` replace-vs-merge can be confirmed safely; do NOT probe it
-   against real users/groups.
+3. **Blueprint membership + device moves** — the code side shipped 2026-07-09 (all six collections + assign/
+   unassign; see the v2 block above). Still needs a throwaway test device for the first live assign and the
+   one-blueprint-per-device reassignment answer; do NOT probe it against real users/groups.
+4. **Live-verify the v2 write verbs** (blueprint lifecycle / non-config membership / MDM-server lifecycle)
+   with throwaway resources, then update this file. The v2 read surface is safe immediately.
 
 ## Verified API facts (from live testing — trust these)
 - Auth omits `kid`; `aud = …/oauth2/v2/token`; `exp` strictly `< iat + 180d`; bearer TTL 60 min.

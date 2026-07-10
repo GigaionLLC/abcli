@@ -81,9 +81,12 @@ the close button reads **Done**.
 
 ```
 Sources/abgui/Backend/   AbctlRunner (protocol) · ProcessRunner (actor) · AbctlLocator · AbctlClient
-Sources/abgui/Models/    JSONValue · Resource · Contract (WhoamiResult, VersionInfo)
-Sources/abgui/           App · AppModel (@Observable) · ContentView
-Tests/abguiTests/        MockAbctlRunner + decode/exit-code contract tests
+Sources/abgui/Models/    JSONValue · Resource · Contract (WhoamiResult, VersionInfo) · Inspect (detail
+                         payloads) · CSVDocument (RFC-4180 export) · ReadOnlyKind
+Sources/abgui/Views/     Dashboard · read-only lists (search/sort/CSV export) · entity detail sheets
+                         (InspectSheets) · AssignSheet (gated device→MDM) · GitOps views
+Sources/abgui/           App · AppModel (@Observable) · RootView
+Tests/abguiTests/        MockAbctlRunner + decode/exit-code contract tests + CSVDocument tests
 Packaging/Info.plist     .app bundle template (@VERSION@ substituted at assembly)
 Resources/AppIcon.png    1024² icon master → .icns via sips/iconutil at build (build-gui.sh)
 ```
