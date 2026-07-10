@@ -35,7 +35,7 @@ func TestCreateBlueprint(t *testing.T) {
 		&method, &path, &gotBody)
 	defer srv.Close()
 
-	bp, err := testClient(srv.URL).CreateBlueprint("Sales Macs", "fleet")
+	bp, err := testClient(srv.URL).CreateBlueprint("Sales Macs", "fleet", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -64,7 +64,7 @@ func TestCreateBlueprintOmitsEmptyDescription(t *testing.T) {
 		&method, &path, &gotBody)
 	defer srv.Close()
 
-	if _, err := testClient(srv.URL).CreateBlueprint("Bare", ""); err != nil {
+	if _, err := testClient(srv.URL).CreateBlueprint("Bare", "", nil); err != nil {
 		t.Fatal(err)
 	}
 	want := map[string]any{"data": map[string]any{
@@ -84,7 +84,7 @@ func TestCreateBlueprintRejectsMissingID(t *testing.T) {
 		fmt.Fprint(w, `{"data":{"type":"blueprints","attributes":{}}}`) // no id
 	}))
 	defer srv.Close()
-	if _, err := testClient(srv.URL).CreateBlueprint("x", ""); err == nil {
+	if _, err := testClient(srv.URL).CreateBlueprint("x", "", nil); err == nil {
 		t.Fatal("expected an error when the create response carries no id")
 	}
 }
@@ -341,5 +341,41 @@ func TestDeleteMDMServer409Surfaced(t *testing.T) {
 	}
 	if !json.Valid([]byte(ae.Body)) || ae.Body == "" {
 		t.Fatalf("409 body not surfaced verbatim: %q", ae.Body)
+	}
+}
+
+// TestCreateBlueprintInlinesMembers locks the relationships block a member-carrying
+// create sends — Apple rejects a member-less create (409 MISSING_MEMBERS, live-verified
+// 2026-07-05), so the engine inlines every resolvable member in the POST itself.
+func TestCreateBlueprintInlinesMembers(t *testing.T) {
+	var method, path string
+	var gotBody map[string]any
+	srv := captureServer(t, http.StatusCreated,
+		`{"data":{"type":"blueprints","id":"bp-new","attributes":{"name":"Sales Macs"}}}`,
+		&method, &path, &gotBody)
+	defer srv.Close()
+
+	members := map[string][]string{
+		"configurations": {"c-wifi"},
+		"users":          {"u-1", "u-2"},
+	}
+	if _, err := testClient(srv.URL).CreateBlueprint("Sales Macs", "", members); err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]any{"data": map[string]any{
+		"type":       "blueprints",
+		"attributes": map[string]any{"name": "Sales Macs"},
+		"relationships": map[string]any{
+			"configurations": map[string]any{"data": []any{
+				map[string]any{"type": "configurations", "id": "c-wifi"},
+			}},
+			"users": map[string]any{"data": []any{
+				map[string]any{"type": "users", "id": "u-1"},
+				map[string]any{"type": "users", "id": "u-2"},
+			}},
+		},
+	}}
+	if !reflect.DeepEqual(gotBody, want) {
+		t.Errorf("body = %#v, want %#v", gotBody, want)
 	}
 }

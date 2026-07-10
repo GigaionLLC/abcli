@@ -11,17 +11,36 @@ import (
 // engine (read-only by default).
 
 // CreateBlueprint POSTs a new blueprint. description is optional (omitted when empty).
-// Membership is NOT inlined here — it goes through Add/RemoveBlueprintMembers so
-// there is exactly one membership code path.
-func (c *Client) CreateBlueprint(name, description string) (*Resource, error) {
+// members maps a relationship name (see BlueprintRel) to resolved ABM ids and is
+// INLINED in the create request: live testing (2026-07-05, HANDOFF.md) showed Apple
+// rejects a member-less create (`409 …MISSING_MEMBERS` / `MISSING_RESOURCES`), so a
+// bare POST is only useful if Apple relaxes that — callers should inline what they
+// can and surface the 409 verbatim otherwise. Post-create convergence still goes
+// through Add/RemoveBlueprintMembers (relationships POST merges additively).
+func (c *Client) CreateBlueprint(name, description string, members map[string][]string) (*Resource, error) {
 	attrs := map[string]any{"name": name}
 	if description != "" {
 		attrs["description"] = description
 	}
-	body := map[string]any{"data": map[string]any{
+	data := map[string]any{
 		"type":       "blueprints",
 		"attributes": attrs,
-	}}
+	}
+	rels := map[string]any{}
+	for rel, ids := range members {
+		if len(ids) == 0 {
+			continue
+		}
+		refs := make([]map[string]string, 0, len(ids))
+		for _, id := range ids {
+			refs = append(refs, map[string]string{"type": rel, "id": id})
+		}
+		rels[rel] = map[string]any{"data": refs}
+	}
+	if len(rels) > 0 {
+		data["relationships"] = rels
+	}
+	body := map[string]any{"data": data}
 	st, rb, err := c.rawWrite("POST", "blueprints", body)
 	if err != nil {
 		return nil, err

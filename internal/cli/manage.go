@@ -25,32 +25,74 @@ import (
 
 func newCreateBlueprintCmd() *cobra.Command {
 	var description string
+	var configs, apps, packages, devices, users, groups []string
 	var yes, jsonOut bool
 	cmd := &cobra.Command{
 		Use:   "blueprint <name>",
-		Short: "Create an empty blueprint (POST); add members with `abctl attach`",
-		Args:  cobra.ExactArgs(1),
-		RunE:  func(_ *cobra.Command, a []string) error { return runCreateBlueprint(a[0], description, yes, jsonOut) },
+		Short: "Create a blueprint (POST) with its initial members inlined",
+		Long: "Create a blueprint. Apple requires a create to carry at least one device/user/group\n" +
+			"member plus content (a member-less POST returns 409 MISSING_MEMBERS — live-verified\n" +
+			"2026-07-05), so pass the initial membership here; grow it later with `abctl attach`.",
+		Args: cobra.ExactArgs(1),
+		RunE: func(_ *cobra.Command, a []string) error {
+			members := map[string][]string{"config": configs, "app": apps, "package": packages,
+				"device": devices, "user": users, "group": groups}
+			return runCreateBlueprint(a[0], description, members, yes, jsonOut)
+		},
 	}
 	cmd.Flags().StringVar(&description, "description", "", "blueprint description")
+	cmd.Flags().StringArrayVar(&configs, "config", nil, "configuration to include (name|id, repeatable)")
+	cmd.Flags().StringArrayVar(&apps, "app", nil, "app to include (name|id, repeatable)")
+	cmd.Flags().StringArrayVar(&packages, "package", nil, "package to include (name|id, repeatable)")
+	cmd.Flags().StringArrayVar(&devices, "device", nil, "device member (serial|id, repeatable)")
+	cmd.Flags().StringArrayVar(&users, "user", nil, "user member (email|id, repeatable)")
+	cmd.Flags().StringArrayVar(&groups, "group", nil, "user-group member (name|id, repeatable)")
 	cmd.Flags().BoolVar(&yes, "yes", false, "skip confirmation (also honored: $ABCTL_APPROVE=1)")
 	cmd.Flags().BoolVar(&jsonOut, "json", false, "JSON output (machine-readable write outcome)")
 	return cmd
 }
 
-func runCreateBlueprint(name, description string, yes, jsonOut bool) error {
+func runCreateBlueprint(name, description string, memberArgs map[string][]string, yes, jsonOut bool) error {
 	c, _, err := mustClient()
 	if err != nil {
 		return err
 	}
+	// Resolve every member to an ABM id up front — a typo aborts before the gate,
+	// not after the create. rel names match the API relationship collections.
+	members := map[string][]string{}
+	total := 0
+	for nounKey, values := range memberArgs {
+		for _, v := range values {
+			var rel, id string
+			if nounKey == "config" {
+				r, err := c.ResolveConfig(v)
+				if err != nil {
+					return err
+				}
+				rel, id = "configurations", r.ID
+			} else {
+				k, ok := memberKindFor(nounKey)
+				if !ok {
+					return fmt.Errorf("unknown member kind %q", nounKey)
+				}
+				r, err := k.resolve(c, v)
+				if err != nil {
+					return err
+				}
+				rel, id = k.rel, r.ID
+			}
+			members[rel] = append(members[rel], id)
+			total++
+		}
+	}
 	if !approved(yes) {
-		ok, err := confirmWrite("create blueprint " + name)
+		ok, err := confirmWrite(fmt.Sprintf("create blueprint %s (%d member(s) inlined)", name, total))
 		if err != nil || !ok {
 			fmt.Fprintln(os.Stderr, "aborted.")
 			return ExitError{Code: 1}
 		}
 	}
-	bp, err := c.CreateBlueprint(name, description)
+	bp, err := c.CreateBlueprint(name, description, members)
 	if err != nil {
 		return err
 	}
