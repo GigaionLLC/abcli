@@ -2,6 +2,7 @@ package reconcile
 
 import (
 	"errors"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -84,11 +85,22 @@ func (f *fakes) RemoveConfig(name string) error {
 	return nil
 }
 
-func (f *fakes) CreateBlueprint(name, description string) (*ab.Resource, error) {
+func (f *fakes) CreateBlueprint(name, description string, members map[string][]string) (*ab.Resource, error) {
 	if f.bpCreateErr {
 		return nil, errors.New("create blueprint boom")
 	}
-	f.events = append(f.events, "createbp:"+name+":"+description)
+	// Record inlined membership deterministically (sorted rel, ids in plan order)
+	// so tests can assert exactly what rode along in the create POST.
+	rels := make([]string, 0, len(members))
+	for rel := range members {
+		rels = append(rels, rel)
+	}
+	sort.Strings(rels)
+	inline := ""
+	for _, rel := range rels {
+		inline += ";" + rel + "=" + strings.Join(members[rel], ",")
+	}
+	f.events = append(f.events, "createbp:"+name+":"+description+inline)
 	return &ab.Resource{Type: "blueprints", ID: "bp-" + name}, nil
 }
 

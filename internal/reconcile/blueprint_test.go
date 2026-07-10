@@ -424,30 +424,36 @@ func TestApplyBlueprintsCreateThenAttach(t *testing.T) {
 		}}
 	}
 
+	// Resolvable members ride INSIDE the create POST (Apple 409s a member-less
+	// create — live-verified 2026-07-05), so the whole new blueprint is ONE write:
+	// the attach rows report done-inlined and no relationship POST is sent.
 	f := newFakes()
 	res := engineWith(f).ApplyBlueprints(mkPlan(), Opts{}, 0)
-	if res.Errors != 0 || res.Writes != 3 || res.Skipped != 0 {
-		t.Fatalf("create-then-attach = errors %d writes %d skipped %d, want 0/3/0: %+v", res.Errors, res.Writes, res.Skipped, res.Outcomes)
+	if res.Errors != 0 || res.Writes != 1 || res.Skipped != 0 {
+		t.Fatalf("create-with-inline = errors %d writes %d skipped %d, want 0/1/0: %+v", res.Errors, res.Writes, res.Skipped, res.Outcomes)
 	}
-	create := indexOf(f.events, "createbp:NewBP:fresh from git")
-	aCfg := indexOf(f.events, "attach:bp-NewBP:c-wifi")
-	aDev := indexOf(f.events, "attach:bp-NewBP:d-aaa")
-	if create < 0 || aCfg < 0 || aDev < 0 || create > aCfg || create > aDev {
-		t.Errorf("create must precede the attaches it feeds: %v", f.events)
+	wantCreate := "createbp:NewBP:fresh from git;configurations=c-wifi;orgDevices=d-aaa"
+	if len(f.events) != 1 || f.events[0] != wantCreate {
+		t.Errorf("events = %v, want exactly [%s]", f.events, wantCreate)
 	}
-	if indexOf(f.relOps, "POST:configurations:configurations") < 0 || indexOf(f.relOps, "POST:orgDevices:orgDevices") < 0 {
-		t.Errorf("attaches must hit the collection's relationship: %v", f.relOps)
+	if len(f.relOps) != 0 {
+		t.Errorf("inlined members must not also POST relationships: %v", f.relOps)
+	}
+	for _, o := range res.Outcomes {
+		if o.Status != "done" {
+			t.Errorf("outcome %+v: want done (create or inlined attach)", o)
+		}
 	}
 
-	// --limit-writes is shared: with a budget of 1 only the create runs, and the
-	// attaches skip benignly (budget for the config one, no-id for none).
+	// --limit-writes is shared, and inlining means a budget of 1 still fully
+	// converges a new blueprint: one create carrying every resolvable member.
 	f = newFakes()
 	res = engineWith(f).ApplyBlueprints(mkPlan(), Opts{LimitWrites: 1}, 0)
-	if res.Writes != 1 || res.Skipped != 2 || res.Errors != 0 {
-		t.Errorf("budget=1 → writes=%d skipped=%d errors=%d, want 1/2/0", res.Writes, res.Skipped, res.Errors)
+	if res.Writes != 1 || res.Skipped != 0 || res.Errors != 0 {
+		t.Errorf("budget=1 → writes=%d skipped=%d errors=%d, want 1/0/0", res.Writes, res.Skipped, res.Errors)
 	}
-	if indexOf(f.events, "createbp:NewBP:fresh from git") != 0 || len(f.events) != 1 {
-		t.Errorf("budget=1 must spend the only write on the create: %v", f.events)
+	if indexOf(f.events, wantCreate) != 0 || len(f.events) != 1 {
+		t.Errorf("budget=1 must spend the only write on the inlining create: %v", f.events)
 	}
 
 	// Budget already exhausted by phase 1 → the create skips, and the attaches

@@ -193,7 +193,7 @@ func ComputeBlueprints(desired map[string]gitops.BlueprintSpec, live []ab.LiveBl
 			p.diffMembership(n, l.ID, d, &l, idByName)
 		case hasD && !hasL:
 			p.Items = append(p.Items, BlueprintItem{Blueprint: n, Action: BlueprintNew, Description: d.Description,
-				Detail: "in git, not in ABM → create blueprint (membership attaches follow)"})
+				Detail: "in git, not in ABM → create blueprint (resolvable members ride inside the create; Apple rejects a member-less create)"})
 			p.diffMembership(n, "", d, nil, idByName) // no live side → attach-only, against the id the create yields
 		case !hasD && hasL:
 			p.Items = append(p.Items, BlueprintItem{Blueprint: n, BPID: l.ID, Action: BlueprintGone,
@@ -308,6 +308,35 @@ func (e *Engine) ApplyBlueprints(p *BlueprintPlan, opts Opts, priorWrites int) *
 
 	res := &BlueprintResult{Outcomes: []BlueprintOutcome{}}
 	createdIDs := map[string]string{} // blueprint name → id created this run
+
+	// Members inlined into each blueprint-new create. Apple rejects a member-less
+	// create (409 MISSING_MEMBERS / MISSING_RESOURCES — live-verified 2026-07-05,
+	// HANDOFF.md), so every attach item for a git-only blueprint whose member id is
+	// already resolvable rides along in the create POST itself. Those attach items
+	// are then reported as satisfied-by-create instead of re-POSTed (the merge
+	// would be a no-op, but it would still spend rate limit and --limit-writes).
+	newBlueprints := map[string]bool{}
+	for _, it := range items {
+		if it.Action == BlueprintNew {
+			newBlueprints[it.Blueprint] = true
+		}
+	}
+	inlineMembers := map[string]map[string][]string{} // blueprint name → rel → ids
+	for _, it := range items {
+		if !newBlueprints[it.Blueprint] || !it.Action.IsAttach() || it.ConfigID == "" {
+			continue
+		}
+		rel := ab.BlueprintRel(it.Collection)
+		if rel == "" {
+			continue
+		}
+		if inlineMembers[it.Blueprint] == nil {
+			inlineMembers[it.Blueprint] = map[string][]string{}
+		}
+		inlineMembers[it.Blueprint][rel] = append(inlineMembers[it.Blueprint][rel], it.ConfigID)
+	}
+	createdInline := map[string]bool{} // blueprint name → create succeeded and inlined its members
+
 	for _, it := range items {
 		target := it.Blueprint
 		if it.Config != "" {
@@ -322,14 +351,17 @@ func (e *Engine) ApplyBlueprints(p *BlueprintPlan, opts Opts, priorWrites int) *
 				continue
 			}
 			progress(opts, "creating blueprint in ABM: "+it.Blueprint)
-			r, err := e.Client.CreateBlueprint(it.Blueprint, it.Description)
+			r, err := e.Client.CreateBlueprint(it.Blueprint, it.Description, inlineMembers[it.Blueprint])
 			if err != nil {
 				e.bpFail(res, it, "create blueprint failed: "+err.Error())
 				continue
 			}
 			res.Writes++
 			createdIDs[it.Blueprint] = r.ID
-			e.bpDone(res, it, "created blueprint on ABM (id "+r.ID+")")
+			if len(inlineMembers[it.Blueprint]) > 0 {
+				createdInline[it.Blueprint] = true
+			}
+			e.bpDone(res, it, "created blueprint on ABM (id "+r.ID+", members inlined)")
 		case it.Action.IsAttach():
 			if it.ConfigID == "" {
 				// The member isn't addressable in ABM yet (a config that is brand-new in
@@ -350,6 +382,13 @@ func (e *Engine) ApplyBlueprints(p *BlueprintPlan, opts Opts, priorWrites int) *
 			rel := ab.BlueprintRel(it.Collection)
 			if rel == "" {
 				e.bpFail(res, it, "unknown member collection "+it.Collection)
+				continue
+			}
+			if createdInline[it.Blueprint] {
+				// This member was carried inside the create POST above — done, not a
+				// separate write (relationships POST merges, so re-attaching would be a
+				// harmless but rate-limited no-op).
+				e.bpDone(res, it, "attached "+it.Config+" (inlined in the blueprint create)")
 				continue
 			}
 			if !e.budget(opts, priorWrites+res.Writes) {
