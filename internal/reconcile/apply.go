@@ -22,6 +22,7 @@ type Applier interface {
 	CreateConfiguration(name, xml string, platforms []string) (id, updated string, err error)
 	UpdateConfiguration(id, name, xml string) (updated string, err error)
 	DeleteConfiguration(id string) error
+	CreateBlueprint(name, description string) (*ab.Resource, error)
 	AddBlueprintMembers(bpID, rel, memberType string, ids []string) error
 	RemoveBlueprintMembers(bpID, rel, memberType string, ids []string) error
 }

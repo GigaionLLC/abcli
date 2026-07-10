@@ -106,7 +106,7 @@ func treeNote(noWriteTree bool) string {
 // tree was updated, instead of scraping the human stderr sentence. Errors surface as a
 // nonzero exit (+ stderr), so Status is always "done" when this is emitted.
 type writeOutcome struct {
-	Action          string `json:"action"` // create|replace|delete|attach|detach
+	Action          string `json:"action"` // create|replace|edit|delete|attach|detach
 	Name            string `json:"name"`
 	ID              string `json:"id,omitempty"`
 	Status          string `json:"status"`
@@ -131,7 +131,7 @@ func emitWrite(o writeOutcome, jsonShorthand bool) error {
 
 func newCreateCmd() *cobra.Command {
 	c := &cobra.Command{Use: "create", Short: "Create a resource on Apple Business (imperative)"}
-	c.AddCommand(newCreateConfigCmd())
+	c.AddCommand(newCreateConfigCmd(), newCreateBlueprintCmd(), newCreateMDMServerCmd())
 	return c
 }
 
@@ -266,8 +266,8 @@ func runReplaceConfig(nameOrID string, fl writeFlags) error {
 // --- edit ($EDITOR) ---
 
 func newEditCmd() *cobra.Command {
-	c := &cobra.Command{Use: "edit", Short: "Edit a resource in $EDITOR (imperative)"}
-	c.AddCommand(newEditConfigCmd())
+	c := &cobra.Command{Use: "edit", Short: "Edit a resource (config: $EDITOR; blueprint/mdmserver: flags)"}
+	c.AddCommand(newEditConfigCmd(), newEditBlueprintCmd(), newEditMDMServerCmd())
 	return c
 }
 
@@ -359,7 +359,7 @@ func newDeleteCmd() *cobra.Command {
 	}
 	c.PersistentFlags().StringVarP(&fileFlag, "file", "f", "", "delete every resource declared in this abctl/v1 spec file")
 	c.PersistentFlags().BoolVar(&applyYes, "yes", false, "skip confirmation")
-	c.AddCommand(newDeleteConfigCmd())
+	c.AddCommand(newDeleteConfigCmd(), newDeleteBlueprintCmd(), newDeleteMDMServerCmd())
 	return c
 }
 
@@ -463,10 +463,18 @@ func (i *imp) syncBlueprintManifest(bpName, bpID string, live []ab.LiveConfig) e
 		}
 	}
 	sort.Strings(names)
-	all, _ := i.tree.LoadBlueprints()
-	return i.tree.WriteBlueprintSpec(gitops.BlueprintSpec{
-		Name: bpName, ID: bpID, Description: all[bpName].Description, Configurations: names,
-	})
+	// Start from the existing manifest so its description AND any managed member
+	// keys (apps/packages/devices/users/groups — pointer-slice semantics, see
+	// gitops.BlueprintSpec) survive the rewrite; only the config membership is
+	// refreshed here. A failed load MUST abort — writing from a zero-value spec
+	// would silently unmanage every member collection the user had managed.
+	all, err := i.tree.LoadBlueprints()
+	if err != nil {
+		return fmt.Errorf("reading existing blueprint manifests: %w", err)
+	}
+	spec := all[bpName]
+	spec.Name, spec.ID, spec.Configurations = bpName, bpID, names
+	return i.tree.WriteBlueprintSpec(spec)
 }
 
 func addWriteFlags(cmd *cobra.Command, fl *writeFlags, needFile bool) {

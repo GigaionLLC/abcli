@@ -231,39 +231,253 @@ func (c *Client) BlueprintRelationship(id, rel string) ([]Resource, error) {
 	return c.list(fmt.Sprintf("blueprints/%s/relationships/%s?limit=1000", url.PathEscape(id), rel))
 }
 
-// LiveBlueprint is a blueprint with the NAMES of its attached configurations.
-type LiveBlueprint struct {
-	Name    string
-	ID      string
-	Configs []string // attached config names, sorted; an unresolved id passes through as-is
+// Blueprint member collections, keyed by the manifest key used in
+// gitops/blueprints/*.yml (see gitops.BlueprintSpec.Members).
+const (
+	CollectionConfigurations = "configurations"
+	CollectionApps           = "apps"
+	CollectionPackages       = "packages"
+	CollectionDevices        = "devices"
+	CollectionUsers          = "users"
+	CollectionGroups         = "groups"
+)
+
+// BlueprintCollections lists the six member collections in manifest order.
+var BlueprintCollections = []string{
+	CollectionConfigurations, CollectionApps, CollectionPackages,
+	CollectionDevices, CollectionUsers, CollectionGroups,
 }
 
-// FetchBlueprints lists all blueprints and resolves each one's attached
-// configuration IDs to names via configNameByID. One list call plus one
-// relationship call per blueprint (blueprints are few — cheaper than a GET/config).
-func (c *Client) FetchBlueprints(configNameByID map[string]string) ([]LiveBlueprint, error) {
+// blueprintRelByCollection maps a manifest collection key to the blueprint
+// relationship name, which is also the JSON:API member type (the pairs are
+// identical for all six relations per the API contract).
+var blueprintRelByCollection = map[string]string{
+	CollectionConfigurations: "configurations",
+	CollectionApps:           "apps",
+	CollectionPackages:       "packages",
+	CollectionDevices:        "orgDevices",
+	CollectionUsers:          "users",
+	CollectionGroups:         "userGroups",
+}
+
+// BlueprintRel maps a manifest collection key to the blueprint relationship name
+// (== member type). The empty key maps to "configurations" so plan items that
+// predate the Collection field keep working; an unknown key returns "".
+func BlueprintRel(collection string) string {
+	if collection == "" {
+		return CollectionConfigurations
+	}
+	return blueprintRelByCollection[collection]
+}
+
+// LiveBlueprint is a blueprint with the NAMES of its attached members, one list
+// per collection. Configs is always fetched; the other five are fetched only for
+// the collections the caller asked for, so nil means "not fetched" (unknown) —
+// NEVER "empty membership".
+type LiveBlueprint struct {
+	Name        string
+	ID          string
+	Description string
+	Configs     []string // config names, sorted; an unresolved id passes through as-is
+	Apps        []string // app names
+	Packages    []string // package names
+	Devices     []string // device serial numbers
+	Users       []string // user emails (managed Apple Account when email is empty)
+	Groups      []string // user-group names
+}
+
+// Members returns the live display-name list for one member collection key.
+func (l LiveBlueprint) Members(collection string) []string {
+	switch collection {
+	case CollectionConfigurations:
+		return l.Configs
+	case CollectionApps:
+		return l.Apps
+	case CollectionPackages:
+		return l.Packages
+	case CollectionDevices:
+		return l.Devices
+	case CollectionUsers:
+		return l.Users
+	case CollectionGroups:
+		return l.Groups
+	}
+	return nil
+}
+
+func (l *LiveBlueprint) setMembers(collection string, names []string) {
+	switch collection {
+	case CollectionConfigurations:
+		l.Configs = names
+	case CollectionApps:
+		l.Apps = names
+	case CollectionPackages:
+		l.Packages = names
+	case CollectionDevices:
+		l.Devices = names
+	case CollectionUsers:
+		l.Users = names
+	case CollectionGroups:
+		l.Groups = names
+	}
+}
+
+// FetchBlueprints lists all blueprints and resolves each one's membership to
+// display names for the requested collections. "configurations" is always
+// fetched (blueprint sync depends on it) whether or not it is listed; each other
+// collection costs one relationship call per blueprint, so callers pass only the
+// collections their manifests actually manage. nameByID maps collection key →
+// member id → display name (see FetchBlueprintMemberMaps); an unresolved or
+// unnamed id passes through as-is.
+func (c *Client) FetchBlueprints(collections []string, nameByID map[string]map[string]string, progress func(string)) ([]LiveBlueprint, error) {
 	bps, err := c.ListBlueprints()
 	if err != nil {
 		return nil, err
 	}
+	if progress != nil {
+		progress(fmt.Sprintf("fetched %d live blueprint(s)", len(bps)))
+	}
+	cols := []string{CollectionConfigurations}
+	for _, col := range collections {
+		if col != CollectionConfigurations {
+			cols = append(cols, col)
+		}
+	}
 	out := make([]LiveBlueprint, 0, len(bps))
-	for _, bp := range bps {
-		links, err := c.BlueprintRelationship(bp.ID, "configurations")
-		if err != nil {
-			return nil, err
+	for i, bp := range bps {
+		display := bp.AttrStr("name")
+		if display == "" {
+			display = bp.ID
 		}
-		names := make([]string, 0, len(links))
-		for _, l := range links {
-			if n, ok := configNameByID[l.ID]; ok {
-				names = append(names, n)
-			} else {
-				names = append(names, l.ID)
+		lb := LiveBlueprint{Name: bp.AttrStr("name"), ID: bp.ID, Description: bp.AttrStr("description")}
+		for _, col := range cols {
+			if progress != nil {
+				progress(fmt.Sprintf("fetching blueprint membership %d/%d: %s (%s)", i+1, len(bps), display, col))
 			}
+			links, err := c.BlueprintRelationship(bp.ID, BlueprintRel(col))
+			if err != nil {
+				return nil, err
+			}
+			names := make([]string, 0, len(links))
+			for _, l := range links {
+				if n := nameByID[col][l.ID]; n != "" {
+					names = append(names, n)
+				} else {
+					names = append(names, l.ID)
+				}
+			}
+			sort.Strings(names)
+			lb.setMembers(col, names)
 		}
-		sort.Strings(names)
-		out = append(out, LiveBlueprint{Name: bp.AttrStr("name"), ID: bp.ID, Configs: names})
+		out = append(out, lb)
 	}
 	return out, nil
+}
+
+// FetchBlueprintMemberMaps builds the id → display-name map for each requested
+// member collection by listing that collection's tenant resources once (one
+// paginated list per collection — fetch only the collections some manifest
+// manages, or five full-tenant lists are wasted). Devices are keyed by
+// serialNumber, users by email (falling back to managedAppleAccount, matching
+// ResolveUser), apps/packages/user groups by name. "configurations" is skipped —
+// the config map is ownership-scoped to the sync baseline and supplied by the
+// caller — and a resource with no display name is omitted, so its id passes
+// through membership lists as-is and is never planned for detach.
+//
+// The second map resolves the ALIASES the imperative resolvers also accept —
+// per collection, lowercased alias → canonical display name (devices: serial
+// case variants; users: email AND managedAppleAccount, case-insensitive) — so a
+// manifest entry written as an accepted alias can be canonicalized before the
+// byte-exact membership diff. An alias claimed by more than one canonical name
+// maps to "" (ambiguous — the caller must leave the manifest entry untouched).
+func (c *Client) FetchBlueprintMemberMaps(collections []string, progress func(string)) (nameByID, canonicalByAlias map[string]map[string]string, err error) {
+	nameByID = make(map[string]map[string]string, len(collections))
+	canonicalByAlias = make(map[string]map[string]string, len(collections))
+	for _, col := range collections {
+		var items []Resource
+		var err error
+		switch col {
+		case CollectionApps:
+			items, err = c.ListApps()
+		case CollectionPackages:
+			items, err = c.ListPackages()
+		case CollectionDevices:
+			items, err = c.ListDevices()
+		case CollectionUsers:
+			items, err = c.ListUsers()
+		case CollectionGroups:
+			items, err = c.ListUserGroups()
+		default: // configurations (baseline-scoped, caller-supplied) or unknown
+			continue
+		}
+		if err != nil {
+			return nil, nil, fmt.Errorf("listing %s for blueprint membership: %w", col, err)
+		}
+		if progress != nil {
+			progress(fmt.Sprintf("resolved %d %s member name(s)", len(items), col))
+		}
+		m := make(map[string]string, len(items))
+		aliases := map[string]string{}
+		for _, r := range items {
+			name := memberDisplayName(col, r)
+			if name == "" {
+				continue
+			}
+			m[r.ID] = name
+			for _, a := range memberAliases(col, r) {
+				key := strings.ToLower(a)
+				if prev, dup := aliases[key]; dup && prev != name {
+					aliases[key] = "" // ambiguous alias — never canonicalize it
+					continue
+				}
+				aliases[key] = name
+			}
+		}
+		nameByID[col] = m
+		canonicalByAlias[col] = aliases
+	}
+	return nameByID, canonicalByAlias, nil
+}
+
+// memberDisplayName is the attribute a member collection is addressed by in
+// blueprint manifests (devices: serial; users: email, else managed Apple
+// Account; apps/packages/groups: name).
+func memberDisplayName(collection string, r Resource) string {
+	switch collection {
+	case CollectionDevices:
+		return r.AttrStr("serialNumber")
+	case CollectionUsers:
+		if e := r.AttrStr("email"); e != "" {
+			return e
+		}
+		return r.AttrStr("managedAppleAccount")
+	default:
+		return r.AttrStr("name")
+	}
+}
+
+// memberAliases lists the addresses a member may ALSO be written as in a
+// blueprint manifest, mirroring what the imperative resolvers accept: devices
+// match serials case-insensitively (ResolveDevice) and users match email OR
+// managedAppleAccount case-insensitively (ResolveUser). App/package/group names
+// match exactly, so they have no aliases.
+func memberAliases(collection string, r Resource) []string {
+	switch collection {
+	case CollectionDevices:
+		if s := r.AttrStr("serialNumber"); s != "" {
+			return []string{s}
+		}
+	case CollectionUsers:
+		var out []string
+		if e := r.AttrStr("email"); e != "" {
+			out = append(out, e)
+		}
+		if a := r.AttrStr("managedAppleAccount"); a != "" {
+			out = append(out, a)
+		}
+		return out
+	}
+	return nil
 }
 
 // ListDevices returns the organization's devices (orgDevices).

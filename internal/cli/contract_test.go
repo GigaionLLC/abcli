@@ -6,6 +6,8 @@ import (
 	"os"
 	"strings"
 	"testing"
+
+	"github.com/spf13/cobra"
 )
 
 // TestPlanFormat covers P7: diff/sync must honor the global -o json/-o yaml, with the
@@ -23,6 +25,8 @@ func TestPlanFormat(t *testing.T) {
 		{"json", false, "json"},
 		{"yaml", false, "yaml"},
 		{"yaml", true, "json"}, // --json shorthand wins over -o yaml
+		{"csv", false, ""},     // csv is list-only; a plan falls back to the human tables (checkOutputFlag rejects it first)
+		{"csv", true, "json"},  // --json shorthand wins over -o csv
 	}
 	for _, c := range cases {
 		flagOutput = c.global
@@ -50,6 +54,75 @@ func TestWantsMachine(t *testing.T) {
 	flagOutput = "yaml"
 	if !wantsMachine(false) {
 		t.Error("-o yaml should request machine output")
+	}
+}
+
+// TestPrintCSVQuoting covers A3: -o csv emits a header row + RFC-4180 quoting
+// (fields containing commas, quotes, or newlines are quoted; quotes are doubled).
+func TestPrintCSVQuoting(t *testing.T) {
+	out := captureStdout(t, func() error {
+		return printCSV([]string{"NAME", "TYPE"}, [][]string{
+			{"plain", "CUSTOM_SETTING"},
+			{"has,comma", `has "quotes"`},
+			{"has\nnewline", ""},
+		})
+	})
+	want := "NAME,TYPE\n" +
+		"plain,CUSTOM_SETTING\n" +
+		"\"has,comma\",\"has \"\"quotes\"\"\"\n" +
+		"\"has\nnewline\",\n"
+	if out != want {
+		t.Errorf("printCSV output:\n%q\nwant:\n%q", out, want)
+	}
+}
+
+// TestPrintCSVFormulaNeutralized: tenant-controlled values starting with =, +,
+// -, or @ would run as formulas when the CSV is opened in a spreadsheet, so
+// printCSV prefixes them with a single quote (headers are code-owned literals
+// and stay untouched).
+func TestPrintCSVFormulaNeutralized(t *testing.T) {
+	out := captureStdout(t, func() error {
+		return printCSV([]string{"NAME", "TYPE"}, [][]string{
+			{`=HYPERLINK(1)`, "safe"},
+			{"+SUM(A1)", "-2+3"},
+			{"@cmd", ""},
+		})
+	})
+	want := "NAME,TYPE\n" +
+		"'=HYPERLINK(1),safe\n" +
+		"'+SUM(A1),'-2+3\n" +
+		"'@cmd,\n"
+	if out != want {
+		t.Errorf("printCSV output:\n%q\nwant:\n%q", out, want)
+	}
+}
+
+// TestRenderCSVRequiresColumns covers A3: a non-list command (no table columns)
+// rejects csv with a clear error instead of printing nothing.
+func TestRenderCSVRequiresColumns(t *testing.T) {
+	err := render("csv", map[string]any{"x": 1}, nil, nil)
+	if err == nil || !strings.Contains(err.Error(), "list commands") {
+		t.Errorf("render(csv, no columns) = %v, want a list-commands-only error", err)
+	}
+}
+
+// TestCheckOutputFlagCSVGate covers A3: -o csv passes only for commands marked
+// csvCapable (list commands); everything else gets a clear error up front.
+func TestCheckOutputFlagCSVGate(t *testing.T) {
+	orig := flagOutput
+	t.Cleanup(func() { flagOutput = orig })
+	flagOutput = "csv"
+	list := csvCapable(&cobra.Command{Use: "devices"})
+	if err := checkOutputFlag(list); err != nil {
+		t.Errorf("csv on a list command should pass: %v", err)
+	}
+	single := &cobra.Command{Use: "blueprint"}
+	if err := checkOutputFlag(single); err == nil || !strings.Contains(err.Error(), "list commands") {
+		t.Errorf("csv on a non-list command = %v, want a list-commands-only error", err)
+	}
+	flagOutput = "xml"
+	if checkOutputFlag(list) == nil {
+		t.Error("an invalid -o value should still be rejected")
 	}
 }
 

@@ -36,8 +36,8 @@ func newVPPCmd() *cobra.Command {
 			"(`abctl get blueprint <id>` shows apps + license status; `abctl attach app …`).\n" +
 			"To force-enable for a 3rd-party-MDM org with a content token: ABCTL_ENABLE_VPP=1.",
 		// Gate every vpp subcommand; still honor the global -o validation.
-		PersistentPreRunE: func(*cobra.Command, []string) error {
-			if err := validOutput(flagOutput); err != nil {
+		PersistentPreRunE: func(cmd *cobra.Command, _ []string) error {
+			if err := checkOutputFlag(cmd); err != nil {
 				return err
 			}
 			if !vppEnabled() {

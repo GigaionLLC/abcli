@@ -81,6 +81,9 @@ func TestOutFmtAndValidate(t *testing.T) {
 	if err := validOutput("json"); err != nil {
 		t.Errorf("json should be valid: %v", err)
 	}
+	if err := validOutput("csv"); err != nil {
+		t.Errorf("csv should be valid (list commands): %v", err)
+	}
 	if validOutput("xml") == nil {
 		t.Error("xml should be invalid")
 	}

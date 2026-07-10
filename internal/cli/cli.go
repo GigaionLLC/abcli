@@ -35,18 +35,18 @@ func newRoot() *cobra.Command {
 		Version:       version,
 		SilenceErrors: true, // main prints errors + maps ExitError to an exit code
 		SilenceUsage:  true,
-		PersistentPreRunE: func(*cobra.Command, []string) error {
-			return validOutput(flagOutput)
+		PersistentPreRunE: func(cmd *cobra.Command, _ []string) error {
+			return checkOutputFlag(cmd)
 		},
 	}
-	root.PersistentFlags().StringVarP(&flagOutput, "output", "o", "table", "output format: table|json|yaml")
+	root.PersistentFlags().StringVarP(&flagOutput, "output", "o", "table", "output format: table|json|yaml|csv (csv: list commands only)")
 	root.PersistentFlags().StringVar(&flagContext, "context", "", "connection context (see `abctl context`); else $ABCTL_CONTEXT / .env")
 	root.AddCommand(
 		newAuthCmd(), newGetCmd(), newContextCmd(), newVersionCmd(),
 		newSeedCmd(), newValidateCmd(), newDiffCmd(), newSyncCmd(),
 		newCreateCmd(), newReplaceCmd(), newEditCmd(), newDeleteCmd(),
 		newApplyCmd(), newPullCmd(), newAttachCmd(), newDetachCmd(), newStatusCmd(),
-		newAPICmd(), newVPPCmd(),
+		newAssignCmd(), newUnassignCmd(), newAPICmd(), newVPPCmd(),
 	)
 	return root
 }

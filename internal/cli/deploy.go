@@ -10,6 +10,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/GigaionLLC/abcli/internal/ab"
 	"github.com/GigaionLLC/abcli/internal/hash"
 	"github.com/GigaionLLC/abcli/internal/state"
 )
@@ -43,20 +44,26 @@ func membershipCmd(verb string) *cobra.Command {
 	var yes, noWriteTree, jsonOut bool
 	prep := map[string]string{"attach": "to", "detach": "from"}[verb]
 	c := &cobra.Command{
-		Use:   verb + " <config|app> <name|id> --blueprint <name|id>",
-		Short: verb + " a configuration or app " + prep + " a blueprint",
-		Long: verb + " a configuration or an app " + prep + " a blueprint. Apps are how built-in MDM\n" +
+		Use:   verb + " <config|app|package|device|user|group> <name|serial|email> --blueprint <name|id>",
+		Short: verb + " a config, app, package, device, user, or user group " + prep + " a blueprint",
+		Long: verb + " a blueprint member " + prep + " a blueprint. Apps are how built-in MDM\n" +
 			"(Apple Business Essentials) deploys Apps & Books — assign an owned app to a blueprint and\n" +
-			"the blueprint's devices/users get it (`abctl get blueprint <id>` shows apps + license status).",
-		Args: cobra.ExactArgs(2), // "<config|app>" <name>
+			"the blueprint's devices/users get it (`abctl get blueprint <id>` shows apps + license status).\n" +
+			"Packages deploy the same way; devices, users, and user groups define the blueprint's targets.\n" +
+			"CUSTOM_SETTING config membership is always GitOps-tracked (the manifest is updated here);\n" +
+			"the other collections are GitOps-tracked only when the blueprint manifest manages their key\n" +
+			"(see `abctl seed --blueprint-membership`) — then keep the manifest in sync yourself.",
+		Args: cobra.ExactArgs(2), // "<config|app|package|device|user|group>" <name>
 		RunE: func(_ *cobra.Command, a []string) error {
 			switch a[0] {
 			case "config", "configuration":
 				return runMembership(verb, a[1], blueprint, yes, noWriteTree, jsonOut)
-			case "app", "apps":
-				return runAppMembership(verb, a[1], blueprint, yes, jsonOut)
 			default:
-				return fmt.Errorf("usage: abctl %s <config|app> <name|id> --blueprint <bp>", verb)
+				k, ok := memberKindFor(a[0])
+				if !ok {
+					return fmt.Errorf("usage: abctl %s <config|app|package|device|user|group> <name|serial|email> --blueprint <bp>", verb)
+				}
+				return runResourceMembership(verb, k, a[1], blueprint, yes, jsonOut)
 			}
 		},
 	}
@@ -117,17 +124,58 @@ func runMembership(verb, configArg, blueprintArg string, yes, noWriteTree, jsonO
 	return nil
 }
 
-// runAppMembership attaches/detaches an owned app to/from a blueprint. This is the built-in
-// MDM (Apple Business Essentials) Apps & Books path: assigning an app to a blueprint deploys
-// it to that blueprint's devices/users. App membership is NOT GitOps-tracked (the blueprint
-// manifest tracks CUSTOM_SETTING configs only), so there is no manifest write here.
-func runAppMembership(verb, appArg, blueprintArg string, yes, jsonOut bool) error {
+// memberKind describes a non-config attach/detach noun: its resolver, blueprint
+// relationship endpoint (== the JSON:API member type per the API contract), and
+// how to label the resolved resource in messages.
+type memberKind struct {
+	noun       string // human noun in messages ("app", "device", "user group", ...)
+	rel        string // blueprints/{id}/relationships/<rel>; also the member type
+	collection string // manifest collection key (ab.Collection*) — for the managed-key check
+	resolve    func(*ab.Client, string) (*ab.Resource, error)
+	display    func(*ab.Resource) string
+}
+
+func attrName(r *ab.Resource) string { return r.AttrStr("name") }
+
+var memberKinds = map[string]memberKind{
+	"app":     {noun: "app", rel: "apps", collection: ab.CollectionApps, resolve: (*ab.Client).ResolveApp, display: attrName},
+	"package": {noun: "package", rel: "packages", collection: ab.CollectionPackages, resolve: (*ab.Client).ResolvePackage, display: attrName},
+	"device": {noun: "device", rel: "orgDevices", collection: ab.CollectionDevices, resolve: (*ab.Client).ResolveDevice,
+		display: func(r *ab.Resource) string { return r.AttrStr("serialNumber") }},
+	"user": {noun: "user", rel: "users", collection: ab.CollectionUsers, resolve: (*ab.Client).ResolveUser,
+		display: func(r *ab.Resource) string {
+			if e := r.AttrStr("email"); e != "" {
+				return e
+			}
+			return r.AttrStr("managedAppleAccount")
+		}},
+	"group": {noun: "user group", rel: "userGroups", collection: ab.CollectionGroups, resolve: (*ab.Client).ResolveUserGroup, display: attrName},
+}
+
+// memberKindFor normalizes an attach/detach noun (singular/plural, usergroup aliases).
+func memberKindFor(noun string) (memberKind, bool) {
+	n := strings.TrimSuffix(strings.ToLower(noun), "s")
+	if n == "usergroup" {
+		n = "group"
+	}
+	k, ok := memberKinds[n]
+	return k, ok
+}
+
+// runResourceMembership attaches/detaches a non-config member (app, package, device,
+// user, or user group) to/from a blueprint. Apps/packages are the built-in MDM
+// (Apple Business Essentials) deployment path; devices/users/groups define the
+// blueprint's targets. There is no manifest write here — but when the blueprint
+// manifest MANAGES this collection (a `seed --blueprint-membership` tree), the
+// manifest is git-authoritative and a later `sync --apply --prune` would revert
+// this write, so the user is warned instead of being told it isn't tracked.
+func runResourceMembership(verb string, k memberKind, arg, blueprintArg string, yes, jsonOut bool) error {
 	prep := map[string]string{"attach": "to", "detach": "from"}[verb]
 	i, err := newImp()
 	if err != nil {
 		return err
 	}
-	app, err := i.c.ResolveApp(appArg)
+	res, err := k.resolve(i.c, arg)
 	if err != nil {
 		return err
 	}
@@ -135,26 +183,44 @@ func runAppMembership(verb, appArg, blueprintArg string, yes, jsonOut bool) erro
 	if err != nil {
 		return err
 	}
-	appName, bpName := app.AttrStr("name"), bp.AttrStr("name")
+	name, bpName := k.display(res), bp.AttrStr("name")
+	if name == "" {
+		name = res.ID
+	}
 	if !approved(yes) {
-		ok, err := confirmWrite(fmt.Sprintf("%s app %q %s blueprint %q", verb, appName, prep, bpName))
+		ok, err := confirmWrite(fmt.Sprintf("%s %s %q %s blueprint %q", verb, k.noun, name, prep, bpName))
 		if err != nil || !ok {
 			fmt.Fprintln(os.Stderr, "aborted.")
 			return ExitError{Code: 1}
 		}
 	}
 	if verb == "attach" {
-		err = i.c.AddBlueprintMembers(bp.ID, "apps", "apps", []string{app.ID})
+		err = i.c.AddBlueprintMembers(bp.ID, k.rel, k.rel, []string{res.ID})
 	} else {
-		err = i.c.RemoveBlueprintMembers(bp.ID, "apps", "apps", []string{app.ID})
+		err = i.c.RemoveBlueprintMembers(bp.ID, k.rel, k.rel, []string{res.ID})
 	}
 	if err != nil {
 		return err
 	}
-	if wantsMachine(jsonOut) {
-		return emitWrite(writeOutcome{Action: verb, Name: appName, ID: app.ID, Blueprint: bpName}, jsonOut)
+	// Best-effort managed-key check: an unreadable tree falls back to the
+	// untracked wording (the write itself already succeeded either way).
+	managed := false
+	if all, lerr := i.tree.LoadBlueprints(); lerr == nil {
+		if spec, ok := all[bpName]; ok {
+			_, managed = spec.Members(k.collection)
+		}
 	}
-	fmt.Fprintf(os.Stderr, "%sed app %q %s blueprint %q (app membership isn't GitOps-tracked)\n", verb, appName, prep, bpName)
+	if managed {
+		fmt.Fprintf(os.Stderr, "warning: blueprint %q's manifest manages %s membership — update gitops/blueprints/ to match, or the next `sync --apply --prune` will revert this %s.\n", bpName, k.noun, verb)
+	}
+	if wantsMachine(jsonOut) {
+		return emitWrite(writeOutcome{Action: verb, Name: name, ID: res.ID, Blueprint: bpName}, jsonOut)
+	}
+	if managed {
+		fmt.Fprintf(os.Stderr, "%sed %s %q %s blueprint %q\n", verb, k.noun, name, prep, bpName)
+	} else {
+		fmt.Fprintf(os.Stderr, "%sed %s %q %s blueprint %q (%s membership isn't GitOps-tracked)\n", verb, k.noun, name, prep, bpName, k.noun)
+	}
 	return nil
 }
 
@@ -213,7 +279,7 @@ func runPull(target string) error {
 
 func newStatusCmd() *cobra.Command {
 	c := &cobra.Command{Use: "status", Short: "Assignment / changelog status (desired-state proxies, not on-device install)"}
-	c.AddCommand(newStatusConfigCmd(), newStatusAuditCmd())
+	c.AddCommand(newStatusConfigCmd(), newStatusDeviceCmd(), newStatusActivityCmd(), newStatusAuditCmd())
 	return c
 }
 
