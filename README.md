@@ -6,14 +6,19 @@
 **`abctl`**, the GitOps/imperative CLI, and **`abgui`**, a native macOS app that drives the same engine.
 
 `abctl` keeps your organization's built-in-MDM **Configurations** (custom `.mobileconfig` profiles) and
-**Blueprint** membership in sync with a git-declarative desired state — read-only by default, every write
-gated, with an archive-on-overwrite audit trail. **[abgui](#abgui--native-macos-app)** is a native SwiftUI
-desktop app that bundles and shells out to `abctl`.
+full **Blueprint** membership — configurations, apps, packages, devices, users, and groups — in sync with a
+git-declarative desired state — read-only by default, every write gated, with an archive-on-overwrite audit
+trail. It also gives deep read-only inspection of the whole tenant (device detail + AppleCare, built-in-MDM
+enrollment posture, users/roles, `status device <serial>`) and gated device→MDM-server assignment.
+**[abgui](#abgui--native-macos-app)** is a native SwiftUI desktop app that bundles and shells out to `abctl`.
 
 > **Status:** pre-1.0. Auth + read + plan are live-verified. Config CRUD and blueprint config-membership
 > GitOps are built, unit-tested, and their core write operations verified live against a production Apple
-> Business tenant. The **abgui** desktop app (browse · diff/drift · gated apply · archive rollback) is built
-> and CI-green on macOS. See **[HANDOFF.md](HANDOFF.md)** for exact state and **[TODO.md](TODO.md)** for the roadmap.
+> Business tenant. The Apple **API v2.0/v2.1** surface (detail reads, posture, blueprint lifecycle + all six
+> membership collections, device assignment, MDM-server lifecycle) is built + unit-tested; its write verbs
+> await first live runs. The **abgui** desktop app (dashboard · browse + inspectors · diff/drift · gated
+> apply · archive rollback) is built and CI-green on macOS. See **[HANDOFF.md](HANDOFF.md)** for exact state
+> and **[TODO.md](TODO.md)** for the roadmap.
 
 ---
 
@@ -37,8 +42,17 @@ them, so your MDM profiles and blueprint membership live in version control like
   current version to `gitops/archive/` — a permanent, greppable record of everything ever replaced.
 - **Exact drift detection.** Apple stores custom profiles byte-for-byte (verified live), so drift is a plain
   SHA-256 of the profile XML.
-- **Safe blueprint GitOps.** Declare which profiles each Blueprint carries; `abctl` attaches/detaches to
-  match (detach gated behind `--prune`), and never touches native/console-only configs it doesn't own.
+- **Safe blueprint GitOps.** Declare which profiles — and optionally which apps, packages, devices, users,
+  and groups — each Blueprint carries; `abctl` attaches/detaches to match (detach gated behind `--prune`),
+  creates git-only blueprints (members ride inside the create POST), leaves any collection you don't declare
+  untouched, and never deletes a blueprint from GitOps.
+- **Whole-tenant visibility.** `get device <serial>` (assigned MDM server + `--applecare` coverage),
+  `get mdmdevices` (built-in-MDM enrollment posture: FileVault, firewall, last check-in, storage, lock),
+  `get user|usergroup|app|package|mdmserver` detail, `get blueprint` with all six member collections
+  resolved to names, `status device <serial>` (which blueprints/configs apply to this machine), and
+  `-o csv` on every list.
+- **Deployment plumbing, gated.** `assign|unassign --server` (bulk device→MDM assignment with `--wait`
+  activity polling), blueprint + MDM-server lifecycle commands — same confirm gates as every other write.
 - **Enterprise-grade engineering.** Cobra CLI, AGPL-3.0-or-later, race-tested unit + `httptest` suite,
   `golangci-lint` clean, gated live integration tests, and a Makefile — Linux/macOS CI.
 
@@ -59,14 +73,19 @@ CLI, decodes its JSON, and renders it.
   under `~/Library/Application Support/abgui/keys/` — so **they survive app updates** (replacing `abgui.app`
   doesn't touch them). Only actively deleting those files, or an uninstaller that does, removes them.
 - **Browse — read-only where the API is:** Configurations & Blueprints, plus clearly-badged **read-only**
-  views of Devices, Users (with roles), User Groups, Apps (catalog), Packages, MDM Servers, and the audit
-  log — each with a full-resource inspector, grouped in the sidebar as *GitOps* vs *Read-only*. (The separate
-  VPP content-token *Apps & Books* screen is disabled — see the built-in-MDM note below.)
+  views of Devices, **Enrolled Devices** (built-in-MDM posture: FileVault, firewall, last check-in), Users
+  (with roles), User Groups, Apps (catalog), Packages, MDM Servers, and the audit log — grouped in the
+  sidebar as *GitOps* vs *Read-only*, under a **Dashboard** of click-through stat tiles. Every list has
+  search, column sort, and CSV export; every entity opens a labeled **detail sheet** (device → assigned MDM
+  server, opt-in AppleCare coverage, and which blueprints/configs apply; user → roles + HR fields; group →
+  members; blueprint → all six member collections) with a raw-JSON fallback. (The separate VPP content-token
+  *Apps & Books* screen is disabled — see the built-in-MDM note below.)
 - **The GitOps hero:** a visual 3-way **diff / drift** view and a gated **`sync --apply`**. abgui defaults
   to Git source-of-truth with deletes/detaches enabled, uses smart Apple refresh by default, and exposes
   `--prune`, `--limit-writes`, refresh mode, and verification mode in the apply sheet.
-- **Write, gated:** create / edit / delete configs and attach / detach blueprint membership — each behind an
-  in-app confirm (abctl is still invoked with its own `--yes` gate and archive-on-overwrite).
+- **Write, gated:** create / edit / delete configs, attach / detach blueprint membership, and multi-select
+  device **Assign/Unassign to an MDM server** (with activity-status check) — each behind an in-app confirm
+  (abctl is still invoked with its own `--yes` gate and archive-on-overwrite).
 - **Archive / rollback:** browse every pre-overwrite live version abctl archived and restore one in a click.
 - **Mac distribution:** local builds are ad-hoc signed; tagged GitHub releases can be Developer ID-signed
   and notarized when the Apple signing secrets are configured. Build it with `make gui-app` (macOS 14+).

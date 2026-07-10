@@ -52,10 +52,15 @@ design: [docs/design-abctl.md](docs/design-abctl.md).
   `blueprint-new` (git-only; create needs a console member) + `blueprint-adopt` (ABM-only; run `seed`), and
   `Engine.ApplyBlueprints` executes it (attach always, detach gated, `--limit-writes` shared with configs).
   Never touches native/console configs it doesn't own. Verified live 2026-07-05 (merge-additive) + unit-tested.
-- [ ] Blueprint **create/update/delete** and **device/user/group membership** — still out. Create needs an
-  identity member (console-managed) + content; device membership needs a **real test device** to confirm the
-  reassignment / one-blueprint-per-device question (`testuser1` has 0 devices). Identity is API-read-only
-  (`POST /users`,`/userGroups` → `403 does-not-allow-CREATE`), so members are always console-created.
+- [x] **Blueprint create/update/delete + full membership — BUILT 2026-07-09** (unlocked by Apple's API v2.0,
+  2026-04-14): imperative `create|edit|delete blueprint` (create INLINES members — Apple 409s a member-less
+  create, live-verified 2026-07-05), `attach|detach` extended to `package|device|user|group`, and GitOps
+  blueprint manifests now manage **all six collections** (optional `apps:`/`packages:`/`devices:`/`users:`/
+  `groups:` keys; an absent key = unmanaged, never touched; git-only blueprints plan a real CREATE with
+  resolvable members riding inside the POST). Users/groups themselves remain API-read-only (`POST /users` →
+  `403`) — member identities are still console/SCIM-created. **Remaining live checks:** first end-to-end
+  sync of the non-config collections against the tenant, and the one-blueprint-per-device reassignment
+  question (still needs a real test device).
 
 ## Phase 3 — CI/CD
 - [x] **Live tests in CI** — read-only (`integration`) + gated write round-trip (`integration-write`) jobs
@@ -82,12 +87,32 @@ verification are architecturally impossible and are scoped out honestly (no agen
   (incremental, versioned `abctl/v1` spec); `pull [config <name>]` for console-edit adoption.
 - [~] **Phase 2 — deploy + assignment:** `attach|detach config --blueprint` (done); `status config`
   (coverage) + `status audit` (done — labeled desired-state/changelog, never install-verified).
-  **Remaining, blocked on a live test device:** a `orgDeviceActivities` client method +
-  `assign|unassign` + `status activity` (body shape + one-blueprint-per-device still unconfirmed).
+  `orgDeviceActivities` client + `assign|unassign --server [--wait]` + `status activity` are **BUILT
+  2026-07-09** (unit-tested; ASSIGN_DEVICES/UNASSIGN_DEVICES body pinned from Apple docs).
+  **Remaining, blocked on a live test device:** the first live assign/unassign round-trip.
 - [~] **Phase 3 — glue + distribution + 1.0:** `get users|usergroups|apps|mdmservers` + client-side
   `--filter` (done). Remaining: completions/man pages; Homebrew Cask + Scoop live (need the tap/bucket
   repos + a token secret — templates in `.goreleaser.yaml`); **v1.0.0** once the write verbs are
   live-proven against the tenant.
+
+## API v2 surface — shipped 2026-07-09 (branch `feature/abm-api-v2-surface`)
+Apple's API v2.0 (2026-04-14) + v2.1 (2026-06-03) releases; endpoint contracts pinned verbatim from
+developer.apple.com. Research + roadmap context: the ABMate/portal/API gap analysis (2026-07-09).
+- [x] **Detail reads** — `get device <serial>` (assigned MDM server + `--applecare`), `get mdmdevices` /
+  `get mdmdevice <serial>` (built-in-MDM enrolled devices + last-reported posture: FileVault, firewall,
+  check-in, OS, storage, lock/erase/lost-mode, enrolled user), `get user|usergroup [--members]`,
+  `get app|package`, `get mdmserver [--devices]`; `get blueprint` now resolves all six relationship
+  collections to names; `status device <serial>` = assigned server + blueprints containing it + their
+  configs + posture (labeled desired-state / last-reported).
+- [x] **`-o csv`** on list commands (RFC-4180 quoting, spreadsheet formula-injection neutralized).
+- [x] **MDM-server lifecycle (v2.1)** — `create|edit|delete mdmserver` (gated; Apple blocks delete while
+  devices are assigned — the 409 is surfaced verbatim).
+- [ ] **Live-verify the new write verbs** against the tenant (all unit-tested + gated; none has touched
+  the tenant yet). Assign/unassign additionally needs the test device (above).
+- [~] **abgui Phase B** — Enrolled Devices screen, entity detail inspectors, blueprint relationships,
+  dashboard tiles, search/sort/CSV export on every list (in progress on this branch; macOS CI validates).
+- Deliberately NOT built: third-party MDM integrations (Jamf/Intune/Kandji/Mosyle) and iTunes-lookup
+  enrichment — out of scope per project direction (no third-party integrations).
 
 ## Later — enterprise polish
 - [ ] **`--platform business|school`** (Apple School Manager uses `api-school` + `school.api`).
