@@ -33,6 +33,7 @@ final class AppModel {
 
     // Read-only resources (Apple Business exposes these for reading only)
     var devices: [Resource] = []
+    var mdmDevices: [Resource] = []
     var users: [Resource] = []
     var userGroups: [Resource] = []
     var apps: [Resource] = []
@@ -428,6 +429,7 @@ final class AppModel {
     func readItems(_ kind: ReadOnlyKind) -> [Resource] {
         switch kind {
         case .devices: return devices
+        case .mdmDevices: return mdmDevices
         case .users: return users
         case .userGroups: return userGroups
         case .apps: return apps
@@ -442,6 +444,7 @@ final class AppModel {
         await run { client in
             switch kind {
             case .devices: self.devices = try await client.devices()
+            case .mdmDevices: self.mdmDevices = try await client.mdmDevices()
             case .users: self.users = try await client.users()
             case .userGroups: self.userGroups = try await client.userGroups()
             case .apps: self.apps = try await client.apps()
@@ -456,6 +459,87 @@ final class AppModel {
     func profile(for id: String) async throws -> String {
         guard let client = makeClient() else { throw AbctlError.cli("abctl not found in the app bundle.") }
         return try await client.configurationProfile(id)
+    }
+
+    // MARK: singular inspection fetches — throwing passthroughs to the abctl detail verbs
+    // (Views/InspectSheets.swift). Each detail sheet owns its own loading/error state,
+    // so these throw instead of toggling the shared isLoading/loadError.
+
+    private func inspectClient() throws -> AbctlClient {
+        guard let client = makeClient() else { throw AbctlError.cli("abctl not found in the app bundle.") }
+        return client
+    }
+
+    /// One org device + its assigned server (+ AppleCare coverage with `appleCare`).
+    func deviceDetail(_ serialOrID: String, appleCare: Bool = false) async throws -> DeviceDetail {
+        try await inspectClient().deviceDetail(serialOrID, appleCare: appleCare)
+    }
+
+    /// One built-in-MDM device + its last-reported posture.
+    func mdmDeviceDetail(_ serialOrID: String) async throws -> MDMDeviceDetail {
+        try await inspectClient().mdmDeviceDetail(serialOrID)
+    }
+
+    /// One user (read-only; identity is not API-writable).
+    func userDetail(_ emailOrID: String) async throws -> Resource {
+        try await inspectClient().userDetail(emailOrID)
+    }
+
+    /// One user group (+ member emails with `members` — one API call per member).
+    func userGroupDetail(_ nameOrID: String, members: Bool = false) async throws -> UserGroupDetail {
+        try await inspectClient().userGroupDetail(nameOrID, members: members)
+    }
+
+    /// One owned app (Apps & Books) — a plain Resource.
+    func appDetail(_ nameOrID: String) async throws -> Resource {
+        try await inspectClient().appDetail(nameOrID)
+    }
+
+    /// One package (custom app/pkg) — a plain Resource.
+    func packageDetail(_ nameOrID: String) async throws -> Resource {
+        try await inspectClient().packageDetail(nameOrID)
+    }
+
+    /// One MDM server (+ its assigned device serials with `devices`).
+    func mdmServerDetail(_ nameOrID: String, devices: Bool = false) async throws -> MDMServerDetail {
+        try await inspectClient().mdmServerDetail(nameOrID, devices: devices)
+    }
+
+    /// One blueprint + the six name-resolved member collections.
+    func blueprintDetail(_ nameOrID: String) async throws -> BlueprintDetail {
+        try await inspectClient().blueprintDetail(nameOrID)
+    }
+
+    /// One device end-to-end (`status device` — fans out per blueprint, the slowest read).
+    func deviceStatus(_ serialOrID: String) async throws -> DeviceStatusReport {
+        try await inspectClient().deviceStatus(serialOrID)
+    }
+
+    // MARK: device assignment — gated writes returning the accepted orgDeviceActivity
+    // (Apple processes assignment asynchronously; the id is polled via activityStatus).
+    // These throw and leave the shared isWriting/lastWriteError alone: AssignSheet owns
+    // its own busy/error state, like the inspect sheets.
+
+    /// Assign org devices to an MDM server (AssignSheet's button is the confirm gate).
+    func assignDevices(_ serials: [String], server: String) async throws -> ActivityOutcome {
+        try await inspectClient().assignDevices(serials: serials, server: server)
+    }
+
+    /// Unassign org devices from an MDM server.
+    func unassignDevices(_ serials: [String], server: String) async throws -> ActivityOutcome {
+        try await inspectClient().unassignDevices(serials: serials, server: server)
+    }
+
+    /// Poll one assign/unassign activity (attributes: status / subStatus / createdDateTime).
+    func activityStatus(_ id: String) async throws -> Resource {
+        try await inspectClient().activityStatus(id)
+    }
+
+    /// Fetch the MDM-server list into the shared cache, THROWING on failure. AssignSheet
+    /// owns its own busy/error state (like the inspect sheets), so this leaves the shared
+    /// isLoading/loadError to the list screens.
+    func refreshMDMServers() async throws {
+        mdmServers = try await inspectClient().mdmServers()
     }
 
     // MARK: writes (v2) — each returns success so a sheet can dismiss; abctl is gated with
@@ -505,19 +589,33 @@ final class AppModel {
         }
     }
 
+    /// Bumped by every `run` so a stale load can't stomp a newer one's shared state
+    /// (the dashboard's sequential pass can overlap a destination screen's own .task).
+    private var loadGeneration = 0
+
     /// Shared load wrapper: toggles isLoading, clears/sets loadError, runs `body`.
+    /// Cancellation (navigating away terminates the abctl child) is swallowed like
+    /// loadPlan's — never shown as an error — and only the LATEST run may write the
+    /// shared isLoading/loadError, so an overlapping older run can't clear a live
+    /// load's spinner or overwrite its error with a stale one.
     private func run(_ body: (AbctlClient) async throws -> Void) async {
         guard let client = makeClient() else {
             loadError = "abctl was not found in the app bundle."
             return
         }
+        loadGeneration += 1
+        let generation = loadGeneration
         isLoading = true
         loadError = nil
         do {
             try await body(client)
+        } catch is CancellationError {
+            // user navigated away / cancelled — clear the in-flight state, no error shown
         } catch {
-            loadError = error.localizedDescription
+            if !Task.isCancelled, generation == loadGeneration {
+                loadError = error.localizedDescription
+            }
         }
-        isLoading = false
+        if generation == loadGeneration { isLoading = false }
     }
 }

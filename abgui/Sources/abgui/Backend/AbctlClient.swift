@@ -48,6 +48,11 @@ struct AbctlClient {
     private static let decoder = JSONDecoder()
     private static let planTimeout: Duration = .seconds(600)
     private static let applyTimeout: Duration = .seconds(1_200)
+    /// The fan-out reads outgrow the plain 60s read budget, so they get double:
+    /// `status device` (one relationship call per blueprint + the MDM inventory list),
+    /// `get usergroup --members` (one API call per member), and `get mdmserver
+    /// --devices` (walks the whole org device inventory to resolve serials).
+    private static let fanOutTimeout: Duration = .seconds(120)
 
     // MARK: reads
 
@@ -89,6 +94,84 @@ struct AbctlClient {
     }
     func audit(since: String) async throws -> [Resource] {
         try await decodeJSON([Resource].self, ["get", "audit", "--since", since, "-o", "json"])
+    }
+    /// Built-in-MDM device inventory: devices enrolled in the BUILT-IN device management
+    /// service, with last-reported posture attributes (not live device queries).
+    func mdmDevices() async throws -> [Resource] {
+        try await decodeJSON([Resource].self, ["get", "mdmdevices", "-o", "json"])
+    }
+
+    // MARK: singular inspection reads — the `get <one>` / `status device` detail
+    // commands (abctl Phase A). Composite payloads decode via Models/Inspect.swift;
+    // the JSON shapes are defined by the Go side (internal/cli/inspect.go, get.go).
+
+    /// One org device + its assigned MDM server; `appleCare` also fetches coverage
+    /// records (one extra API call, so it stays behind an explicit button).
+    func deviceDetail(_ serialOrID: String, appleCare: Bool = false) async throws -> DeviceDetail {
+        var args = ["get", "device", serialOrID]
+        if appleCare { args.append("--applecare") }
+        args.append("--json")
+        return try await decodeJSON(DeviceDetail.self, args)
+    }
+
+    /// One built-in-MDM device + its last-reported posture details.
+    func mdmDeviceDetail(_ serialOrID: String) async throws -> MDMDeviceDetail {
+        try await decodeJSON(MDMDeviceDetail.self, ["get", "mdmdevice", serialOrID, "--json"])
+    }
+
+    /// One user — a plain Resource (read-only; identity is not API-writable).
+    func userDetail(_ emailOrID: String) async throws -> Resource {
+        try await decodeJSON(Resource.self, ["get", "user", emailOrID, "--json"])
+    }
+
+    /// One user group; `members` resolves member emails (one API call per member,
+    /// so it stays behind an explicit affordance — and gets the fan-out budget).
+    func userGroupDetail(_ nameOrID: String, members: Bool = false) async throws -> UserGroupDetail {
+        var args = ["get", "usergroup", nameOrID]
+        if members { args.append("--members") }
+        args.append("--json")
+        return try await decodeJSON(UserGroupDetail.self, args,
+                                    timeout: members ? Self.fanOutTimeout : .seconds(60))
+    }
+
+    /// One owned app (Apps & Books) — a plain Resource.
+    func appDetail(_ nameOrID: String) async throws -> Resource {
+        try await decodeJSON(Resource.self, ["get", "app", nameOrID, "--json"])
+    }
+
+    /// One package (custom app/pkg) — a plain Resource.
+    func packageDetail(_ nameOrID: String) async throws -> Resource {
+        try await decodeJSON(Resource.self, ["get", "package", nameOrID, "--json"])
+    }
+
+    /// One MDM server; `devices` lists its assigned device serials (a whole-inventory
+    /// walk on the CLI side, so it gets the fan-out budget).
+    func mdmServerDetail(_ nameOrID: String, devices: Bool = false) async throws -> MDMServerDetail {
+        var args = ["get", "mdmserver", nameOrID]
+        if devices { args.append("--devices") }
+        args.append("--json")
+        return try await decodeJSON(MDMServerDetail.self, args,
+                                    timeout: devices ? Self.fanOutTimeout : .seconds(60))
+    }
+
+    /// One blueprint with member counts + all six name-resolved member collections.
+    func blueprintDetail(_ nameOrID: String) async throws -> BlueprintDetail {
+        try await decodeJSON(BlueprintDetail.self, ["get", "blueprint", nameOrID, "--json"])
+    }
+
+    /// One device end-to-end: MDM server + blueprint/config membership (desired state)
+    /// and built-in-MDM posture (last reported). Fans out per-blueprint relationship
+    /// calls, hence the longer budget. (The CLI also takes --applecare here, but the
+    /// GUI fetches coverage via `deviceDetail(appleCare:)` instead, so it isn't threaded.)
+    func deviceStatus(_ serialOrID: String) async throws -> DeviceStatusReport {
+        try await decodeJSON(DeviceStatusReport.self, ["status", "device", serialOrID, "--json"],
+                             timeout: Self.fanOutTimeout)
+    }
+
+    /// Poll one assign/unassign activity — a plain Resource whose attributes carry
+    /// status / subStatus / createdDateTime.
+    func activityStatus(_ id: String) async throws -> Resource {
+        try await decodeJSON(Resource.self, ["status", "activity", id, "--json"])
     }
 
     // Apps & Books (VPP) — read-only, via `abctl vpp …`. The content token is passed as
@@ -171,6 +254,17 @@ struct AbctlClient {
     /// Detach a config from a blueprint.
     func detach(configID: String, blueprint: String) async throws -> WriteOutcome {
         try await decodeJSON(WriteOutcome.self, ["detach", "config", configID, "--blueprint", blueprint, "--yes", "--json"])
+    }
+
+    /// Assign org devices to an MDM server. Apple processes assignment asynchronously —
+    /// the outcome carries the activity id to poll via `activityStatus`.
+    func assignDevices(serials: [String], server: String) async throws -> ActivityOutcome {
+        try await decodeJSON(ActivityOutcome.self, ["assign", "--server", server] + serials + ["--yes", "--json"])
+    }
+
+    /// Unassign org devices from an MDM server (async, same activity-id contract).
+    func unassignDevices(serials: [String], server: String) async throws -> ActivityOutcome {
+        try await decodeJSON(ActivityOutcome.self, ["unassign", "--server", server] + serials + ["--yes", "--json"])
     }
 
     // MARK: connection contexts (~/.abctl/contexts.yaml — the credential store)
