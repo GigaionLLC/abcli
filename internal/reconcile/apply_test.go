@@ -13,8 +13,12 @@ import (
 
 // fakes implements Applier + Archiver + FileStore, recording an ordered event log
 // so tests can assert both *what* happened and *in what order* (archive-before-write).
+// relOps additionally records each membership call's relationship + member type,
+// so per-collection tests can assert the API relation without disturbing the
+// event-log format older tests pin.
 type fakes struct {
 	events      []string
+	relOps      []string
 	files       map[string]string
 	updatedTS   string
 	createErr   bool
@@ -23,6 +27,7 @@ type fakes struct {
 	writeErr    bool
 	removeErr   bool
 	archiveErr  bool
+	bpCreateErr bool
 	bpAddErr    bool
 	bpRemoveErr bool
 }
@@ -79,19 +84,29 @@ func (f *fakes) RemoveConfig(name string) error {
 	return nil
 }
 
-func (f *fakes) AddBlueprintMembers(bpID, _, _ string, ids []string) error {
+func (f *fakes) CreateBlueprint(name, description string) (*ab.Resource, error) {
+	if f.bpCreateErr {
+		return nil, errors.New("create blueprint boom")
+	}
+	f.events = append(f.events, "createbp:"+name+":"+description)
+	return &ab.Resource{Type: "blueprints", ID: "bp-" + name}, nil
+}
+
+func (f *fakes) AddBlueprintMembers(bpID, rel, memberType string, ids []string) error {
 	if f.bpAddErr {
 		return errors.New("attach boom")
 	}
 	f.events = append(f.events, "attach:"+bpID+":"+strings.Join(ids, ","))
+	f.relOps = append(f.relOps, "POST:"+rel+":"+memberType)
 	return nil
 }
 
-func (f *fakes) RemoveBlueprintMembers(bpID, _, _ string, ids []string) error {
+func (f *fakes) RemoveBlueprintMembers(bpID, rel, memberType string, ids []string) error {
 	if f.bpRemoveErr {
 		return errors.New("detach boom")
 	}
 	f.events = append(f.events, "detach:"+bpID+":"+strings.Join(ids, ","))
+	f.relOps = append(f.relOps, "DELETE:"+rel+":"+memberType)
 	return nil
 }
 

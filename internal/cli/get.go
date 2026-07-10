@@ -3,6 +3,7 @@ package cli
 import (
 	"fmt"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -54,7 +55,8 @@ func newGetCmd() *cobra.Command {
 	aud.Flags().BoolVar(&aJSON, "json", false, "JSON output")
 	aud.Flags().StringVar(&since, "since", "24h", "look-back window (e.g. 24h, 7d, 90d)")
 
-	get.AddCommand(configs, oneCfg, bps, bp, dev, aud)
+	get.AddCommand(csvCapable(configs), oneCfg, csvCapable(bps), bp, csvCapable(dev), csvCapable(aud))
+	get.AddCommand(inspectGetCmds()...)
 	get.AddCommand(
 		readCmd("users", "List users", (*ab.Client).ListUsers,
 			[]string{"NAME", "EMAIL", "ROLES"}, func(r ab.Resource) []string {
@@ -83,7 +85,7 @@ func newGetCmd() *cobra.Command {
 }
 
 // readCmd builds a read-only `get <resource>` subcommand: fetch, optional
-// --filter (attribute substring), then render as table/json/yaml.
+// --filter (attribute substring), then render as table/json/yaml/csv.
 func readCmd(use, short string, list func(*ab.Client) ([]ab.Resource, error), cols []string, row func(ab.Resource) []string) *cobra.Command {
 	var asJSON bool
 	var filters []string
@@ -99,12 +101,12 @@ func readCmd(use, short string, list func(*ab.Client) ([]ab.Resource, error), co
 				return err
 			}
 			items = applyFilter(items, filters)
-			if asJSON || flagOutput != "table" {
-				return render(outFmt(asJSON), asList(items), nil, nil)
-			}
 			rows := make([][]string, 0, len(items))
 			for _, it := range items {
 				rows = append(rows, row(it))
+			}
+			if asJSON || flagOutput != "table" {
+				return render(outFmt(asJSON), asList(items), cols, rows)
 			}
 			printTable(cols, rows)
 			fmt.Fprintf(os.Stderr, "%d %s\n", len(items), use)
@@ -113,7 +115,7 @@ func readCmd(use, short string, list func(*ab.Client) ([]ab.Resource, error), co
 	}
 	c.Flags().BoolVar(&asJSON, "json", false, "JSON output")
 	c.Flags().StringArrayVar(&filters, "filter", nil, "keep items whose attribute contains a value: key=substr (repeatable, AND)")
-	return c
+	return csvCapable(c)
 }
 
 // applyFilter keeps resources whose string attribute for key contains the value
@@ -161,14 +163,15 @@ func getConfigurations(asJSON bool, typ string) error {
 		}
 		items = f
 	}
-	if asJSON || flagOutput != "table" {
-		return render(outFmt(asJSON), asList(items), nil, nil)
-	}
+	cols := []string{"NAME", "TYPE", "UPDATED"}
 	rows := make([][]string, 0, len(items))
 	for _, it := range items {
 		rows = append(rows, []string{it.AttrStr("name"), it.AttrStr("type"), it.AttrStr("updatedDateTime")})
 	}
-	printTable([]string{"NAME", "TYPE", "UPDATED"}, rows)
+	if asJSON || flagOutput != "table" {
+		return render(outFmt(asJSON), asList(items), cols, rows)
+	}
+	printTable(cols, rows)
 	fmt.Fprintf(os.Stderr, "%d configuration(s)\n", len(items))
 	return nil
 }
@@ -221,16 +224,67 @@ func getBlueprints(asJSON bool) error {
 	if err != nil {
 		return err
 	}
-	if asJSON || flagOutput != "table" {
-		return render(outFmt(asJSON), asList(items), nil, nil)
-	}
+	cols := []string{"NAME", "STATUS", "ID"}
 	rows := make([][]string, 0, len(items))
 	for _, it := range items {
 		rows = append(rows, []string{it.AttrStr("name"), it.AttrStr("status"), it.ID})
 	}
-	printTable([]string{"NAME", "STATUS", "ID"}, rows)
+	if asJSON || flagOutput != "table" {
+		return render(outFmt(asJSON), asList(items), cols, rows)
+	}
+	printTable(cols, rows)
 	fmt.Fprintf(os.Stderr, "%d blueprint(s)\n", len(items))
 	return nil
+}
+
+// blueprintRels are the six blueprint member collections, in display order.
+var blueprintRels = []string{"configurations", "apps", "packages", "orgDevices", "users", "userGroups"}
+
+// blueprintMemberNames resolves each collection's member ids to human names
+// via the canonical ab.FetchBlueprintMemberMaps table (configs/apps/packages/
+// groups → name, devices → serial, users → email falling back to the managed
+// Apple Account — the same addresses seed/sync manifests use). The id→name
+// list is fetched LAZILY — only for collections that have members — a failed
+// list degrades that one collection to raw ids, and an unresolved id passes
+// through as-is (mirroring FetchBlueprints).
+func blueprintMemberNames(c *ab.Client, rels map[string][]ab.Resource) map[string][]string {
+	byCol := map[string]map[string]string{}
+	colByRel := make(map[string]string, len(ab.BlueprintCollections))
+	for _, col := range ab.BlueprintCollections {
+		rel := ab.BlueprintRel(col)
+		colByRel[rel] = col
+		if len(rels[rel]) == 0 {
+			continue
+		}
+		if col == ab.CollectionConfigurations { // skipped by FetchBlueprintMemberMaps (baseline-scoped in sync)
+			if items, err := c.ListConfigurations(); err == nil {
+				m := make(map[string]string, len(items))
+				for _, it := range items {
+					m[it.ID] = it.AttrStr("name")
+				}
+				byCol[col] = m
+			}
+			continue
+		}
+		if maps, _, err := c.FetchBlueprintMemberMaps([]string{col}, nil); err == nil {
+			byCol[col] = maps[col]
+		}
+	}
+	out := make(map[string][]string, len(rels))
+	for rel, links := range rels {
+		names := make([]string, 0, len(links))
+		byID := byCol[colByRel[rel]]
+		for _, l := range links {
+			if n := byID[l.ID]; n != "" {
+				names = append(names, n)
+			} else {
+				names = append(names, l.ID)
+			}
+		}
+		sort.Strings(names)
+		out[rel] = names
+	}
+	return out
 }
 
 func getBlueprint(nameOrID string, asJSON bool) error {
@@ -242,20 +296,28 @@ func getBlueprint(nameOrID string, asJSON bool) error {
 	if err != nil {
 		return err
 	}
-	configs, _ := c.BlueprintRelationship(r.ID, "configurations")
-	apps, _ := c.BlueprintRelationship(r.ID, "apps")
-	devices, _ := c.BlueprintRelationship(r.ID, "orgDevices")
+	rels := make(map[string][]ab.Resource, len(blueprintRels))
+	for _, rel := range blueprintRels {
+		rels[rel], _ = c.BlueprintRelationship(r.ID, rel)
+	}
+	configs, apps, devices := rels["configurations"], rels["apps"], rels["orgDevices"]
 	deficient, _ := r.Attr()["appLicenseDeficient"].(bool) // built-in-MDM Apps & Books signal
 	appIDs := make([]string, 0, len(apps))
 	for _, a := range apps {
 		appIDs = append(appIDs, a.ID)
 	}
+	names := blueprintMemberNames(c, rels)
 	if asJSON || flagOutput != "table" {
 		// A JSON-driven detail screen needs the member counts + the app ids (to cross-
-		// reference `get apps`) + the license-deficient flag for built-in-MDM Apps & Books.
+		// reference `get apps`) + the license-deficient flag for built-in-MDM Apps & Books
+		// + all six member collections resolved to human names.
+		relNames := make(map[string]any, len(blueprintRels))
+		for _, rel := range blueprintRels {
+			relNames[rel] = asList(names[rel])
+		}
 		return render(outFmt(asJSON), map[string]any{
 			"blueprint": r, "configs": len(configs), "apps": len(apps), "devices": len(devices),
-			"appIds": appIDs, "appLicenseDeficient": deficient,
+			"appIds": appIDs, "appLicenseDeficient": deficient, "relationships": relNames,
 		}, nil, nil)
 	}
 	fmt.Printf("name     %s\n", r.AttrStr("name"))
@@ -266,6 +328,18 @@ func getBlueprint(nameOrID string, asJSON bool) error {
 	fmt.Printf("devices  %d\n", len(devices))
 	if deficient {
 		fmt.Println("licenses ⚠ app-license-deficient (more app licenses needed than available)")
+	}
+	fmt.Println("members")
+	labels := map[string]string{
+		"configurations": "configurations", "apps": "apps", "packages": "packages",
+		"orgDevices": "devices", "users": "users", "userGroups": "user groups",
+	}
+	for _, rel := range blueprintRels {
+		v := "(none)"
+		if len(names[rel]) > 0 {
+			v = strings.Join(names[rel], ", ")
+		}
+		fmt.Printf("  %-14s  %s\n", labels[rel], v)
 	}
 	return nil
 }
@@ -279,14 +353,15 @@ func getDevices(asJSON bool) error {
 	if err != nil {
 		return err
 	}
-	if asJSON || flagOutput != "table" {
-		return render(outFmt(asJSON), asList(items), nil, nil)
-	}
+	cols := []string{"SERIAL", "FAMILY", "MODEL"}
 	rows := make([][]string, 0, len(items))
 	for _, it := range items {
 		rows = append(rows, []string{it.AttrStr("serialNumber"), it.AttrStr("productFamily"), it.AttrStr("deviceModel")})
 	}
-	printTable([]string{"SERIAL", "FAMILY", "MODEL"}, rows)
+	if asJSON || flagOutput != "table" {
+		return render(outFmt(asJSON), asList(items), cols, rows)
+	}
+	printTable(cols, rows)
 	fmt.Fprintf(os.Stderr, "%d device(s)\n", len(items))
 	return nil
 }
@@ -305,9 +380,7 @@ func getAudit(since string, asJSON bool) error {
 	if err != nil {
 		return err
 	}
-	if asJSON || flagOutput != "table" {
-		return render(outFmt(asJSON), asList(items), nil, nil)
-	}
+	cols := []string{"TIME", "EVENT", "ACTOR"}
 	rows := make([][]string, 0, len(items))
 	for _, it := range items {
 		a := it.Attr()
@@ -321,7 +394,10 @@ func getAudit(since string, asJSON bool) error {
 		}
 		rows = append(rows, []string{t, it.AttrStr("eventType"), actor})
 	}
-	printTable([]string{"TIME", "EVENT", "ACTOR"}, rows)
+	if asJSON || flagOutput != "table" {
+		return render(outFmt(asJSON), asList(items), cols, rows)
+	}
+	printTable(cols, rows)
 	fmt.Fprintf(os.Stderr, "%d event(s) in last %s\n", len(items), since)
 	return nil
 }

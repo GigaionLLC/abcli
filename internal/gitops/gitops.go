@@ -80,15 +80,58 @@ func (t *Tree) RemoveConfig(name string) error {
 	return err
 }
 
-// BlueprintSpec is the git desired-state for one blueprint: its identity and the
-// set of configuration names attached to it. Device/user/group membership is NOT
-// tracked here — identity is API-read-only (console/federation-managed), so a
-// blueprint's members live in the console, not in git.
+// BlueprintSpec is the git desired-state for one blueprint: its identity plus
+// the member collections it manages. Blueprint CRUD and membership writes landed
+// in Apple Business API v2.0 (2026-04-14), so all six collections are
+// API-writable (the users/groups/devices themselves stay API-read-only — only
+// their blueprint membership is managed here).
+//
+// Configurations keeps its original semantics: always managed, absent == empty.
+// The five newer keys are OPTIONAL, with pointer-to-slice semantics:
+//
+//	nil     — key absent (or explicit null) → collection UNMANAGED, never touched
+//	present — even `apps: []` → manage to that exact set (detaches gated --prune)
 type BlueprintSpec struct {
-	Name           string   `yaml:"name"`
-	ID             string   `yaml:"id,omitempty"`
-	Description    string   `yaml:"description,omitempty"`
-	Configurations []string `yaml:"configurations"`
+	Name           string    `yaml:"name"`
+	ID             string    `yaml:"id,omitempty"`
+	Description    string    `yaml:"description,omitempty"`
+	Configurations []string  `yaml:"configurations"`
+	Apps           *[]string `yaml:"apps,omitempty"`     // app names
+	Packages       *[]string `yaml:"packages,omitempty"` // package names
+	Devices        *[]string `yaml:"devices,omitempty"`  // device serial numbers
+	Users          *[]string `yaml:"users,omitempty"`    // user emails (or managed Apple Accounts)
+	Groups         *[]string `yaml:"groups,omitempty"`   // user-group names
+}
+
+// Members returns the manifest's member list for one collection key and whether
+// the manifest MANAGES that collection. Configurations is always managed (the
+// original Phase-1 semantics: an absent key means "attach nothing", not
+// "unmanaged"); the other five are managed only when their key is present, so an
+// omitted key can never cause a detach. An unknown key is unmanaged.
+func (s BlueprintSpec) Members(collection string) ([]string, bool) {
+	switch collection {
+	case "configurations":
+		return s.Configurations, true
+	case "apps":
+		return optMembers(s.Apps)
+	case "packages":
+		return optMembers(s.Packages)
+	case "devices":
+		return optMembers(s.Devices)
+	case "users":
+		return optMembers(s.Users)
+	case "groups":
+		return optMembers(s.Groups)
+	}
+	return nil, false
+}
+
+// optMembers dereferences an optional member key: nil pointer = unmanaged.
+func optMembers(p *[]string) ([]string, bool) {
+	if p == nil {
+		return nil, false
+	}
+	return *p, true
 }
 
 // LoadBlueprints reads blueprints/*.yml → blueprint name → spec. A malformed file

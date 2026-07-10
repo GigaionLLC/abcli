@@ -304,3 +304,163 @@ func TestWriteErrorMapsAPIError(t *testing.T) {
 		t.Fatalf("want *APIError 400, got %T %v", err, err)
 	}
 }
+
+// TestFetchBlueprintsCollections covers the per-collection membership fetch:
+// configurations are ALWAYS fetched (even when not requested), a requested
+// collection resolves ids to display names (unresolved ids pass through, lists
+// sorted) across pagination, an unrequested collection costs no relationship
+// call and stays nil (unknown, not empty), and the blueprint description rides
+// along for seed.
+func TestFetchBlueprintsCollections(t *testing.T) {
+	var paths []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		paths = append(paths, r.URL.Path)
+		switch {
+		case r.URL.Path == "/blueprints":
+			fmt.Fprint(w, `{"data":[{"type":"blueprints","id":"bp-1","attributes":{"name":"Sales","description":"field sales"}}],"meta":{"paging":{"nextCursor":""}}}`)
+		case r.URL.Path == "/blueprints/bp-1/relationships/configurations":
+			fmt.Fprint(w, `{"data":[{"type":"configurations","id":"c-wifi"},{"type":"configurations","id":"c-native"}],"meta":{"paging":{"nextCursor":""}}}`)
+		case r.URL.Path == "/blueprints/bp-1/relationships/orgDevices" && r.URL.Query().Get("cursor") == "":
+			fmt.Fprint(w, `{"data":[{"type":"orgDevices","id":"d-1"}],"meta":{"paging":{"nextCursor":"C2"}}}`)
+		case r.URL.Path == "/blueprints/bp-1/relationships/orgDevices":
+			fmt.Fprint(w, `{"data":[{"type":"orgDevices","id":"d-x"}],"meta":{"paging":{"nextCursor":""}}}`)
+		default:
+			t.Errorf("unexpected request: %s", r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	nameByID := map[string]map[string]string{
+		CollectionConfigurations: {"c-wifi": "wifi.mobileconfig"},
+		CollectionDevices:        {"d-1": "C02AAA"},
+	}
+	// Only devices requested — configurations must be force-included anyway.
+	got, err := testClient(srv.URL).FetchBlueprints([]string{CollectionDevices}, nameByID, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("got %d blueprints, want 1", len(got))
+	}
+	bp := got[0]
+	if bp.Name != "Sales" || bp.ID != "bp-1" || bp.Description != "field sales" {
+		t.Errorf("blueprint identity = %+v", bp)
+	}
+	if len(bp.Configs) != 2 || bp.Configs[0] != "c-native" || bp.Configs[1] != "wifi.mobileconfig" {
+		t.Errorf("Configs = %v, want sorted [c-native wifi.mobileconfig] (unresolved id passes through)", bp.Configs)
+	}
+	if len(bp.Devices) != 2 || bp.Devices[0] != "C02AAA" || bp.Devices[1] != "d-x" {
+		t.Errorf("Devices = %v, want sorted [C02AAA d-x] (paginated + resolved)", bp.Devices)
+	}
+	if bp.Apps != nil || bp.Users != nil || bp.Groups != nil || bp.Packages != nil {
+		t.Errorf("unrequested collections must stay nil (unknown), got %+v", bp)
+	}
+	for _, p := range paths {
+		switch p {
+		case "/blueprints/bp-1/relationships/apps", "/blueprints/bp-1/relationships/packages",
+			"/blueprints/bp-1/relationships/users", "/blueprints/bp-1/relationships/userGroups":
+			t.Errorf("unrequested collection was fetched: %s", p)
+		}
+	}
+}
+
+// TestFetchBlueprintMemberMaps covers the lazy id→name map builder: one list per
+// REQUESTED collection only, apps/packages/groups keyed by name, devices by
+// serial, users by email falling back to managedAppleAccount (a user with
+// neither is omitted so its id passes through), and "configurations" skipped
+// (its map is baseline-scoped and caller-supplied). The alias maps carry the
+// lowercased addresses the imperative resolvers also accept, with an alias
+// claimed by two members pinned to "" (ambiguous — never canonicalized).
+func TestFetchBlueprintMemberMaps(t *testing.T) {
+	var paths []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		paths = append(paths, r.URL.Path)
+		switch r.URL.Path {
+		case "/apps":
+			fmt.Fprint(w, `{"data":[{"type":"apps","id":"a-1","attributes":{"name":"Keynote"}}],"meta":{"paging":{"nextCursor":""}}}`)
+		case "/packages":
+			fmt.Fprint(w, `{"data":[{"type":"packages","id":"p-1","attributes":{"name":"Tool.pkg"}}],"meta":{"paging":{"nextCursor":""}}}`)
+		case "/orgDevices":
+			fmt.Fprint(w, `{"data":[{"type":"orgDevices","id":"d-1","attributes":{"serialNumber":"C02AAA"}}],"meta":{"paging":{"nextCursor":""}}}`)
+		case "/users":
+			fmt.Fprint(w, `{"data":[
+				{"type":"users","id":"u-1","attributes":{"email":"ann@x.co","managedAppleAccount":"ann@appleid.x.co"}},
+				{"type":"users","id":"u-2","attributes":{"managedAppleAccount":"bob@appleid.x.co"}},
+				{"type":"users","id":"u-3","attributes":{}},
+				{"type":"users","id":"u-4","attributes":{"email":"ann@appleid.x.co"}}
+			],"meta":{"paging":{"nextCursor":""}}}`)
+		case "/userGroups":
+			fmt.Fprint(w, `{"data":[{"type":"userGroups","id":"g-1","attributes":{"name":"Eng"}}],"meta":{"paging":{"nextCursor":""}}}`)
+		default:
+			t.Errorf("unexpected request: %s", r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	maps, aliases, err := testClient(srv.URL).FetchBlueprintMemberMaps(
+		[]string{CollectionApps, CollectionPackages, CollectionDevices, CollectionUsers, CollectionGroups, CollectionConfigurations}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m := maps[CollectionApps]; len(m) != 1 || m["a-1"] != "Keynote" {
+		t.Errorf("apps map = %v", m)
+	}
+	if m := maps[CollectionPackages]; len(m) != 1 || m["p-1"] != "Tool.pkg" {
+		t.Errorf("packages map = %v", m)
+	}
+	if m := maps[CollectionDevices]; len(m) != 1 || m["d-1"] != "C02AAA" {
+		t.Errorf("devices map = %v", m)
+	}
+	if m := maps[CollectionUsers]; len(m) != 3 || m["u-1"] != "ann@x.co" || m["u-2"] != "bob@appleid.x.co" || m["u-4"] != "ann@appleid.x.co" {
+		t.Errorf("users map = %v (want email primary, managedAppleAccount fallback, unnamed omitted)", m)
+	}
+	if m := maps[CollectionGroups]; len(m) != 1 || m["g-1"] != "Eng" {
+		t.Errorf("groups map = %v", m)
+	}
+	if _, ok := maps[CollectionConfigurations]; ok {
+		t.Error("configurations must be skipped (baseline-scoped, caller-supplied)")
+	}
+	// Aliases: devices by lowercased serial; users by lowercased email AND
+	// managed Apple Account. u-1's account alias collides with u-4's email →
+	// pinned ambiguous (""). Exact-name collections carry no aliases.
+	if a := aliases[CollectionDevices]; len(a) != 1 || a["c02aaa"] != "C02AAA" {
+		t.Errorf("device aliases = %v", a)
+	}
+	a := aliases[CollectionUsers]
+	if a["ann@x.co"] != "ann@x.co" || a["bob@appleid.x.co"] != "bob@appleid.x.co" {
+		t.Errorf("user aliases = %v", a)
+	}
+	if got, ok := a["ann@appleid.x.co"]; !ok || got != "" {
+		t.Errorf("colliding alias = %q (present=%v), want present-but-empty (ambiguous)", got, ok)
+	}
+	if a := aliases[CollectionApps]; len(a) != 0 {
+		t.Errorf("apps must have no aliases (exact-name matching), got %v", a)
+	}
+	for _, p := range paths {
+		if p == "/configurations" {
+			t.Errorf("unrequested collection was listed: %s", p)
+		}
+	}
+}
+
+// TestBlueprintRel pins the collection → relationship mapping, including the
+// legacy default (empty key = configurations) and the unknown-key guard.
+func TestBlueprintRel(t *testing.T) {
+	cases := map[string]string{
+		"":                       "configurations", // legacy plan items carry no Collection
+		CollectionConfigurations: "configurations",
+		CollectionApps:           "apps",
+		CollectionPackages:       "packages",
+		CollectionDevices:        "orgDevices",
+		CollectionUsers:          "users",
+		CollectionGroups:         "userGroups",
+		"nonsense":               "",
+	}
+	for col, want := range cases {
+		if got := BlueprintRel(col); got != want {
+			t.Errorf("BlueprintRel(%q) = %q, want %q", col, got, want)
+		}
+	}
+}

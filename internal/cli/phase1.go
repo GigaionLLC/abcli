@@ -7,7 +7,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"sort"
 	"strings"
 	"time"
 
@@ -33,12 +32,21 @@ const (
 )
 
 func newSeedCmd() *cobra.Command {
-	return &cobra.Command{
+	var bpMembership bool
+	c := &cobra.Command{
 		Use:   "seed",
 		Short: "Download live configs → gitops/ tree + baseline (reads ABM, writes local files)",
-		Args:  cobra.NoArgs,
-		RunE:  func(*cobra.Command, []string) error { return runSeed() },
+		Long: "seed materializes the live tenant into the local gitops tree. By default a blueprint\n" +
+			"manifest tracks configuration membership only; --blueprint-membership additionally\n" +
+			"writes the apps/packages/devices/users/groups keys from live, making all six member\n" +
+			"collections MANAGED (sync will then attach/detach them to match git). A key you later\n" +
+			"delete from a manifest becomes unmanaged again and is never touched.",
+		Args: cobra.NoArgs,
+		RunE: func(*cobra.Command, []string) error { return runSeed(bpMembership) },
 	}
+	c.Flags().BoolVar(&bpMembership, "blueprint-membership", false,
+		"also write apps/packages/devices/users/groups membership into blueprint manifests (all six collections become managed)")
+	return c
 }
 
 func newValidateCmd() *cobra.Command {
@@ -102,7 +110,11 @@ func newSyncCmd() *cobra.Command {
 		Use:   "sync",
 		Short: "Reconcile configs + blueprint membership: dry-run plan by default, gated --apply to execute",
 		Long: "sync reconciles the git desired state with the live tenant: CUSTOM_SETTING configs\n" +
-			"(3-way, newest-wins) and each blueprint's config membership (git-authoritative).\n" +
+			"(3-way, newest-wins) and each blueprint's member collections (git-authoritative).\n" +
+			"Configurations are always managed; apps/packages/devices/users/groups are managed\n" +
+			"only when the manifest carries that key (seed --blueprint-membership writes all six;\n" +
+			"an absent key is never touched). A blueprint that exists only in git is created;\n" +
+			"an ABM-only blueprint is reported for adoption, never deleted.\n" +
 			"Read-only by default: it prints the plan and exits. Pass --apply to execute it —\n" +
 			"every overwrite/delete archives the live version first, and you are asked to confirm\n" +
 			"unless --yes (or $ABCTL_APPROVE) is set. --prune (off by default) allows deleting live\n" +
@@ -200,6 +212,8 @@ func runSync(fl syncFlags) error {
 
 	// Phase 2: blueprint membership. Recompute with config IDs from the post-apply
 	// baseline so a config just created in phase 1 resolves and can be attached.
+	// The other member collections' maps are reused from the plan — the config
+	// phase never creates apps/packages/devices/users/groups.
 	cfgIDByName := make(map[string]string, len(pc.base.Configs))
 	cfgNameByID := make(map[string]string, len(pc.base.Configs))
 	for name, e := range pc.base.Configs {
@@ -208,6 +222,8 @@ func runSync(fl syncFlags) error {
 			cfgNameByID[e.ABMID] = name
 		}
 	}
+	nameByID := withCollection(pc.memberNameByID, ab.CollectionConfigurations, cfgNameByID)
+	idByName := withCollection(pc.memberIDByName, ab.CollectionConfigurations, cfgIDByName)
 	liveBPs := pc.liveBPs
 	switch fl.verify {
 	case verifyFull:
@@ -224,21 +240,21 @@ func runSync(fl syncFlags) error {
 				cfgNameByID[l.ID] = l.Name
 			}
 		}
-		liveBPs, err = fetchLiveBlueprintsForPlan(pc.c, cfgNameByID)
+		liveBPs, err = fetchLiveBlueprintsForPlan(pc.c, pc.bpCollections, nameByID)
 		if err != nil {
 			return err
 		}
 	case verifyTargeted:
 		fmt.Fprintln(os.Stderr, "post-apply verification: refreshing blueprint membership only...")
 		var err error
-		liveBPs, err = fetchLiveBlueprintsForPlan(pc.c, cfgNameByID)
+		liveBPs, err = fetchLiveBlueprintsForPlan(pc.c, pc.bpCollections, nameByID)
 		if err != nil {
 			return err
 		}
 	case verifyNone:
 		fmt.Fprintln(os.Stderr, "post-apply verification: skipped by --verify=none.")
 	}
-	bpPlan := reconcile.ComputeBlueprints(pc.bpDesired, liveBPs, cfgIDByName)
+	bpPlan := reconcile.ComputeBlueprints(pc.bpDesired, liveBPs, idByName)
 	bpRes := eng.ApplyBlueprints(bpPlan, opts, res.Writes)
 
 	if machine {
@@ -264,7 +280,7 @@ func printBlueprintResult(res *reconcile.BlueprintResult) {
 		rows = append(rows, []string{o.Status, string(o.Action), o.Blueprint, o.Config, o.Detail})
 	}
 	fmt.Println()
-	printTable([]string{"STATUS", "BP-ACTION", "BLUEPRINT", "CONFIG", "DETAIL"}, rows)
+	printTable([]string{"STATUS", "BP-ACTION", "BLUEPRINT", "MEMBER", "DETAIL"}, rows)
 	fmt.Fprintf(os.Stderr, "blueprints: %d write(s), %d skipped, %d error(s)\n", res.Writes, res.Skipped, res.Errors)
 }
 
@@ -379,7 +395,7 @@ func newAPICmd() *cobra.Command {
 	return c
 }
 
-func runSeed() error {
+func runSeed(withMembership bool) error {
 	c, cfg, err := mustClient()
 	if err != nil {
 		return err
@@ -403,41 +419,72 @@ func runSeed() error {
 		return err
 	}
 	fmt.Fprintln(os.Stderr, "fetching blueprints…")
-	bps, err := c.ListBlueprints()
+	collections := []string{ab.CollectionConfigurations}
+	nameByID := map[string]map[string]string{ab.CollectionConfigurations: idToName}
+	if withMembership {
+		collections = ab.BlueprintCollections
+		fmt.Fprintln(os.Stderr, "resolving blueprint member names (apps/packages/devices/users/groups)…")
+		maps, _, err := c.FetchBlueprintMemberMaps(ab.BlueprintCollections[1:], nil)
+		if err != nil {
+			return fmt.Errorf("seed: resolving blueprint member names: %w", err)
+		}
+		for col, m := range maps {
+			nameByID[col] = m
+		}
+	}
+	// A plain re-seed refreshes identity + configurations only — the five optional
+	// member keys carry the operator's declared desired state, so they are carried
+	// over from the existing manifests rather than silently dropped (unmanaged).
+	existing, err := t.LoadBlueprints()
 	if err != nil {
-		return err
+		return fmt.Errorf("seed: reading existing blueprint manifests: %w", err)
+	}
+	// Propagate a membership-fetch error rather than silently seeding an empty
+	// membership: a git-authoritative `configurations: []` written from a failed
+	// fetch would make a later `sync --apply --prune` detach every real member.
+	bps, err := c.FetchBlueprints(collections, nameByID, nil)
+	if err != nil {
+		return fmt.Errorf("seed: fetching blueprint membership: %w", err)
 	}
 	for _, bp := range bps {
-		// Propagate a relationship-fetch error rather than silently seeding an empty
-		// membership: a git-authoritative `configurations: []` written from a failed
-		// fetch would make a later `sync --apply --prune` detach every real config.
-		links, err := c.BlueprintRelationship(bp.ID, "configurations")
-		if err != nil {
-			return fmt.Errorf("seed: fetching blueprint %q membership: %w", bp.AttrStr("name"), err)
-		}
-		names := make([]string, 0, len(links))
-		for _, ln := range links {
-			if n, ok := idToName[ln.ID]; ok {
-				names = append(names, n)
-			} else {
-				names = append(names, ln.ID)
-			}
-		}
-		sort.Strings(names)
-		if err := t.WriteBlueprintSpec(gitops.BlueprintSpec{
-			Name:           bp.AttrStr("name"),
+		spec := gitops.BlueprintSpec{
+			Name:           bp.Name,
 			ID:             bp.ID,
-			Description:    bp.AttrStr("description"),
-			Configurations: names,
-		}); err != nil {
+			Description:    bp.Description,
+			Configurations: bp.Configs,
+		}
+		if withMembership { // write all five optional keys — present (even empty) = managed
+			spec.Apps = managedList(bp.Apps)
+			spec.Packages = managedList(bp.Packages)
+			spec.Devices = managedList(bp.Devices)
+			spec.Users = managedList(bp.Users)
+			spec.Groups = managedList(bp.Groups)
+		} else if prev, ok := existing[bp.Name]; ok { // preserve managed keys as-is
+			spec.Apps, spec.Packages, spec.Devices, spec.Users, spec.Groups =
+				prev.Apps, prev.Packages, prev.Devices, prev.Users, prev.Groups
+		}
+		if err := t.WriteBlueprintSpec(spec); err != nil {
 			return err
 		}
 	}
 	fmt.Printf("seeded %d configuration(s) → %s\n", len(live), rel(t.LibDir))
 	fmt.Printf("baseline           → %s\n", rel(t.StateFile))
 	fmt.Printf("%d blueprint(s)     → %s\n", len(bps), rel(t.BlueprintsDir))
+	if withMembership {
+		fmt.Fprintln(os.Stderr, "blueprint manifests now MANAGE all six member collections (delete a key to unmanage it).")
+	}
 	fmt.Fprintln(os.Stderr, "review the tree, then `git add gitops/` to commit the desired state + baseline.")
 	return nil
+}
+
+// managedList pins a live member list into a manifest key: the returned pointer
+// is always non-nil, so the key is written even when empty (`key: []`) — which
+// is exactly what makes the collection MANAGED for future syncs.
+func managedList(names []string) *[]string {
+	if names == nil {
+		names = []string{}
+	}
+	return &names
 }
 
 func runValidate() error {
@@ -608,10 +655,16 @@ type planCtx struct {
 	live    []ab.LiveConfig
 	plan    *reconcile.Plan
 	// blueprints
-	bpDesired   map[string]gitops.BlueprintSpec
-	liveBPs     []ab.LiveBlueprint
-	cfgIDByName map[string]string // config name → ABM id (from live, pre-apply)
-	bpPlan      *reconcile.BlueprintPlan
+	bpDesired     map[string]gitops.BlueprintSpec
+	liveBPs       []ab.LiveBlueprint
+	cfgIDByName   map[string]string // config name → ABM id (from live, pre-apply)
+	bpCollections []string          // member collections the plan fetches: configurations + every collection some manifest manages
+	// memberNameByID / memberIDByName resolve member id ↔ display name per
+	// collection. The configurations entry is ownership-scoped (baseline); the
+	// other collections are full-tenant maps, fetched lazily (see bpCollections).
+	memberNameByID map[string]map[string]string
+	memberIDByName map[string]map[string]string
+	bpPlan         *reconcile.BlueprintPlan
 }
 
 // loadPlan reads git desired + baseline + live for both configs and blueprints and
@@ -671,7 +724,29 @@ func loadPlan(gitSourceOfTruth bool, refresh string) (*planCtx, error) {
 		return nil, err
 	}
 	fmt.Fprintf(os.Stderr, "building plan: loaded %d desired blueprint manifest(s).\n", len(bpDesired))
-	liveBPs, err := fetchLiveBlueprintsForPlan(c, cfgNameByID)
+	// Resolve member id↔name maps LAZILY: only for the collections some manifest
+	// actually manages (an unmanaged collection costs no tenant list call).
+	bpCollections := managedBlueprintCollections(bpDesired)
+	memberNameByID := map[string]map[string]string{ab.CollectionConfigurations: cfgNameByID}
+	if len(bpCollections) > 1 {
+		fmt.Fprintf(os.Stderr, "building plan: resolving blueprint member names for managed collection(s): %s...\n",
+			strings.Join(bpCollections[1:], ", "))
+		maps, aliases, err := c.FetchBlueprintMemberMaps(bpCollections[1:], func(line string) {
+			fmt.Fprintln(os.Stderr, "building plan: "+line)
+		})
+		if err != nil {
+			return nil, err
+		}
+		for col, m := range maps {
+			memberNameByID[col] = m
+		}
+		// Manifest entries may use an alias (user's managed Apple Account, serial
+		// case) — rewrite them to the canonical live names before diffing.
+		canonicalizeBlueprintMembers(bpDesired, aliases)
+	}
+	memberIDByName := invertMemberMaps(memberNameByID)
+	memberIDByName[ab.CollectionConfigurations] = cfgIDByName // ownership-scoped, not inverted from live
+	liveBPs, err := fetchLiveBlueprintsForPlan(c, bpCollections, memberNameByID)
 	if err != nil {
 		return nil, err
 	}
@@ -685,48 +760,111 @@ func loadPlan(gitSourceOfTruth bool, refresh string) (*planCtx, error) {
 	}
 	fmt.Fprintf(os.Stderr, "building plan: computed %d configuration change(s).\n", len(cfgPlan.Items))
 	fmt.Fprintln(os.Stderr, "building plan: computing blueprint membership drift...")
-	bpPlan := reconcile.ComputeBlueprints(bpDesired, liveBPs, cfgIDByName)
+	bpPlan := reconcile.ComputeBlueprints(bpDesired, liveBPs, memberIDByName)
 	fmt.Fprintf(os.Stderr, "building plan: computed %d blueprint membership change(s).\n", len(bpPlan.Items))
 	return &planCtx{
 		c: c, cfg: cfg, tree: t, desired: desired, base: base, live: live,
-		plan:        cfgPlan,
-		bpDesired:   bpDesired,
-		liveBPs:     liveBPs,
-		cfgIDByName: cfgIDByName,
-		bpPlan:      bpPlan,
+		plan:           cfgPlan,
+		bpDesired:      bpDesired,
+		liveBPs:        liveBPs,
+		cfgIDByName:    cfgIDByName,
+		bpCollections:  bpCollections,
+		memberNameByID: memberNameByID,
+		memberIDByName: memberIDByName,
+		bpPlan:         bpPlan,
 	}, nil
 }
 
-func fetchLiveBlueprintsForPlan(c *ab.Client, configNameByID map[string]string) ([]ab.LiveBlueprint, error) {
-	fmt.Fprintln(os.Stderr, "building plan: fetching live blueprints from Apple...")
-	bps, err := c.ListBlueprints()
-	if err != nil {
-		return nil, err
-	}
-	fmt.Fprintf(os.Stderr, "building plan: fetched %d live blueprint(s).\n", len(bps))
-	out := make([]ab.LiveBlueprint, 0, len(bps))
-	for i, bp := range bps {
-		name := bp.AttrStr("name")
-		if name == "" {
-			name = bp.ID
+// managedBlueprintCollections returns the member collections the plan must
+// fetch: configurations always (Phase-1 semantics), plus every optional
+// collection at least one manifest manages — in ab.BlueprintCollections order,
+// so the fetch plan is deterministic.
+func managedBlueprintCollections(specs map[string]gitops.BlueprintSpec) []string {
+	out := []string{ab.CollectionConfigurations}
+	for _, col := range ab.BlueprintCollections {
+		if col == ab.CollectionConfigurations {
+			continue
 		}
-		fmt.Fprintf(os.Stderr, "building plan: fetching blueprint membership %d/%d: %s\n", i+1, len(bps), name)
-		links, err := c.BlueprintRelationship(bp.ID, "configurations")
-		if err != nil {
-			return nil, err
-		}
-		names := make([]string, 0, len(links))
-		for _, l := range links {
-			if n, ok := configNameByID[l.ID]; ok {
-				names = append(names, n)
-			} else {
-				names = append(names, l.ID)
+		for _, s := range specs {
+			if _, managed := s.Members(col); managed {
+				out = append(out, col)
+				break
 			}
 		}
-		sort.Strings(names)
-		out = append(out, ab.LiveBlueprint{Name: bp.AttrStr("name"), ID: bp.ID, Configs: names})
 	}
-	return out, nil
+	return out
+}
+
+// invertMemberMaps flips id→name maps into name→id maps, per collection. Names
+// are canonical and non-empty by construction (see ab.FetchBlueprintMemberMaps),
+// so a git manifest addresses members by exactly the names live membership
+// resolves to — but they are NOT necessarily unique: two tenant resources can
+// share a display name (e.g. the iOS and macOS builds of one app). Resolving a
+// shared name would pick an id nondeterministically, so it is kept with an
+// EMPTY id instead: the plan then blocks its attach and never plans its detach
+// (see reconcile.diffMembership), mirroring the imperative resolvers' ambiguity
+// errors rather than writing against an arbitrary duplicate.
+func invertMemberMaps(nameByID map[string]map[string]string) map[string]map[string]string {
+	out := make(map[string]map[string]string, len(nameByID))
+	for col, m := range nameByID {
+		inv := make(map[string]string, len(m))
+		for id, name := range m {
+			if _, dup := inv[name]; dup {
+				inv[name] = "" // ambiguous — blocked, never resolved to one id
+				continue
+			}
+			inv[name] = id
+		}
+		out[col] = inv
+	}
+	return out
+}
+
+// canonicalizeBlueprintMembers rewrites manifest member entries to the
+// canonical display name live membership resolves to, using the alias maps
+// from ab.FetchBlueprintMemberMaps (users: a managed-Apple-Account alias or
+// address case variant → the canonical email; devices: serial case). Without
+// this, a manifest addressing a member by an alias the imperative resolvers
+// accept would never match the canonical live name byte-for-byte — sync would
+// plan a blocked attach for the alias AND a --prune detach of the very member
+// the manifest declares. An alias that is ambiguous (maps to "") or unknown is
+// left untouched.
+func canonicalizeBlueprintMembers(specs map[string]gitops.BlueprintSpec, canonicalByAlias map[string]map[string]string) {
+	for _, spec := range specs {
+		for col, byAlias := range canonicalByAlias {
+			if len(byAlias) == 0 {
+				continue
+			}
+			names, managed := spec.Members(col)
+			if !managed {
+				continue
+			}
+			for i, n := range names {
+				if canon := byAlias[strings.ToLower(n)]; canon != "" && canon != n {
+					names[i] = canon
+				}
+			}
+		}
+	}
+}
+
+// withCollection returns a shallow copy of the per-collection maps with one
+// collection's map replaced (the replacement is stored by reference, so later
+// mutations of it — e.g. the verify=full config-map refresh — are visible).
+func withCollection(maps map[string]map[string]string, col string, m map[string]string) map[string]map[string]string {
+	out := make(map[string]map[string]string, len(maps)+1)
+	for k, v := range maps {
+		out[k] = v
+	}
+	out[col] = m
+	return out
+}
+
+func fetchLiveBlueprintsForPlan(c *ab.Client, collections []string, nameByID map[string]map[string]string) ([]ab.LiveBlueprint, error) {
+	fmt.Fprintln(os.Stderr, "building plan: fetching live blueprints from Apple...")
+	return c.FetchBlueprints(collections, nameByID, func(line string) {
+		fmt.Fprintln(os.Stderr, "building plan: "+line)
+	})
 }
 
 // hasChanges reports whether sync has anything to *act on* — config changes or
@@ -763,7 +901,7 @@ func printFullPlan(pc *planCtx, format string) error {
 		for _, it := range pc.bpPlan.Items {
 			rows = append(rows, []string{string(it.Action), it.Blueprint, it.Config, it.Detail})
 		}
-		printTable([]string{"BP-ACTION", "BLUEPRINT", "CONFIG", "DETAIL"}, rows)
+		printTable([]string{"BP-ACTION", "BLUEPRINT", "MEMBER", "DETAIL"}, rows)
 	}
 	fmt.Fprintf(os.Stderr, "%d config change(s), %d blueprint change(s)\n", len(pc.plan.Items), len(pc.bpPlan.Items))
 	return nil
