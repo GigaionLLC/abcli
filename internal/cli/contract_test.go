@@ -197,6 +197,7 @@ func TestVersionInfoCapabilities(t *testing.T) {
 	need := map[string]bool{
 		"auth-whoami-json": true, "write-json": true, "context-json": true, "plan-json": true,
 		"list-empty-array": true, "version-json": true, "blueprint-counts-json": true,
+		"os-releases-json": true, "activity-result-log": true,
 	}
 	for _, c := range vi.Capabilities {
 		delete(need, c)

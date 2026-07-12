@@ -198,6 +198,7 @@ struct DeviceDetailSheet: View {
     @State private var report: DeviceStatusReport?
     @State private var reportBusy = false
     @State private var reportError: String?
+    @State private var releasesBusy = false
 
     /// The freshest copy of the device (the row resource until `get device` returns).
     private var device: Resource { detail?.device ?? resource }
@@ -306,6 +307,7 @@ struct DeviceDetailSheet: View {
                     }
                 }
                 mdmPosture(report)
+                releaseComparison(report)
             } else {
                 HStack(spacing: 8) {
                     Button("Check blueprints & posture") {
@@ -323,6 +325,40 @@ struct DeviceDetailSheet: View {
                 Text("Runs `status device` — one relationship call per blueprint, so it can take a while on large tenants.")
                     .font(.caption).foregroundStyle(.secondary)
                 if let reportError { ErrorText(reportError) }
+            }
+        }
+    }
+
+    @ViewBuilder private func releaseComparison(_ report: DeviceStatusReport) -> some View {
+        if let details = report.mdm?.details {
+            let platform = details.attr("platform") ?? ""
+            let installed = details.attr("osVersion") ?? ""
+            let product = device.attr("productType") ?? ""
+            let matches = model.osReleases.filter { release in
+                release.platform.caseInsensitiveCompare(platform) == .orderedSame
+                    && (product.isEmpty || (release.supportedDevices ?? []).contains(product))
+            }
+            let managed = matches.first { $0.catalog == "managed" }
+            let publicRelease = matches.first { $0.catalog == "public" }
+            DetailSection(title: "Software release comparison") {
+                Text("Catalog comparison only — not proof that this device is eligible, scheduled, or updated.")
+                    .font(.caption).foregroundStyle(.secondary)
+                if model.osReleases.isEmpty {
+                    HStack {
+                        Button("Load Apple release catalog") {
+                            releasesBusy = true
+                            Task { await model.loadOSReleases(); releasesBusy = false }
+                        }.disabled(releasesBusy)
+                        if releasesBusy { ProgressView().controlSize(.small) }
+                    }
+                } else {
+                    DetailGrid(fields: [
+                        DetailField("Reported version", installed),
+                        DetailField("Newest managed", managed.map { "\($0.productVersion) (\($0.build))" } ?? "No matching catalog entry"),
+                        DetailField("Newest public", publicRelease.map { "\($0.productVersion) (\($0.build))" } ?? "No matching catalog entry"),
+                        DetailField("Product match", product),
+                    ])
+                }
             }
         }
     }

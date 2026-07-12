@@ -50,6 +50,28 @@ func TestGetterPaths(t *testing.T) {
 	}
 }
 
+func TestOrgDeviceActivityDocumentedStatuses(t *testing.T) {
+	statuses := []string{"COMPLETED", "IN_PROGRESS", "STOPPED", "FAILED"}
+	substatuses := []string{"SUBMITTED", "PRE_PROCESSING", "PENDING", "PROCESSING", "POST_PROCESSING", "STOPPING", "COMPLETED_WITH_SUCCESS", "COMPLETED_WITH_ERROR", "COMPLETED_WITH_FAILURE", "COMPLETED_POST_PROCESSING_FAILED"}
+	for _, status := range statuses {
+		for _, substatus := range substatuses {
+			t.Run(status+"/"+substatus, func(t *testing.T) {
+				srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+					fmt.Fprintf(w, `{"data":{"type":"orgDeviceActivities","id":"a","attributes":{"status":%q,"subStatus":%q,"createdDateTime":"2026-01-01T00:00:00Z","completedDateTime":"2026-01-01T00:01:00Z","downloadUrl":"https://example.invalid/result.csv"}}}`, status, substatus)
+				}))
+				defer srv.Close()
+				got, err := testClient(srv.URL).GetOrgDeviceActivity("a")
+				if err != nil {
+					t.Fatal(err)
+				}
+				if got.AttrStr("status") != status || got.AttrStr("subStatus") != substatus || got.AttrStr("downloadUrl") == "" {
+					t.Fatalf("activity = %+v", got.Attr())
+				}
+			})
+		}
+	}
+}
+
 // TestDeviceAssignedServer covers the three outcomes: assigned (resource),
 // unassigned (Apple 404 → nil, nil — NOT an error), and a real error (403).
 func TestDeviceAssignedServer(t *testing.T) {

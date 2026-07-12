@@ -549,17 +549,19 @@ func waitActivity(c *ab.Client, id string) (*ab.Resource, error) {
 
 func newStatusActivityCmd() *cobra.Command {
 	var asJSON bool
+	var download string
 	c := &cobra.Command{
 		Use:   "activity <id>",
 		Short: "Status of a device assign/unassign activity (orgDeviceActivities)",
 		Args:  cobra.ExactArgs(1),
-		RunE:  func(_ *cobra.Command, a []string) error { return runStatusActivity(a[0], asJSON) },
+		RunE:  func(_ *cobra.Command, a []string) error { return runStatusActivity(a[0], asJSON, download) },
 	}
 	c.Flags().BoolVar(&asJSON, "json", false, "JSON output")
+	c.Flags().StringVar(&download, "download", "", "download the completed result CSV to this new file")
 	return c
 }
 
-func runStatusActivity(id string, asJSON bool) error {
+func runStatusActivity(id string, asJSON bool, download string) error {
 	c, _, err := mustClient()
 	if err != nil {
 		return err
@@ -567,6 +569,15 @@ func runStatusActivity(id string, asJSON bool) error {
 	act, err := c.GetOrgDeviceActivity(id)
 	if err != nil {
 		return err
+	}
+	if download != "" {
+		u := act.AttrStr("downloadUrl")
+		if u == "" {
+			return fmt.Errorf("activity %s has no result log yet (status %s)", id, act.AttrStr("status"))
+		}
+		if err := downloadActivityLog(u, download); err != nil {
+			return err
+		}
 	}
 	if asJSON || flagOutput != "table" {
 		return render(outFmt(asJSON), act, nil, nil)
@@ -576,6 +587,8 @@ func runStatusActivity(id string, asJSON bool) error {
 		{"status", act.AttrStr("status")},
 		{"substatus", act.AttrStr("subStatus")},
 		{"created", act.AttrStr("createdDateTime")},
+		{"completed", act.AttrStr("completedDateTime")},
+		{"result log", act.AttrStr("downloadUrl")},
 	})
 	return nil
 }

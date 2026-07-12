@@ -1,13 +1,16 @@
 # VPP / Apps & Books — design + verified API reference
 
-> **⚠️ DISABLED (kept, not removed).** This content-token path only applies to orgs on a
-> **third-party MDM**. Under **Apple Business Essentials** (Apple's built-in MDM — what
-> Gigaion, LLC uses), Apple does **not** expose a VPP content token, so this path can't be used
-> or tested here. It is therefore **disabled by default**: `abctl vpp` is hidden and errors
-> unless `ABCTL_ENABLE_VPP=1`, and the abgui "Apps & Books (VPP)" screen is removed from the
-> sidebar. All the code is kept so it can be re-enabled if a testable token ever exists.
+> **⚠️ EXTERNAL-MDM API — NOT A PRODUCT FEATURE.** Apple Business can provide a location content
+> token, but Apple documents that token as the connection to an **external device-management
+> service**. Apple also warns that an external service must release the primary organization's
+> token before the organization uses built-in device management, or license inventory and app
+> assignments can become inconsistent. It is therefore **disabled by default**: `abctl vpp` is
+> hidden and errors unless the existing developer-only `ABCTL_ENABLE_VPP=1` escape hatch is set,
+> and abgui has no VPP screen or enable toggle. Do not offer that escape hatch as an end-user GUI
+> setting. The implementation is retained as quarantined reference code, not as roadmap scope.
 > **For built-in MDM, manage Apps & Books via blueprints** — see [design-abctl.md](design-abctl.md)
 > and `abctl get blueprint <id>` (apps + `appLicenseDeficient`) / `abctl attach app … --blueprint …`.
+> Source: [Apple's content-token guidance](https://support.apple.com/guide/business/manage-content-tokens-axme0f8659ec/web).
 
 `abctl` speaks two Apple services. The **Apple Business API** (`api-business.apple.com/v1`,
 ES256 client-assertion) drives built-in-MDM Configurations + Blueprints. **Apps & Books
@@ -15,8 +18,8 @@ license management** — how many app/book licenses the org owns, and who they'r
 — lives in a *separate* service with a *different* credential: the **App and Book
 Management API** (`vpp.itunes.apple.com/mdm/v2`), authenticated with a **content token
 (sToken)** downloaded from Apple Business Manager → **Apps and Books → download content
-token**. This document is the verified API reference + the plan to add it to abctl (and,
-on top of that, abgui).
+token**. This document preserves the verified API reference and explains why it is outside the
+Apple-Business-built-in-MDM product boundary.
 
 > **AI-authored** under Gigaion, LLC's direction, like the rest of this repo. The v2 API
 > facts below are transcribed from Apple's current developer documentation (DocC).
@@ -101,16 +104,16 @@ A new `internal/vpp` client (standalone — different host + auth from `internal
 
 Token resolution: `--vpp-token` › `$AB_VPP_TOKEN` › `$AB_VPP_TOKEN_FILE`. Base override:
 `$AB_VPP_BASE`. `vpp config` is the connection test (like `auth whoami` for the Business
-API). Capability token `vpp-json` is added to `version --json` so a GUI can gate on it.
+API). No `vpp-json` capability is advertised in `version --json` while the path is
+quarantined, so no GUI should gate a screen on one.
 
-## 4. abgui (on top of abctl — same as every other screen)
+## 4. abgui decision
 
-abgui shells out to `abctl vpp … -o json` and renders — no new API code in Swift. A new
-**Read-only** sidebar group section or entries: **Apps & Books (VPP)** → assets table
-(adamId, type, pricing, available/assigned/total, device-assignable), **VPP Assignments**,
-**VPP Users**, plus a VPP connection indicator (from `vpp config`). All read-only, badged
-like the other read-only screens. The content token is configured out-of-band (env/flag);
-abgui never handles the token bytes.
+Do not add a VPP screen, connection indicator, token field, feature flag, or “advanced” toggle. Even a
+read-only inventory request makes `abgui` look like an external MDM integration and encourages operators to
+attach the primary organization's content token contrary to the built-in-management workflow. The useful
+built-in experience is the Apple Business API app catalog, Blueprint app membership, and
+`appLicenseDeficient` state already exposed through `abctl`/`abgui`.
 
 ## 5. Writes — built (gated), live-test pending a token
 
@@ -132,4 +135,5 @@ Gating mirrors config/blueprint writes: confirm unless `--yes`/`$ABCTL_APPROVE`.
 genuine tenant mutations (they consume/reassign licenses), so **live verification is
 deferred until a fresh content token exists** — they can't be safely exercised against real
 licenses before then. The `/status` response shape is modeled and will be confirmed live.
-abgui write UI (a confirm dialog over these) lands once reads are live-verified.
+No abgui write UI is planned. The CLI commands remain hidden developer/reference functionality and must not
+be used against the primary organizational unit while Apple Business built-in device management owns it.

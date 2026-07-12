@@ -119,6 +119,58 @@ developer.apple.com. Research + roadmap context: the ABMate/portal/API gap analy
 - [ ] `log/slog` structured logging + `--verbose`.
 - [ ] macOS **Keychain** option for the key (not only a file path).
 
+## Apple Device Services schema gap plan
+Source inventory: `micromdm/apple-device-services` (hand-maintained JSON Schemas for ABM, Apps and Books,
+legacy Device Assignment/DEP, and GDMF). Treat these schemas as test fixtures pinned to an upstream commit,
+not as authoritative runtime API discovery; Apple documentation and live contract tests remain the source of
+truth.
+
+### A — finish the already-integrated ABM activity surface
+- [x] Extend `status activity` table output with `completedDateTime` and the completed activity `downloadUrl`;
+  preserve the full resource in JSON/YAML output.
+- [x] Add response fixtures for every documented activity status/substatus.
+- [x] Add an explicit, read-only `activity log <id>` (or `status activity <id> --download`) design: default to
+  printing metadata/URL, require an explicit output path before downloading the presigned CSV, never execute
+  links, and neutralize spreadsheet formulas when rendering it.
+- [ ] Vendor the small ABM schema subset used by `orgDevices`, `mdmServers`, and `orgDeviceActivities` under
+  testdata and validate request/response fixtures in CI. Pin source commit and retain MIT attribution.
+- [ ] Live-verify assign and unassign with a throwaway device, including a partial/error result and the CSV log,
+  before declaring the surface complete.
+
+### Explicit non-goal — Apps and Books content-token/VPP client
+- Do not enable the hidden VPP commands as a supported feature and do not add a GUI toggle. A content token
+  connects an external MDM to an organizational unit; Apple warns that using an external token for the primary
+  organization alongside built-in management can cause license inventory and app-assignment failures.
+- Keep the existing implementation quarantined as developer/reference code for now. Manage apps through the
+  modern Apple Business API catalog and Blueprint app relationships. Revisit removal of the hidden code before
+  1.0; revisit product support only if the goal explicitly expands to external-MDM organizational units.
+
+### C — add Apple software-release intelligence (GDMF)
+- [x] Add a standalone read-only `internal/gdmf` client for `https://gdmf.apple.com/v2/pmv`, with timeout,
+  conditional-cache support, bounded response size, schema-shaped types, and test base-URL override.
+- [x] Add `abctl get os-releases` with platform, version/build, device-model, managed/public, RSR, and
+  non-expired filters; support table/JSON/YAML/CSV consistently.
+- [x] Enrich `get mdmdevice` / `status device` with an opt-in release comparison. Label it as catalog comparison,
+  not proof that a particular update is eligible or installed.
+- [x] Add stale/malformed catalog handling and fixtures for macOS, iOS, visionOS, RSRs, missing expiration dates,
+  and unknown future platforms. GDMF failure must not break ordinary device inspection.
+- [x] Add an abgui read-only OS Releases view only after the CLI JSON contract is stable.
+- [x] Add abgui device-posture catalog comparison, assignment-result links, System Health, and What's New views.
+
+### Explicit non-goal — legacy Device Assignment (DEP) provider
+- Do not implement the Device Assignment/DEP service in `abctl`. Apple still documents Automated Device
+  Enrollment, but this protocol is the server side used by third-party MDM products: it requires separate
+  credentials/protocol headers and enrollment-profile hosting, device command, and lifecycle responsibilities.
+  It does not extend Apple Business built-in MDM.
+- `abctl` already uses the appropriate Apple Business API surfaces for organization devices, device-management
+  service assignment, Blueprints, and built-in-MDM enrolled-device posture. Keep those as the supported path.
+- Reconsider DEP only if the product explicitly expands into building/operating a standalone MDM server; that
+  should be a separate project or provider with its own security model, not an `abctl` command namespace.
+
+### Recommended delivery order
+1. A (small, completes existing device-assignment UX).
+2. C (largest new read-only benefit with no tenant-write risk).
+
 ## Guardrails (every task)
 Read-only by default · writes gated behind `--apply` + confirm · `--prune` off by default · dry-run first ·
 never commit secrets · `make test` green.

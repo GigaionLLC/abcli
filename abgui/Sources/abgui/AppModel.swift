@@ -41,6 +41,19 @@ final class AppModel {
     var mdmServers: [Resource] = []
     var auditEvents: [Resource] = []
     var auditSince = "7d"
+    var osReleases: [OSRelease] = []
+
+    func loadOSReleases() async {
+        guard let client = makeClient() else {
+            loadError = "abctl was not found in the app bundle."
+            return
+        }
+        isLoading = true
+        loadError = nil
+        defer { isLoading = false }
+        do { osReleases = try await client.osReleases() }
+        catch { loadError = error.localizedDescription }
+    }
 
     // Apps & Books (VPP) — a separate service; the content token is held in-memory only.
     var vppToken = ""

@@ -7,6 +7,31 @@ desired state in sync with a live Apple Business tenant — read-only by default
 For current build status see [HANDOFF.md](../HANDOFF.md); for the roadmap see [TODO.md](../TODO.md);
 for the verified API reference see [auth.md](auth.md) and [endpoints/](endpoints/).
 
+### Product boundary: Apple Business itself, not an external MDM
+
+`abctl` automates the modern Apple Business and Apple School/Business Manager APIs and the built-in
+Apple Business device-management service. “Support all APIs” always means all applicable, supported APIs
+inside that boundary; it does not mean implementing every protocol Apple publishes for MDM vendors.
+
+- Use the Apple Business API for organization devices, device-management services, Blueprints,
+  configurations, apps, packages, users/groups, audit events, and built-in-MDM enrolled-device posture.
+- Use modern adjacent Apple services only when they complement Apple Business without taking ownership away
+  from its built-in device-management service (for example, the read-only GDMF software-release catalog).
+- Do **not** implement the legacy Device Assignment/DEP server protocol. Automated Device Enrollment remains
+  a current Apple feature; “legacy” describes the DEP name/API lineage, not a feature Apple is about to remove.
+  That protocol exists so a third-party MDM server can fetch assigned devices and host/assign enrollment
+  profiles. Implementing it would turn `abctl` into an MDM server, with different credentials, device command
+  channels, enrollment hosting, and security/lifecycle duties. The modern Apple Business API surfaces already
+  cover the assignment and built-in-MDM workflows this project needs.
+- Do **not** use an Apps and Books content token for the primary organizational unit managed by Apple Business
+  built-in device management. Apple documents content tokens as the link to an external MDM and warns that a
+  token left with an external service while enabling built-in management can cause license inventory and app
+  assignment failures ([Apple: Manage content tokens in Apple Business](https://support.apple.com/guide/business/manage-content-tokens-axme0f8659ec/web)).
+  Manage apps through Apple Business API app resources and Blueprint relationships.
+
+These are durable exclusions. A future request to “integrate every Apple API” must preserve them unless the
+product goal explicitly changes to building a standalone third-party MDM, which should be a separate project.
+
 > **Ground truth (verified live 2026-07-04).** Auth = OAuth2 client-assertion, **ES256, `kid` omitted**
 > (Client ID + signature suffice); `aud = …/oauth2/v2/token`; bearer TTL 60 min. `/v1/configurations`
 > is full CRUD, but **only `CUSTOM_SETTING` (raw `.mobileconfig`) is API-writable**;

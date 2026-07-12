@@ -21,6 +21,12 @@ this `AGENT.md` plus `docs/`.
 - **The Apple Business API rate-limits hard.** The client backs off (Retry-After aware); do NOT hammer it
   in tight loops. Prefer one `fields[]` list call over N per-item GETs.
 - The private key is **download-once** from Apple; treat it accordingly.
+- **Product boundary:** automate modern Apple Business/School Manager APIs and Apple Business built-in MDM,
+  not third-party MDM services. A request to implement “all Apple APIs” does **not** authorize legacy Device
+  Assignment/DEP server support or the Apps and Books content-token/VPP client. DEP/ADE server APIs make the
+  product an MDM server; content tokens connect an external MDM and can conflict with built-in-management app
+  inventory. Keep DEP out of scope and keep the existing VPP code hidden with no GUI enable flag unless a human
+  explicitly changes the product goal to external MDM support. See `docs/design-abctl.md`.
 
 ## Build / test
 ```sh

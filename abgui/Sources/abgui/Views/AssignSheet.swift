@@ -134,6 +134,10 @@ struct AssignSheet: View {
                     Text(activityLine(activity))
                         .font(.callout).foregroundStyle(.secondary)
                         .textSelection(.enabled)
+                    if let raw = activity.attr("downloadUrl"), let url = URL(string: raw) {
+                        Link("Download Apple result CSV", destination: url)
+                            .font(.callout)
+                    }
                 }
                 if let statusError {
                     Text(statusError).foregroundStyle(.red).font(.caption)
@@ -148,6 +152,7 @@ struct AssignSheet: View {
         var line = "Status: " + (activity.attr("status") ?? "unknown")
         if let sub = activity.attr("subStatus"), !sub.isEmpty { line += " (\(sub))" }
         if let created = activity.attr("createdDateTime"), !created.isEmpty { line += " — created \(created)" }
+        if let completed = activity.attr("completedDateTime"), !completed.isEmpty { line += " — completed \(completed)" }
         return line
     }
 

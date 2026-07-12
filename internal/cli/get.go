@@ -49,13 +49,16 @@ func newGetCmd() *cobra.Command {
 	dev.Flags().BoolVar(&dJSON, "json", false, "JSON output")
 
 	var aJSON bool
-	var since string
+	var since, auditType, auditActor string
 	aud := &cobra.Command{Use: "audit", Short: "List audit events", Args: cobra.NoArgs,
-		RunE: func(*cobra.Command, []string) error { return getAudit(since, aJSON) }}
+		RunE: func(*cobra.Command, []string) error { return getAudit(since, auditType, auditActor, aJSON) }}
 	aud.Flags().BoolVar(&aJSON, "json", false, "JSON output")
 	aud.Flags().StringVar(&since, "since", "24h", "look-back window (e.g. 24h, 7d, 90d)")
+	aud.Flags().StringVar(&auditType, "type", "", "event type substring (case-insensitive)")
+	aud.Flags().StringVar(&auditActor, "actor", "", "actor name/id substring (case-insensitive)")
 
 	get.AddCommand(csvCapable(configs), oneCfg, csvCapable(bps), bp, csvCapable(dev), csvCapable(aud))
+	get.AddCommand(newOSReleasesCmd())
 	get.AddCommand(inspectGetCmds()...)
 	get.AddCommand(
 		readCmd("users", "List users", (*ab.Client).ListUsers,
@@ -366,7 +369,7 @@ func getDevices(asJSON bool) error {
 	return nil
 }
 
-func getAudit(since string, asJSON bool) error {
+func getAudit(since, eventFilter, actorFilter string, asJSON bool) error {
 	c, _, err := mustClient()
 	if err != nil {
 		return err
@@ -380,6 +383,22 @@ func getAudit(since string, asJSON bool) error {
 	if err != nil {
 		return err
 	}
+	filtered := items[:0:0]
+	for _, it := range items {
+		event := it.AttrStr("eventType")
+		actor := it.AttrStr("actorName")
+		if actor == "" {
+			actor = it.AttrStr("actorId")
+		}
+		if eventFilter != "" && !strings.Contains(strings.ToLower(event), strings.ToLower(eventFilter)) {
+			continue
+		}
+		if actorFilter != "" && !strings.Contains(strings.ToLower(actor), strings.ToLower(actorFilter)) {
+			continue
+		}
+		filtered = append(filtered, it)
+	}
+	items = filtered
 	cols := []string{"TIME", "EVENT", "ACTOR"}
 	rows := make([][]string, 0, len(items))
 	for _, it := range items {

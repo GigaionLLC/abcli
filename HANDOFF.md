@@ -80,6 +80,11 @@ only the first governs this API.
 - **abgui Phase B** — Dashboard (stat tiles), Enrolled Devices screen, entity detail sheets (device/user/
   group/app/package/mdmserver/blueprint), search + sort + CSV export on every list, gated multi-select
   device Assign/Unassign sheet. Go↔Swift JSON contract reviewed (0 mismatches); macOS CI is the compile gate.
+- **Upcoming visibility update (working tree, not committed)** — read-only GDMF OS-release client +
+  `get os-releases`, opt-in `status device --releases` catalog comparison, six-hour/ETag cache, richer
+  activity completion/result-log output with guarded CSV download, audit actor/type filters, and abgui OS
+  Releases / device comparison / assignment-result / System Health / What's New surfaces. See
+  `docs/upcoming-release.md`; macOS compile/visual QA and live GDMF/device-assignment checks remain release gates.
 - **Users remain API-read-only** — no user/group write endpoints exist in v2.x (verified against the docs
   index); user lifecycle stays portal/SCIM-only and the tools say so.
 

@@ -26,7 +26,12 @@
 | Get Apps | `GET /v1/apps` (+ `/{id}`) | **View Apps.** |
 | Get Packages | `GET /v1/packages` (+ `/{id}`) | **View and manage devices using built-in device management.** |
 
-`App`: `name,bundleId,version,supportedOS,isCustomApp`. `/v1/apps` = org's licensed/Blueprint-assignable apps; for full license counts, fall back to the VPP content-token API (`vpp.itunes.apple.com/mdm/v2/assets`). **Packages is a device-mgmt privilege, not an Apps permission.** *(Open: whether `/v1/apps` is the full Apps & Books catalog or only Blueprint-linked.)*
+`App`: `name,bundleId,version,supportedOS,isCustomApp`. `/v1/apps` = the organization's
+licensed/Blueprint-assignable apps. `abctl` deliberately does not fall back to the VPP content-token API:
+that token connects an external MDM and is outside the built-in-management product boundary. Surface the
+license-deficiency information provided by Apple Business/Blueprints rather than claiming full VPP license
+counts. **Packages is a device-management privilege, not an Apps permission.** *(Open: whether `/v1/apps` is
+the full Apps & Books catalog or only Blueprint-linked.)*
 
 ## Audit Events
 `GET /v1/auditEvents` — permission **"Access audit events using the Admin API."**

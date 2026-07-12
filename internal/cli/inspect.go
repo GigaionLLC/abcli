@@ -7,10 +7,12 @@ import (
 	"strconv"
 	"strings"
 	"text/tabwriter"
+	"time"
 
 	"github.com/spf13/cobra"
 
 	"github.com/GigaionLLC/abcli/internal/ab"
+	"github.com/GigaionLLC/abcli/internal/gdmf"
 )
 
 // --- singular `get` inspection commands (Apple Business API v2 surface, Phase A) ---
@@ -490,19 +492,20 @@ func getMDMServer(nameOrID string, withDevices, asJSON bool) error {
 // --- status device (registered beside status config/audit in deploy.go) ---
 
 func newStatusDeviceCmd() *cobra.Command {
-	var asJSON, appleCare bool
+	var asJSON, appleCare, releases bool
 	c := &cobra.Command{
 		Use:   "device <serial|id>",
 		Short: "One device end-to-end: MDM server, blueprints + their configs, built-in-MDM posture",
 		Args:  cobra.ExactArgs(1),
-		RunE:  func(_ *cobra.Command, a []string) error { return runStatusDevice(a[0], appleCare, asJSON) },
+		RunE:  func(_ *cobra.Command, a []string) error { return runStatusDevice(a[0], appleCare, releases, asJSON) },
 	}
 	c.Flags().BoolVar(&asJSON, "json", false, "JSON output")
 	c.Flags().BoolVar(&appleCare, "applecare", false, "include AppleCare coverage (one extra API call)")
+	c.Flags().BoolVar(&releases, "releases", false, "compare last-reported OS with Apple's release catalog")
 	return c
 }
 
-func runStatusDevice(serialOrID string, appleCare, asJSON bool) error {
+func runStatusDevice(serialOrID string, appleCare, releases, asJSON bool) error {
 	c, _, err := mustClient()
 	if err != nil {
 		return err
@@ -591,6 +594,33 @@ func runStatusDevice(serialOrID string, appleCare, asJSON bool) error {
 			return err
 		}
 	}
+	var releaseInfo map[string]any
+	if releases && mdmDetails == nil {
+		releaseInfo = map[string]any{"error": "built-in-MDM posture is unavailable; no reported OS to compare"}
+	} else if releases {
+		cat, fetchErr := gdmf.New(os.Getenv("AB_GDMF_URL")).Fetch()
+		if fetchErr != nil {
+			releaseInfo = map[string]any{"error": fetchErr.Error()}
+		} else {
+			platform, product := mdmDetails.AttrStr("platform"), dev.AttrStr("productType")
+			latest := map[string]gdmf.Entry{}
+			for _, entry := range cat.Entries(time.Now()) {
+				if entry.Expired || !strings.EqualFold(entry.Platform, platform) || (product != "" && !containsFold(entry.SupportedDevices, product)) {
+					continue
+				}
+				old, ok := latest[entry.Catalog]
+				if !ok || entry.PostingDate > old.PostingDate {
+					latest[entry.Catalog] = entry
+				}
+			}
+			releaseInfo = map[string]any{"reportedVersion": mdmDetails.AttrStr("osVersion"), "platform": platform,
+				"productType":    product,
+				"interpretation": "catalog comparison only; not eligibility, scheduling, or installation proof"}
+			for kind, entry := range latest { // only catalogs with a real match — absent kinds stay out of JSON
+				releaseInfo[kind] = entry
+			}
+		}
+	}
 	fmt.Fprintln(os.Stderr, "NOTE: desired-state / assignment intent + last-reported MDM posture — NOT live on-device verification (the Apple Business API cannot report per-device install status).")
 	if asJSON || flagOutput != "table" {
 		var mdm map[string]any
@@ -604,6 +634,9 @@ func runStatusDevice(serialOrID string, appleCare, asJSON bool) error {
 		}
 		if appleCare {
 			data["appleCare"] = asList(coverage)
+		}
+		if releases {
+			data["releases"] = releaseInfo
 		}
 		return render(outFmt(asJSON), data, nil, nil)
 	}
@@ -649,6 +682,18 @@ func runStatusDevice(serialOrID string, appleCare, asJSON bool) error {
 	}
 	if appleCare {
 		printAppleCare(coverage)
+	}
+	if releases {
+		fmt.Println("software releases (catalog comparison only; not eligibility/install proof)")
+		if errText, _ := releaseInfo["error"].(string); errText != "" {
+			fmt.Println("  unavailable  " + errText)
+		} else {
+			for _, kind := range []string{"managed", "public", "rsr"} {
+				if entry, ok := releaseInfo[kind].(gdmf.Entry); ok && entry.Build != "" {
+					fmt.Printf("  %-9s  %s (%s)\n", kind, entry.ProductVersion, entry.Build)
+				}
+			}
+		}
 	}
 	return nil
 }

@@ -369,6 +369,17 @@ These are the reference app's ADE/analytics territory. They are **not GUI-only f
 | MDM enrollment analytics | an aggregation surface | later |
 | Third-party MDM inventory sync | out of scope — `abctl` is deliberately Apple-only | not planned |
 
+### 4.4 Upcoming visibility update
+
+- **OS Releases** is a first-class read-only page backed by `abctl get os-releases -o json`, with
+  managed/public/RSR filters and platform/version/build/device search.
+- Device posture can load the same catalog and show newest matching managed/public entries. It must always say
+  this is catalog comparison, not eligibility, scheduling, or installation proof.
+- Assignment sheets show activity completion and Apple's presigned result CSV when available.
+- **System Health** summarizes bundled CLI identity, tenant/API connection, capabilities, and cached inventory.
+- **What's New** summarizes abcli releases; Apple's developer API changelog remains maintainer-facing.
+- No VPP toggle or content-token screen is permitted; see `docs/design-abctl.md` product boundary.
+
 Until then, the **raw API console** (v1) is the escape hatch for power users to probe these endpoints.
 
 ---

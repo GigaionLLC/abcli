@@ -95,6 +95,9 @@ struct AbctlClient {
     func audit(since: String) async throws -> [Resource] {
         try await decodeJSON([Resource].self, ["get", "audit", "--since", since, "-o", "json"])
     }
+    func osReleases() async throws -> [OSRelease] {
+        try await decodeJSON([OSRelease].self, ["get", "os-releases", "-o", "json"])
+    }
     /// Built-in-MDM device inventory: devices enrolled in the BUILT-IN device management
     /// service, with last-reported posture attributes (not live device queries).
     func mdmDevices() async throws -> [Resource] {

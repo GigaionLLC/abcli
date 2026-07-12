@@ -700,6 +700,26 @@ final class ContractTests: XCTestCase {
         let args = await recorder.last
         XCTAssertEqual(args.suffix(2), ["--context", "prod"])
     }
+
+    func testOSReleaseContractAndArguments() async throws {
+        actor Recorder { var args: [String] = []; func set(_ a: [String]) { args = a } }
+        struct RecordingRunner: AbctlRunner {
+            let recorder: Recorder
+            func run(_ args: [String], cwd: URL?, stdin: Data?, timeout: Duration) async throws -> AbctlResult {
+                await recorder.set(args)
+                return MockAbctlRunner.ok(#"[{"platform":"macOS","productVersion":"15.4","build":"24E1","postingDate":"2026-07-01","expirationDate":"2026-12-01","supportedDevices":["MacBookPro18,3"],"catalog":"managed","expired":false}]"#)
+            }
+        }
+        let recorder = Recorder()
+        let client = AbctlClient(runner: RecordingRunner(recorder: recorder))
+        let releases = try await client.osReleases()
+        let args = await recorder.args
+        XCTAssertEqual(args, ["get", "os-releases", "-o", "json"])
+        XCTAssertEqual(releases.count, 1)
+        XCTAssertEqual(releases[0].id, "managed:macOS:24E1")
+        XCTAssertEqual(releases[0].supportedDevices, ["MacBookPro18,3"])
+        XCTAssertFalse(releases[0].expired)
+    }
 }
 
 extension AbctlError: Equatable {

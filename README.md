@@ -78,8 +78,9 @@ CLI, decodes its JSON, and renders it.
   sidebar as *GitOps* vs *Read-only*, under a **Dashboard** of click-through stat tiles. Every list has
   search, column sort, and CSV export; every entity opens a labeled **detail sheet** (device → assigned MDM
   server, opt-in AppleCare coverage, and which blueprints/configs apply; user → roles + HR fields; group →
-  members; blueprint → all six member collections) with a raw-JSON fallback. (The separate VPP content-token
-  *Apps & Books* screen is disabled — see the built-in-MDM note below.)
+  members; blueprint → all six member collections) with a raw-JSON fallback. (There is intentionally no VPP
+  content-token screen: those tokens connect external MDM services and conflict with the primary organization’s
+  built-in-management ownership. Apps are managed through Apple Business Blueprints.)
 - **The GitOps hero:** a visual 3-way **diff / drift** view and a gated **`sync --apply`**. abgui defaults
   to Git source-of-truth with deletes/detaches enabled, uses smart Apple refresh by default, and exposes
   `--prune`, `--limit-writes`, refresh mode, and verification mode in the apply sheet.
@@ -202,6 +203,9 @@ inline (`--no-write-tree` to skip). Full design: **[docs/imperative-cli.md](docs
 # read
 abctl auth whoami                                   # verify auth + reachability
 abctl get configurations|blueprints|devices|audit   # + users|usergroups|apps|mdmservers  (--filter key=substr)
+abctl get os-releases [--platform macOS --catalog managed] # Apple's read-only software-release catalog
+abctl get audit --since 7d --type DEVICE --actor admin       # tenant activity filters
+abctl status device <serial> --releases                      # opt-in OS catalog comparison
 abctl get configuration <name|id> [--profile]       # show one (--profile dumps raw .mobileconfig XML)
 
 # GitOps (declarative, whole-tree)
@@ -307,6 +311,8 @@ It's the same logic the workflows run, so local and CI never disagree.
 - **[docs/imperative-cli.md](docs/imperative-cli.md)** — design + roadmap for the imperative CLI + signed binary release.
 - **[docs/abgui-design.md](docs/abgui-design.md)** — the abgui (native macOS GUI) design plan.
 - **[docs/vpp-design.md](docs/vpp-design.md)** — Apps & Books (VPP) — verified App-and-Book-Management-API-v2 reference + plan.
+- **[docs/os-releases.md](docs/os-releases.md)** — GDMF software-release catalog, filters, and interpretation limits.
+- **[docs/upcoming-release.md](docs/upcoming-release.md)** — scope and release gates for the next update.
 - **[abgui/README.md](abgui/README.md)** — the desktop app: scope, layout, and how to build / run it.
 - **[docs/auth.md](docs/auth.md)** + **[docs/endpoints/](docs/endpoints/)** — the *live-verified* Apple Business API reference.
 - **[HANDOFF.md](HANDOFF.md)** / **[TODO.md](TODO.md)** — current state and roadmap.
