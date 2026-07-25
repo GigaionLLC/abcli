@@ -1,15 +1,20 @@
 # VPP / Apps & Books — design + verified API reference
 
-> **⚠️ EXTERNAL-MDM API — NOT A PRODUCT FEATURE.** Apple Business can provide a location content
-> token, but Apple documents that token as the connection to an **external device-management
-> service**. Apple also warns that an external service must release the primary organization's
-> token before the organization uses built-in device management, or license inventory and app
-> assignments can become inconsistent. It is therefore **disabled by default**: `abctl vpp` is
+> **⚠️ EXTERNAL-MDM API — NOT A PRODUCT FEATURE.** Apple Business can provide an organizational-unit
+> content token, but Apple documents that token as the connection to an **external device-management
+> service**. Apple warns that an external service must release the primary organization's token before
+> built-in management owns that pool, or license inventory and app assignments can become inconsistent.
+> Apple does permit an isolated external lane through an additional OU, transferred unassigned licenses, and
+> that OU's token; this is technically supported coexistence but remains outside `abctl`'s product boundary.
+> The implementation is therefore **disabled by default**: `abctl vpp` is
 > hidden and errors unless the existing developer-only `ABCTL_ENABLE_VPP=1` escape hatch is set,
 > and abgui has no VPP screen or enable toggle. Do not offer that escape hatch as an end-user GUI
 > setting. The implementation is retained as quarantined reference code, not as roadmap scope.
 > **For built-in MDM, manage Apps & Books via blueprints** — see [design-abctl.md](design-abctl.md)
 > and `abctl get blueprint <id>` (apps + `appLicenseDeficient`) / `abctl attach app … --blueprint …`.
+> **A VPP association allocates a license; it does not install the app.** An external MDM must subsequently
+> send an `AppManaged` declaration or `InstallApplication` command. The end-to-end decision handoff is
+> [app-provisioning-research.md](app-provisioning-research.md).
 > Source: [Apple's content-token guidance](https://support.apple.com/guide/business/manage-content-tokens-axme0f8659ec/web).
 
 `abctl` speaks two Apple services. The **Apple Business API** (`api-business.apple.com/v1`,
@@ -43,9 +48,9 @@ Apple-Business-built-in-MDM product boundary.
   returns Apple error `9722`; a missing/expired token returns **HTTP 401**.
 - **Base:** `https://vpp.itunes.apple.com/mdm/v2` (overridable via `$AB_VPP_BASE` for tests).
 - **Discovery:** `GET /service/config` returns a `urls` map of every endpoint plus a
-  `limits` object. abctl uses it as the token validator; the fixed v2 paths below equal the
-  discovered URLs (same base), so abctl builds paths directly and keeps discovery for
-  validation.
+  `limits` object. The fixed v2 paths below equal the discovered URLs (same base), so abctl builds paths
+  directly and keeps discovery for limits/metadata. This endpoint is lenient and can respond for a revoked
+  token; `abctl vpp config` probes `/assets` before declaring the token valid for data.
 
 The **legacy** API (`POST /mdm/getVPP…Srv` with `sToken` in the JSON body) is explicitly in
 maintenance mode; abctl uses **v2 only**.
@@ -54,12 +59,13 @@ maintenance mode; abctl uses **v2 only**.
 
 | Purpose | Method + path | Notes |
 |---|---|---|
-| **Service config** | `GET /service/config` | `urls{…}`, `limits{maxAssets:25, maxUsers:100, maxClientUserIds:1000, maxSerialNumbers:1000, …}`, `notificationTypes[]`, `errorCodes[]`. Read-only; validates the token. |
+| **Service config** | `GET /service/config` | `urls{…}`, dynamic `limits{…}`, `notificationTypes[]`, `errorCodes[]`. Discovery only; probe `/assets` to validate data access. |
 | **Get assets** | `GET /assets` | The org's owned apps/books + license counts. |
 | **Get assignments** | `GET /assignments` | Which asset is assigned to which device/user. |
-| **Get users** | `GET /users` | Registered Managed Apple ID VPP users. |
-| Associate / disassociate | `POST /assets/associate` · `/assets/disassociate` | **Writes** (assign/unassign licenses). Out of scope for the read-only v1 (see §5). |
-| Revoke · users create/update/retire · client config · status | `…/assets/revoke`, `/users/*`, `/client/config`, `/status` | Later. |
+| **Get users** | `GET /users` | Registered Apps & Books distribution users (`clientUserId` namespace). |
+| Associate / disassociate | `POST /assets/associate` · `/assets/disassociate` | Hidden/gated writes are built; live verification awaits a safe token/pool. |
+| Status | `GET /status?eventId=…` | Hidden read is built for async associate/disassociate polling. |
+| Revoke · users create/update/retire · client config | `…/assets/revoke`, `/users/*`, `/client/config` | Not implemented. |
 
 ### `GET /assets` (the hero)
 
@@ -90,10 +96,10 @@ Response (`200`; `400`/`401`/`500` are `ErrorResponse`):
 clientUserId?}`; user ≈ `{clientUserId, email?, status, …}`. These two are modeled from the
 docs and will be field-checked against a live token when one is available.
 
-## 3. abctl surface (read-only v1)
+## 3. Quarantined abctl read surface
 
-A new `internal/vpp` client (standalone — different host + auth from `internal/ab`) and a
-`vpp` command group. All read-only, all honoring the global `-o table|json|yaml`:
+`internal/vpp` is standalone — a different host and credential from `internal/ab` — with a hidden `vpp`
+command group. Its reads honor the global `-o table|json|yaml`; section 6 records the hidden gated writes.
 
 | Command | Endpoint | Shows |
 |---|---|---|
@@ -103,11 +109,34 @@ A new `internal/vpp` client (standalone — different host + auth from `internal
 | `abctl vpp users` | `GET /users` | registered VPP users |
 
 Token resolution: `--vpp-token` › `$AB_VPP_TOKEN` › `$AB_VPP_TOKEN_FILE`. Base override:
-`$AB_VPP_BASE`. `vpp config` is the connection test (like `auth whoami` for the Business
-API). No `vpp-json` capability is advertised in `version --json` while the path is
+`$AB_VPP_BASE`. `vpp config` fetches service metadata and probes `/assets` as the connection test (like
+`auth whoami` for the Business API). No `vpp-json` capability is advertised in `version --json` while the path is
 quarantined, so no GUI should gate a screen on one.
 
-## 4. abgui decision
+## 4. Identity, installation, and token ownership
+
+- Device association uses a literal `serialNumber`. VPP does not provide device inventory; obtain serials
+  from the MDM/CMDB or resolve Apple organization inventory separately.
+- User association uses an MDM-selected `clientUserId`. It is not an Apple Business `/v1/users` resource ID,
+  Managed Apple Account, or necessarily an email address. User creation/invitation is a separate VPP flow.
+- Association consumes/allocates a license only. Installation requires an external MDM's declarative
+  [`AppManaged`](https://developer.apple.com/documentation/devicemanagement/appmanaged) configuration or
+  [`InstallApplication`](https://developer.apple.com/documentation/devicemanagement/install-application-command)
+  command and its enrollment/APNs/status infrastructure.
+- Exactly one client should own a token/location pool. If an existing MDM owns it, use that MDM's supported
+  API instead of racing it with `abctl`.
+- Primary-pool built-in/external sharing is unsafe. Apple's supported external coexistence lane is an additional
+  OU, transferred **unassigned** licenses, and that OU's content token. Do not assume this secondary pool feeds
+  built-in Blueprint installation.
+- Tokens expire after one year and can be invalidated by password changes or replacement downloads. Treat the
+  complete outer Base64 `.vpptoken` contents as a secret and plan renewal.
+- Batch examples are not constants: fetch `/service/config` and honor its current limits.
+
+See [Apple's user model](https://developer.apple.com/documentation/devicemanagement/managing-users),
+[organizational-unit guidance](https://support.apple.com/guide/business/configure-organizational-units-axmfdbe2cb0d/web),
+and [content-token guidance](https://support.apple.com/guide/business/manage-content-tokens-axme0f8659ec/web).
+
+## 5. abgui decision
 
 Do not add a VPP screen, connection indicator, token field, feature flag, or “advanced” toggle. Even a
 read-only inventory request makes `abgui` look like an external MDM integration and encourages operators to
@@ -115,13 +144,14 @@ attach the primary organization's content token contrary to the built-in-managem
 built-in experience is the Apple Business API app catalog, Blueprint app membership, and
 `appLicenseDeficient` state already exposed through `abctl`/`abgui`.
 
-## 5. Writes — built (gated), live-test pending a token
+## 6. Writes — built (gated), live-test pending a token
 
 `associate`/`disassociate` assign/unassign licenses via `POST /assets/associate` ·
 `/assets/disassociate` with the symmetric `ManageAssetsRequest` body
 `{assets:[{adamId,pricingParam}], clientUserIds:[], serialNumbers:[]}` → async
-`EventResponse{eventId,…}`. Batch limits (service config): ≤25 assets, ≤1000 serials or
-client-user-ids per call. Poll completion with `GET /status?eventId=`.
+`EventResponse{eventId,…}`. Apple's current service-config examples report ≤25 assets and ≤1000 serials or
+client-user-ids per call, but callers must use the live dynamic limits. Poll completion with
+`GET /status?eventId=`.
 
 Shipped in abctl (read + write, all httptest-verified):
 

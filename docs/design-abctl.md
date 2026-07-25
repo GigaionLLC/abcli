@@ -5,7 +5,8 @@
 desired state in sync with a live Apple Business tenant — read-only by default, every write gated.
 
 For current build status see [HANDOFF.md](../HANDOFF.md); for the roadmap see [TODO.md](../TODO.md);
-for the verified API reference see [auth.md](auth.md) and [endpoints/](endpoints/).
+for the verified API reference see [auth.md](auth.md) and [endpoints/](endpoints/); for the app-provisioning
+decision and API-option research see [app-provisioning-research.md](app-provisioning-research.md).
 
 ### Product boundary: Apple Business itself, not an external MDM
 
@@ -28,9 +29,14 @@ inside that boundary; it does not mean implementing every protocol Apple publish
   token left with an external service while enabling built-in management can cause license inventory and app
   assignment failures ([Apple: Manage content tokens in Apple Business](https://support.apple.com/guide/business/manage-content-tokens-axme0f8659ec/web)).
   Manage apps through Apple Business API app resources and Blueprint relationships.
+- Apple does permit an external management service to use a content token from an **additional organizational
+  unit** containing transferred unassigned licenses. This means built-in and external management can coexist
+  in isolated pools; it does not authorize `abctl` to manage that external lane. Never let two clients race the
+  same token/pool or assume a secondary external pool supplies built-in Blueprint installation.
 
 These are durable exclusions. A future request to “integrate every Apple API” must preserve them unless the
-product goal explicitly changes to building a standalone third-party MDM, which should be a separate project.
+product goal explicitly changes to an external-MDM integration or standalone MDM, which should have a separate
+security and ownership model.
 
 > **Ground truth (verified live 2026-07-04).** Auth = OAuth2 client-assertion, **ES256, `kid` omitted**
 > (Client ID + signature suffice); `aud = …/oauth2/v2/token`; bearer TTL 60 min. `/v1/configurations`
@@ -71,7 +77,7 @@ Apple Business's built-in MDM differs from a typical declarative MDM in ways tha
 |---|---|---|
 | **C1** | A Configuration is **tenant-global**; it deploys only once **attached to a Blueprint** | reconcile has an explicit **Phase 2 membership** pass, separate from config upsert |
 | **C2** | A config is **many-to-many** with Blueprints | the business key is the config **`name`** alone; each `.mobileconfig` is stored **once** in `lib/`, referenced by path |
-| **C3** | There are **no config-level labels/scoping** | fine-grained targeting = which **Blueprint a device is in** (`orgDevices` relation) |
+| **C3** | There are **no config-level labels/scoping** | fine-grained targeting = Blueprint `orgDevices`, `users`, and `userGroups` relationships |
 | **C4** | The API has **no batch reconcile endpoint** — only per-resource POST/PATCH/DELETE | **`abctl` is the reconcile engine** (client-side plan + apply) |
 | **C5** | **Only `CUSTOM_SETTING` is writable**; the ~22 native config types are read-only | manage/prune scope = **only the `CUSTOM_SETTING` configs abctl owns**; never touch native/console-only configs |
 
@@ -140,13 +146,14 @@ liveChanged = live.updatedDateTime > baseline.updatedDateTime  OR  hash(live) !=
 > edits (the "someone edited the portal" path) is Phase 3 (see [TODO.md](../TODO.md)).
 **Ordering per run:** pre-flight (load tree, parse names, validate, GET live index + blueprint linkages,
 build the plan) → config upsert (create/update, **archive before any overwrite**) → attach (per-member
-POST) → detach (per-member DELETE-with-body) → device moves (**last**, so a device never lands in a
-Blueprint whose configs aren't attached yet) → prune (off by default; detach then DELETE; archive first;
+POST) → detach (per-member DELETE-with-body) → target membership (**last**, so new targets never land in a
+Blueprint whose content/configs aren't attached yet) → prune (off by default; detach then DELETE; archive first;
 only configs abctl owns) → verify (GET round-trip hash + `CONFIG_SETTINGS_*` audit events) → persist (write
 pulled files + `archive/`, save `state/sync-state.json`). **Wired today:** config upsert / pull / delete-git
-/ prune / persist, **and blueprint config-membership attach + detach** (git-authoritative; detach gated by
-`--prune`; runs after config upsert so a just-created config resolves to an id). **Still Phase 3:** blueprint
-create/delete, device/user/group moves, verify, and the git-commit step (see [TODO.md](../TODO.md)).
+/ prune / persist, Blueprint create/update/delete, and all six membership collections (git-authoritative;
+detach gated by `--prune`; content resolves before target membership). App/package/device/user/group
+relationship writes are unit-tested but still await their first live device test. Scheduled git-commit glue
+remains future work (see [TODO.md](../TODO.md)).
 
 **Drift signal:** raw SHA-256 of the profile XML — Apple stores custom profiles byte-for-byte and `GET`
 round-trips them, so a plain hash is an exact drift signal. `updatedDateTime` is the cheap "did the live
@@ -154,7 +161,8 @@ side change / who's newer" signal.
 
 **Membership convergence:** always GET-current → compute add/remove → per-member POST/DELETE. The
 relationship POST is **additive (merges), verified live 2026-07-05** (POST B to `{A}` → `{A,B}`; DELETE A →
-`{B}`), so this converges correctly and makes "move device A from Blueprint X → Y" deterministic.
+`{B}`), so each relationship converges deterministically. Apple documents that multiple Blueprints can target
+the same device/user/group; do not assume adding one relationship automatically removes another.
 
 ### Refresh and Verification Modes
 
@@ -179,7 +187,7 @@ internal/gitops/      # the on-disk desired-state tree (lib/ profiles, state/ ba
 internal/hash/        # raw SHA-256 drift signal
 internal/state/       # read/write the committed sync baseline (sync-state.json)
 internal/reconcile/   # the engine: config Plan/Apply (3-way, newest-wins, archiving) + blueprint
-                      #   ComputeBlueprints/ApplyBlueprints (git-authoritative config-membership attach/detach)
+                      #   ComputeBlueprints/ApplyBlueprints (CRUD + all-six-collection membership reconcile)
 internal/archive/     # download-and-file the pre-overwrite live version + JSON sidecar (audit safety net)
 ```
 Built in Phase 2: `internal/archive` (files the pre-overwrite live version + sidecar) and
@@ -222,5 +230,6 @@ to the `AB_*` process variables when there is no `.env`).
   (POST B to `{A}` → `{A,B}`; DELETE-with-body A → `{B}`). abctl's `Add/RemoveBlueprintMembers` work.
 - **Identity is READ-ONLY via the API — CONFIRMED live 2026-07-05:** `POST /users` and `POST /userGroups`
   both `403 … does not allow 'CREATE'`. Users/groups come from the console / federation / SCIM only.
-- **Still open (needs a real test device):** whether assigning a device/group to a new Blueprint reassigns it
-  away from its current one (one-blueprint-per-device?). Do not probe against real devices.
+- **Still open (needs a real test device):** live transport and on-device effects for app/package/device/user/
+  group relationship writes. Apple documents multiple Blueprint assignments, so do not implement implicit
+  removal from other Blueprints.

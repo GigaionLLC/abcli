@@ -138,7 +138,7 @@ func snippet(b []byte) string {
 	return s
 }
 
-// --- service config (token validator + endpoint/limits discovery) ---
+// --- service config (endpoint/limits discovery) ---
 
 // ServiceConfig is GET /service/config: the discovered endpoint URLs, limits, etc.
 type ServiceConfig struct {
@@ -150,7 +150,9 @@ type ServiceConfig struct {
 	TokenExpiration   string            `json:"tokenExpirationDate,omitempty"`
 }
 
-// ServiceConfig fetches the service configuration (and thereby validates the token).
+// ServiceConfig fetches service metadata. Apple returns this endpoint leniently, including
+// for some revoked tokens, so callers must probe a data endpoint such as /assets before
+// treating the token as valid. The CLI's `vpp config` command performs that probe.
 func (c *Client) ServiceConfig() (*ServiceConfig, error) {
 	var sc ServiceConfig
 	if err := c.get("/service/config", nil, &sc); err != nil {
