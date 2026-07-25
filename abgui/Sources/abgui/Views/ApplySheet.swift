@@ -11,10 +11,13 @@ struct ApplySheet: View {
 
     @State private var prune = true
     @State private var limitText = ""
+    @State private var showValidate = false
+    @State private var confirmUnverifiedApply = false
 
     var body: some View {
         @Bindable var model = model
         VStack(alignment: .leading, spacing: 12) {
+            NoticeBanner() // flipping the source-of-truth mode from inside this sheet says so
             header
 
             Divider()
@@ -26,17 +29,18 @@ struct ApplySheet: View {
                             .foregroundStyle(.secondary)
                     }
 
-                    Toggle("Git source of truth", isOn: $model.gitSourceOfTruth)
-                        .onChange(of: model.gitSourceOfTruth) { _, enabled in
-                            if enabled { prune = true }
-                        }
-                    if model.gitSourceOfTruth {
-                        Text("Apple Business will be changed to match gitops/, including deleting live-only configurations.")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
+                    // The confirm-gated switch: it shows ON/OFF, explains what the flip means
+                    // before it happens, and (inline layout) spells out the current mode. The
+                    // callback keeps today's rule that git-as-truth forces prune on — desired
+                    // state without deletes/detaches would only ever be half-applied.
+                    GitSourceOfTruthControl(layout: .inline) { enabled in
+                        if enabled { prune = true }
                     }
                     Toggle("Allow deletes / detaches (--prune)", isOn: $prune)
                         .disabled(model.gitSourceOfTruth)
+
+                    verificationRow
+
                     DisclosureGroup("Advanced sync behavior") {
                         Picker("Refresh", selection: $model.refreshMode) {
                             Text("Smart").tag("smart")
@@ -75,10 +79,24 @@ struct ApplySheet: View {
 
             Divider()
 
+            // Outside the ScrollView on purpose: the command has to stay on screen while the
+            // toggles above it move, or it can't be watched changing.
+            commandPreview
+
             footer
         }
         .padding()
         .frame(minWidth: 640, minHeight: 320, idealHeight: 520)
+        // Verify from inside Apply: the report sheet has no "Continue to Apply..." here —
+        // Apply is already the presenter, so closing the report returns straight to it.
+        .sheet(isPresented: $showValidate) { ValidateSheet() }
+        .confirmationDialog("Verification found problems", isPresented: $confirmUnverifiedApply,
+                            titleVisibility: .visible) {
+            Button("Apply anyway", role: .destructive) { startApply() }
+            Button("Cancel", role: .cancel) { }
+        } message: {
+            Text(unverifiedApplyMessage)
+        }
     }
 
     private var header: some View {
@@ -90,6 +108,31 @@ struct ApplySheet: View {
         }
     }
 
+    /// The exact `sync --apply` the Apply button will shell out, rebuilt from the SAME argv
+    /// builder the client runs — the flags are never re-spelled here, so the line cannot drift
+    /// from the invocation. It reads as a final statement of intent above a gated tenant write,
+    /// and every control in this sheet visibly rewrites it.
+    ///
+    /// The toggles go in RAW — exactly as `AppModel.apply` passes them. Git-as-truth forcing
+    /// `--prune` on is the builder's own rule now, not a condition this view repeats: the
+    /// preview once re-derived it, which meant changing the rule in `apply()` would have left
+    /// this line quietly advertising a command without the most destructive flag it can apply.
+    private var commandPreview: some View {
+        CommandPreview(argv: model.previewArgv(
+                        AbctlClient.syncApplyArgs(prune: prune,
+                                                  limitWrites: limitWrites,
+                                                  gitSourceOfTruth: model.gitSourceOfTruth,
+                                                  refresh: model.refreshMode,
+                                                  verify: model.verifyMode)),
+                       cwd: model.repoRoot,
+                       caption: "Apply runs exactly this — the --yes is the confirmation you give by pressing it.")
+    }
+
+    /// Parsed once, used by both the preview and the run: the circuit breaker has to mean the
+    /// same thing in the line the user reads as in the process that starts. Non-numeric text
+    /// is nil (unlimited), exactly as before.
+    private var limitWrites: Int? { Int(limitText.trimmingCharacters(in: .whitespaces)) }
+
     private var footer: some View {
         HStack {
             if model.isWriting { ProgressView().controlSize(.small) }
@@ -97,14 +140,100 @@ struct ApplySheet: View {
             Button(model.applyResult == nil ? "Cancel" : "Done") { dismiss() }
                 .keyboardShortcut(.cancelAction)
             Button("Apply") {
-                Task {
-                    _ = await model.apply(prune: prune,
-                                          limitWrites: Int(limitText.trimmingCharacters(in: .whitespaces)))
+                // Verification is advisory: never verified or a clean report applies in one
+                // click exactly as before. Only a FAILED report escalates to a second confirm,
+                // because pushing a malformed profile to Apple Business is expensive to undo.
+                if model.validationReport?.ok == false {
+                    confirmUnverifiedApply = true
+                } else {
+                    startApply()
                 }
             }
             .keyboardShortcut(.defaultAction)
             .disabled(model.isWriting || (model.plan?.actionableChangeCount ?? 0) == 0)
         }
+    }
+
+    /// The write itself, factored out so the one-click path and the "Apply anyway" confirm
+    /// run identical code (the button IS the gate; the dialog is just an extra turn of it).
+    private func startApply() {
+        Task {
+            _ = await model.apply(prune: prune, limitWrites: limitWrites)
+        }
+    }
+
+    /// Pre-flight verification of the LOCAL `gitops/` profiles (`abctl validate --json`) — no
+    /// tenant calls, no credentials. Checking here, one step before the only screen that
+    /// writes, is where a malformed profile or a dangling blueprint reference is cheapest to
+    /// catch. It informs rather than blocks: see the Apply button for the one gate it adds.
+    @ViewBuilder private var verificationRow: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 8) {
+                if model.isValidating {
+                    ProgressView().controlSize(.small)
+                    Text("Checking profiles…").foregroundStyle(.secondary)
+                    Spacer()
+                } else if let report = model.validationReport {
+                    Image(systemName: report.ok ? "checkmark.seal" : "exclamationmark.triangle")
+                        .foregroundStyle(report.ok ? .green : .red)
+                    Text(verificationSummary(report))
+                    if let checked = lastValidatedText {
+                        Text(checked).font(.caption).foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    Button("Review…") { showValidate = true }
+                } else {
+                    Image(systemName: "questionmark.circle").foregroundStyle(.secondary)
+                    Text("Configurations not verified").foregroundStyle(.secondary)
+                    Spacer()
+                    Button("Verify…") { showValidate = true }
+                }
+            }
+            // validate's own failures (no workspace, abctl missing) never reach the report,
+            // so surface them here instead of leaving the row stuck on "not verified".
+            if let error = model.validationError {
+                Text(error).font(.caption).foregroundStyle(.red).textSelection(.enabled)
+            }
+        }
+    }
+
+    /// "Checked HH:mm:ss" for the last verification — the same confirmation stamp DiffView
+    /// prints for the plan, so a re-run is visible even when the verdict is unchanged.
+    private var lastValidatedText: String? {
+        guard let checked = model.lastValidatedAt else { return nil }
+        return "Checked \(checked.formatted(date: .omitted, time: .standard))"
+    }
+
+    /// The one-line verdict for the row (built as a String, like applySummary/planSummary,
+    /// rather than a ternary inside `Text`).
+    private func verificationSummary(_ report: ValidationReport) -> String {
+        if report.ok { return "Verified — \(report.passed) profile(s) ok" }
+        // `problemCount` counts every route to ok:false — failing files, broken blueprint
+        // references, and a failed external validator — so this row can never claim a
+        // not-ok report has nothing wrong with it.
+        return "Verification found \(report.problemCount) problem(s)"
+    }
+
+    /// The "Apply anyway" message. Deliberately phrased in PROBLEMS, not profiles: a report
+    /// fails on a blueprint that references a missing configuration, or on a non-zero
+    /// `$ABCTL_VALIDATOR` exit, without any single profile failing — and "N profile(s) failed
+    /// validation" would then send the user hunting through a list that is entirely green.
+    private var unverifiedApplyMessage: String {
+        let tail = " Applying now can push a broken profile to Apple Business. Apply anyway?"
+        guard let report = model.validationReport, report.problemCount > 0 else {
+            // ok:false with nothing enumerable (a future abctl reason): say only what we know.
+            return "Verification did not pass." + tail
+        }
+        var parts: [String] = []
+        if report.failed > 0 { parts.append("\(report.failed) failing profile(s)") }
+        if !report.treeErrors.isEmpty {
+            parts.append("\(report.treeErrors.count) blueprint/tree error(s)")
+        }
+        if report.validatorFailed, let code = report.validatorExitCode {
+            parts.append("the external validator exited \(code)")
+        }
+        let detail = parts.isEmpty ? "" : " (\(parts.joined(separator: ", ")))"
+        return "\(report.problemCount) problem(s) were found\(detail); Review… lists them." + tail
     }
 
     private func applySummary(_ plan: Plan) -> String {

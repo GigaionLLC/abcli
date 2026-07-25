@@ -83,10 +83,21 @@ CLI, decodes its JSON, and renders it.
   built-in-management ownership. Apps are managed through Apple Business Blueprints.)
 - **The GitOps hero:** a visual 3-way **diff / drift** view and a gated **`sync --apply`**. abgui defaults
   to Git source-of-truth with deletes/detaches enabled, uses smart Apple refresh by default, and exposes
-  `--prune`, `--limit-writes`, refresh mode, and verification mode in the apply sheet.
+  `--prune`, `--limit-writes`, refresh mode, and verification mode in the apply sheet. **Git source of truth**
+  reads as a literal **ON** / **OFF** pill and never flips on a stray click — the switch spells out what the new
+  mode does to the tenant, waits for a confirmation, then announces the change in a banner.
+- **Verify before you apply:** a **Verify Configs** sheet runs the credential-free `validate --json` over the
+  workspace and lists every failing profile, warning, and dangling blueprint reference — with its `code` — before
+  anything is pushed. It informs rather than blocks: a failed report still lets you apply, behind one more confirm.
 - **Write, gated:** create / edit / delete configs, attach / detach blueprint membership, and multi-select
   device **Assign/Unassign to an MDM server** (with activity-status check) — each behind an in-app confirm
   (abctl is still invoked with its own `--yes` gate and archive-on-overwrite).
+- **Shows the CLI it runs:** every gated sheet previews the exact `abctl` command it will shell out (built from
+  the same argv the client executes, so the two can't drift), the GitOps progress logs narrate `$ abctl sync …`
+  and `→ exit 0 in 2.4s` as work proceeds, and a **Command Log** page lists every invocation of the session —
+  with its working directory, exit code, and duration — copyable one at a time or as one shell script. Secrets
+  are redacted before a command is ever recorded, so an administrator can watch, copy, and replicate abgui in a
+  terminal.
 - **Archive / rollback:** browse every pre-overwrite live version abctl archived and restore one in a click.
 - **Mac distribution:** local builds are ad-hoc signed; tagged GitHub releases can be Developer ID-signed
   and notarized when the Apple signing secrets are configured. Build it with `make gui-app` (macOS 14+).
@@ -145,6 +156,7 @@ abctl auth whoami
 abctl seed                 # 1. download the live tenant → gitops/ tree + committed baseline
 git add gitops/            #    review, then commit the tree as your source of truth
                            # 2. edit gitops/lib/**/*.mobileconfig and gitops/blueprints/*.yml in git
+abctl validate             #    check those files locally — no credentials, no tenant calls
 abctl diff                 # 3. see the 3-way plan (configs + blueprint membership); no writes
 abctl sync                 # 4. same plan (dry-run is the default) — nothing is written
 abctl sync --apply         # 5. execute it: archive-before-overwrite, confirm before any write
@@ -179,7 +191,8 @@ gitops/
 The tree is **gitignored by default** (seeded profiles can carry secrets); un-ignore it deliberately once
 you adopt it as your committed source of truth.
 
-A blueprint manifest is just its desired config membership:
+A blueprint manifest can manage its content plus device/user/group targets. The five newer collection keys are
+optional: absent means unmanaged; present (even `[]`) means reconcile to that exact set.
 ```yaml
 name: Sales Team
 id: 1c6f7213-236f-4f5b-837c-71acb16a0b9b
@@ -187,10 +200,42 @@ description: field sales macs
 configurations:
   - wifi-corp.mobileconfig
   - vpn-always-on.mobileconfig
+apps:
+  - Pages
+devices:
+  - C02EXAMPLE
+users:
+  - rep@example.com
+groups:
+  - Field Sales
 ```
-`abctl` **attaches** configs listed in git but not in ABM, and (only with `--prune`) **detaches** configs
-attached in ABM but removed from git. Blueprint create/delete and device/user/group membership are managed
-in the console; `abctl` reports but doesn't act on them.
+`abctl` **attaches** declared members missing from Apple Business and, only with `--prune`, **detaches** managed
+members removed from git. Blueprint lifecycle and all six relationship collections are implemented and gated;
+app/package/device/user/group writes are unit-tested but still await their first controlled live-device test.
+
+### Pre-sync check (`abctl validate`)
+
+`validate` reads **local files only** — no credentials, no Apple Business calls, works offline (so it runs in CI
+before any `AB_*` secret is in scope, and on a workspace whose tenant was never configured). It parses every
+`lib/` profile as an XML plist and checks the `Configuration` / `PayloadContent` structure, a top-level
+`PayloadIdentifier`, the **1 MiB** Apple Business size cap, and an identifier **declared by two profiles** (they
+overwrite each other on the device — both files are flagged, each naming the other). Then it checks the
+blueprint manifests: a `configurations:` entry with no matching file in `lib/` is an error — that's the mistake
+that syncs cleanly and attaches nothing. Warnings (`missing-payload-uuid`, `missing-display-name`,
+`no-inner-payloads`, `approaching-size-cap` at ≥ 512 KiB, a stray non-`.mobileconfig` file sync will ignore)
+never fail the run.
+
+```sh
+abctl validate                # tree issues, then per-file errors/warnings, then the "N profile(s): …" summary
+abctl validate --json         # the machine report (also -o json | -o yaml); -o csv is rejected
+```
+
+**Exit `1`** means something failed — and on `--json` the report is still printed on **stdout** *before* that
+non-zero exit, so a CI job (or abgui) can render exactly what it just gated on. Every finding carries a stable
+`code` (`size-cap`, `binary-plist`, `duplicate-identifier`, `missing-config`, …) plus one plain sentence.
+`$ABCTL_VALIDATOR` still hands `lib/` to your own linter: on the human path it owns stdout and its exit code;
+on `--json` it runs *alongside* the built-in pass and lands in `validator` / `validatorCommand` /
+`validatorExitCode` / `validatorOutput` (16 KiB cap), where a non-zero exit fails the report.
 
 ## Command reference
 
@@ -210,7 +255,7 @@ abctl get configuration <name|id> [--profile]       # show one (--profile dumps 
 
 # GitOps (declarative, whole-tree)
 abctl seed                                          # live tenant → gitops/ tree + baseline
-abctl validate                                      # validate lib/ profiles
+abctl validate [--json]                             # check lib/ profiles + blueprint refs (no credentials)
 abctl diff | sync [--exit-on-diff] [--refresh smart|full|metadata-only]
 abctl sync --apply [--git-source-of-truth] [--prune] [--yes] [--limit-writes N] [--verify targeted|full|none]
 
@@ -222,6 +267,7 @@ abctl delete  config <name|id> [--yes]              # archive live, then DELETE
 abctl apply -f a.yml [-f b.yml] [--dry-run]         # upsert abctl/v1 Configuration|Blueprint specs (bulk)
 abctl attach|detach config <name> --blueprint <bp>  # add/remove a config from a blueprint
 abctl attach|detach app <name|id> --blueprint <bp>  # built-in-MDM Apps & Books: assign an owned app to a blueprint
+abctl attach|detach device|user|group <target> --blueprint <bp> # manage blueprint targets
 abctl pull [config <name>]                          # adopt a console edit into git (scoped seed)
 
 # status (honest proxies — NOT on-device install verification)
@@ -311,6 +357,7 @@ It's the same logic the workflows run, so local and CI never disagree.
 - **[docs/imperative-cli.md](docs/imperative-cli.md)** — design + roadmap for the imperative CLI + signed binary release.
 - **[docs/abgui-design.md](docs/abgui-design.md)** — the abgui (native macOS GUI) design plan.
 - **[docs/vpp-design.md](docs/vpp-design.md)** — Apps & Books (VPP) — verified App-and-Book-Management-API-v2 reference + plan.
+- **[docs/app-provisioning-research.md](docs/app-provisioning-research.md)** — 2026 Apple app-provisioning API decision handoff: Blueprints, VPP, external MDM, identity, and portal-only gaps.
 - **[docs/os-releases.md](docs/os-releases.md)** — GDMF software-release catalog, filters, and interpretation limits.
 - **[docs/upcoming-release.md](docs/upcoming-release.md)** — scope and release gates for the next update.
 - **[abgui/README.md](abgui/README.md)** — the desktop app: scope, layout, and how to build / run it.

@@ -720,6 +720,393 @@ final class ContractTests: XCTestCase {
         XCTAssertEqual(releases[0].supportedDevices, ["MacBookPro18,3"])
         XCTAssertFalse(releases[0].expired)
     }
+
+    // MARK: pre-sync verification — `abctl validate --json`
+    //
+    // The golden payloads below ARE the contract between the two halves: every key is a
+    // `json:"…"` tag on the Go report types, so a rename on either side breaks a test
+    // instead of silently emptying the Verify-configs sheet. Note the totals field is
+    // tagged `json:"warnings"` (not `warningCount`) while a profile's `warnings` is the
+    // issue array — same word, two shapes, which is exactly why it is pinned here.
+
+    func testValidateGoldenReportDecodesTotalsProfilesAndTreeIssues() async throws {
+        // Delivered on exit 1 because abctl exits 1 whenever the report says ok:false —
+        // the report is still printed on stdout, so decoding must not be gated on the
+        // exit code (that contract is asserted head-on by the next test).
+        let json = #"""
+        {"ok":false,"libDir":"gitops/lib","checked":3,"passed":2,"failed":1,"warnings":3,
+         "profiles":[
+           {"name":"WiFi-Corp.mobileconfig","path":"gitops/lib/WiFi-Corp.mobileconfig","bytes":2048,"ok":true,
+            "identifier":"com.example.wifi","displayName":"WiFi Corp","payloadTypes":["com.apple.wifi.managed"],
+            "errors":[],"warnings":[]},
+           {"name":"VPN.mobileconfig","path":"gitops/lib/VPN.mobileconfig","bytes":1048576,"ok":false,
+            "identifier":"com.example.vpn","payloadTypes":[],
+            "errors":[{"code":"size-cap","message":"profile is 1.0 MiB; Apple Business rejects profiles of 1 MiB or larger."},
+                      {"code":"missing-payload-content","message":"no top-level PayloadContent key."}],
+            "warnings":[]},
+           {"name":"Dock.mobileconfig","path":"gitops/lib/Dock.mobileconfig","bytes":912,"ok":true,
+            "identifier":"com.example.dock","payloadTypes":["com.apple.dock"],"errors":[],
+            "warnings":[{"code":"missing-display-name","message":"no top-level PayloadDisplayName."},
+                        {"code":"missing-payload-uuid","message":"no top-level PayloadUUID."}]}],
+         "treeIssues":[
+           {"level":"error","scope":"blueprints","target":"Fleet-A","code":"missing-config",
+            "message":"blueprint \"Fleet-A\" references configuration \"Kiosk.mobileconfig\", which is not in lib/"},
+           {"level":"warning","scope":"lib","target":"notes.txt","code":"ignored-file",
+            "message":"notes.txt is ignored by sync (not a .mobileconfig)"}],
+         "validator":"built-in"}
+        """#
+        let client = AbctlClient(runner: MockAbctlRunner(responses: ["validate": AbctlResult(stdout: Data(json.utf8), stderr: "", code: 1)]))
+        let report = try await client.validateProfiles()
+        XCTAssertFalse(report.ok)
+        XCTAssertEqual(report.libDir, "gitops/lib")
+        XCTAssertEqual(report.checked, 3)
+        XCTAssertEqual(report.passed, 2)
+        XCTAssertEqual(report.failed, 1)
+        XCTAssertEqual(report.warnings, 3) // 2 profile warnings + 1 warning-level tree issue
+        XCTAssertEqual(report.profiles.count, 3)
+        XCTAssertEqual(Set(report.profiles.map(\.id)).count, 3, "the profile list ForEach needs one stable id per row")
+
+        XCTAssertEqual(report.profiles[0].identifier, "com.example.wifi")
+        XCTAssertEqual(report.profiles[0].displayName, "WiFi Corp")
+        XCTAssertEqual(report.profiles[0].payloadTypes, ["com.apple.wifi.managed"])
+
+        // A failing profile carries every reason it failed, in the order abctl found them.
+        let failing = report.profiles[1]
+        XCTAssertFalse(failing.ok)
+        XCTAssertEqual(failing.bytes, 1_048_576)
+        XCTAssertEqual(failing.errors.map(\.code), ["size-cap", "missing-payload-content"])
+        XCTAssertTrue(failing.errors[0].message.contains("1 MiB"), "the message must be actionable: \(failing.errors[0].message)")
+        XCTAssertNil(failing.displayName, "displayName is omitempty on the Go side, so it must decode as nil")
+        XCTAssertEqual(failing.payloadTypes, [])
+
+        // Warnings never fail a profile — the row stays ok, only the counters move.
+        let warned = report.profiles[2]
+        XCTAssertTrue(warned.ok)
+        XCTAssertTrue(warned.errors.isEmpty)
+        XCTAssertEqual(warned.warnings.map(\.code), ["missing-display-name", "missing-payload-uuid"])
+
+        // The high-value pre-sync check: a blueprint pointing at a config that isn't in lib/
+        // (sync would silently skip it), plus a warning-level tree issue that must not read
+        // as an error in the sheet.
+        XCTAssertEqual(report.treeIssues.count, 2)
+        let missingConfig = report.treeIssues[0]
+        XCTAssertTrue(missingConfig.isError)
+        XCTAssertEqual(missingConfig.scope, "blueprints")
+        XCTAssertEqual(missingConfig.target, "Fleet-A")
+        XCTAssertEqual(missingConfig.code, "missing-config")
+        XCTAssertTrue(missingConfig.message.contains("Kiosk.mobileconfig"), "the message must name the missing config: \(missingConfig.message)")
+        XCTAssertFalse(report.treeIssues[1].isError)
+        XCTAssertEqual(report.treeIssues[1].code, "ignored-file")
+
+        XCTAssertEqual(report.validator, "built-in")
+        XCTAssertNil(report.validatorCommand, "no $ABCTL_VALIDATOR was set")
+        XCTAssertNil(report.validatorExitCode)
+        XCTAssertFalse(report.validatorFailed)
+
+        // What the sheets count: a failing file AND a broken blueprint reference are both
+        // problems the user has to look at, even though only one of them is a failed profile.
+        XCTAssertEqual(report.problemCount, 2)
+    }
+
+    func testValidateReportOnExitOneStillReturns() async throws {
+        // `validate` exits 1 on a failed report but prints it on stdout first, so the client
+        // decodes stdout BEFORE mapping the exit code: a failed verification must render as a
+        // report in the sheet, not as a bare "abctl reported an error". This fixture is the
+        // $ABCTL_VALIDATOR path, where a non-zero validator exit folds into ok:false even
+        // though every built-in structural check passed.
+        let json = #"""
+        {"ok":false,"libDir":"gitops/lib","checked":1,"passed":1,"failed":0,"warnings":0,
+         "profiles":[{"name":"WiFi-Corp.mobileconfig","path":"gitops/lib/WiFi-Corp.mobileconfig","bytes":2048,"ok":true,
+                      "identifier":"com.example.wifi","payloadTypes":["com.apple.wifi.managed"],"errors":[],"warnings":[]}],
+         "treeIssues":[],
+         "validator":"external","validatorCommand":"/usr/local/bin/mobileconfig-lint gitops/lib",
+         "validatorExitCode":2,"validatorOutput":"WiFi-Corp.mobileconfig: unknown payload key\n"}
+        """#
+        let client = AbctlClient(runner: MockAbctlRunner(responses: ["validate": AbctlResult(stdout: Data(json.utf8), stderr: "", code: 1)]))
+        let report = try await client.validateProfiles() // must NOT throw .cli on exit 1
+        XCTAssertFalse(report.ok)
+        XCTAssertTrue(report.profiles.allSatisfy(\.ok), "the built-in pass still ran and passed")
+        XCTAssertEqual(report.validator, "external")
+        XCTAssertEqual(report.validatorCommand, "/usr/local/bin/mobileconfig-lint gitops/lib")
+        XCTAssertEqual(report.validatorExitCode, 2)
+        let output = report.validatorOutput ?? ""
+        XCTAssertTrue(output.contains("unknown payload key"), "the raw validator output is shown verbatim: \(output)")
+
+        // The third route to ok:false — abctl folds a non-zero validator exit into the verdict
+        // without touching `failed` or adding a tree issue. The count the views render has to
+        // include it, or a failed report renders as "Verification found 0 problem(s)".
+        XCTAssertTrue(report.validatorFailed)
+        XCTAssertEqual(report.failed, 0)
+        XCTAssertTrue(report.treeErrors.isEmpty)
+        XCTAssertEqual(report.problemCount, 1, "a report that is not ok can never count zero problems")
+    }
+
+    func testValidateUndecodableStdoutOnExitOneThrowsCLIError() async throws {
+        // abctl died before it could print a report (bad flag, unreadable tree). There is
+        // nothing to decode, so the user gets the exit-code mapping — stderr — rather than
+        // an opaque decode failure.
+        let broken = AbctlResult(stdout: Data("Error: unknown flag: --json\n".utf8),
+                                 stderr: "Error: unknown flag: --json", code: 1)
+        let client = AbctlClient(runner: MockAbctlRunner(responses: ["validate": broken]))
+        do {
+            _ = try await client.validateProfiles()
+            XCTFail("expected an error")
+        } catch let AbctlError.cli(message) {
+            XCTAssertTrue(message.contains("unknown flag"), "should surface abctl's stderr: \(message)")
+        }
+    }
+
+    func testValidateArgsRunInWorkspaceWithContext() async throws {
+        actor Recorder {
+            var args: [String] = []
+            var cwd: URL?
+            var timeoutSeconds = 0
+            func set(_ a: [String], _ c: URL?, _ t: Duration) { args = a; cwd = c; timeoutSeconds = Int(t.components.seconds) }
+        }
+        struct RecordingRunner: AbctlRunner {
+            let recorder: Recorder
+            func run(_ args: [String], cwd: URL?, stdin: Data?, timeout: Duration) async throws -> AbctlResult {
+                await recorder.set(args, cwd, timeout)
+                return MockAbctlRunner.ok(#"{"ok":true,"libDir":"gitops/lib","checked":0,"passed":0,"failed":0,"warnings":0,"profiles":[],"treeIssues":[],"validator":"built-in"}"#)
+            }
+        }
+        let recorder = Recorder()
+        var client = AbctlClient(runner: RecordingRunner(recorder: recorder))
+        client.context = "prod"
+        client.repoRoot = URL(fileURLWithPath: "/work/ws")
+        _ = try await client.validateProfiles()
+        let args = await recorder.args
+        XCTAssertEqual(args.first, "validate")
+        XCTAssertTrue(args.contains("--json"), "missing --json in \(args)")
+        XCTAssertEqual(args.suffix(2), ["--context", "prod"]) // threaded through argv(_:) like every other verb
+        let cwd = await recorder.cwd
+        XCTAssertEqual(cwd?.path, "/work/ws") // the tree being verified is the chosen workspace's
+        let timeoutSeconds = await recorder.timeoutSeconds
+        XCTAssertGreaterThanOrEqual(timeoutSeconds, 120, "a big lib/ is parsed file by file and needs more than a plain read budget")
+    }
+
+    func testValidateOlderReportDecodesWithSafeDefaults() async throws {
+        // A bundled abctl that predates the newer keys must not crash the sheet: absent
+        // collections decode empty and absent optionals decode nil, so the views can read
+        // them unconditionally.
+        let json = #"""
+        {"ok":true,"libDir":"gitops/lib","checked":1,"passed":1,"failed":0,"warnings":0,
+         "profiles":[{"name":"WiFi-Corp.mobileconfig","path":"gitops/lib/WiFi-Corp.mobileconfig","bytes":2048,"ok":true}],
+         "validator":"built-in"}
+        """#
+        let client = AbctlClient(runner: MockAbctlRunner(responses: ["validate": MockAbctlRunner.ok(json)]))
+        let report = try await client.validateProfiles()
+        XCTAssertTrue(report.ok)
+        XCTAssertTrue(report.treeIssues.isEmpty, "an absent treeIssues key is an empty section, not a decode failure")
+        XCTAssertNil(report.validatorCommand)
+        XCTAssertNil(report.validatorExitCode)
+        XCTAssertNil(report.validatorOutput)
+        XCTAssertEqual(report.profiles.count, 1)
+        let profile = report.profiles[0]
+        XCTAssertTrue(profile.payloadTypes.isEmpty)
+        XCTAssertTrue(profile.errors.isEmpty)
+        XCTAssertTrue(profile.warnings.isEmpty)
+        XCTAssertNil(profile.identifier)
+        XCTAssertNil(profile.displayName)
+    }
+
+    // MARK: preview/execute parity — the structural defense against a lying preview
+    //
+    // abgui shows the abctl command behind every action so an administrator can paste it into a
+    // terminal and get the same effect. That promise only holds while the preview and the real
+    // call are the SAME code: a preview that drifts from what runs is worse than none, because
+    // it teaches a command that never ran. Each test below builds the argv the way a preview
+    // does and compares it to what a wrapped runner actually received, so adding a flag to one
+    // side alone fails here instead of shipping a wrong example to a support ticket.
+    //
+    // The builders are deliberately context-free — `--context` is appended by the instance
+    // `argv(_:)`, and the previews append it the same way — so the comparisons below use a
+    // context-less client except where the suffix itself is under test.
+
+    func testSyncApplyPreviewIsTheArgvThatActuallyRuns() async throws {
+        // The whole option surface ApplySheet can produce, including limit-writes 0, which the
+        // execute path drops as "unlimited" — a preview that showed `--limit-writes 0` would be
+        // advertising a circuit breaker the run does not arm.
+        let cases: [(prune: Bool, limit: Int?, git: Bool, refresh: String, verify: String)] = [
+            (prune: false, limit: nil, git: false, refresh: "smart", verify: "targeted"),
+            (prune: true, limit: 5, git: true, refresh: "full", verify: "none"),
+            (prune: true, limit: nil, git: false, refresh: "metadata-only", verify: "full"),
+            (prune: false, limit: 0, git: true, refresh: "smart", verify: "targeted"),
+            (prune: false, limit: 1, git: false, refresh: "full", verify: "targeted"),
+        ]
+        let applyJSON = #"{"configs":{"outcomes":[],"writes":0,"errors":0,"skipped":0},"blueprints":{"outcomes":[],"writes":0,"errors":0,"skipped":0}}"#
+        for options in cases {
+            let tap = ArgvTap()
+            var client = AbctlClient(runner: TappedRunner(tap: tap, json: applyJSON))
+            client.repoRoot = URL(fileURLWithPath: "/work/ws")
+            _ = try await client.syncApply(prune: options.prune, limitWrites: options.limit,
+                                           gitSourceOfTruth: options.git,
+                                           refresh: options.refresh, verify: options.verify)
+            let sent = await tap.argv
+            let previewed = AbctlClient.syncApplyArgs(prune: options.prune, limitWrites: options.limit,
+                                                      gitSourceOfTruth: options.git,
+                                                      refresh: options.refresh, verify: options.verify)
+            XCTAssertEqual(sent.first, "sync", "the gated write must still be a sync: \(sent)")
+            XCTAssertEqual(previewed, sent, "preview drifted from execution: shown \(previewed) but ran \(sent)")
+        }
+    }
+
+    func testValidatePreviewIsTheArgvThatActuallyRunsAndCarriesTheWorkspace() async throws {
+        let emptyReport = #"{"ok":true,"libDir":"gitops/lib","checked":0,"passed":0,"failed":0,"warnings":0,"profiles":[],"treeIssues":[],"validator":"built-in"}"#
+        let tap = ArgvTap()
+        var client = AbctlClient(runner: TappedRunner(tap: tap, json: emptyReport))
+        client.repoRoot = URL(fileURLWithPath: "/work/ws")
+        _ = try await client.validateProfiles()
+        var sent = await tap.argv
+        XCTAssertEqual(AbctlClient.validateArgs(), sent)
+
+        // ValidateSheet previews the command with the workspace as cwd, so the `cd` an admin
+        // copies has to be the directory the run really used — validate resolves gitops/ from it.
+        let cwd = await tap.cwd
+        XCTAssertEqual(cwd?.path, "/work/ws")
+
+        // With a context selected the run appends `--context`; the builder must NOT, or the
+        // preview would show the flag twice.
+        client.context = "prod"
+        _ = try await client.validateProfiles()
+        sent = await tap.argv
+        XCTAssertEqual(AbctlClient.validateArgs() + ["--context", "prod"], sent,
+                       "--context is appended by argv(_:), so the builder stays context-free: \(sent)")
+    }
+
+    func testAssignPreviewIsTheArgvThatActuallyRunsForBothVerbs() async throws {
+        // A gated device write: the serial list, the server name and the verb all have to match,
+        // because this is the preview an admin reads right before approving the write.
+        let activityJSON = #"{"action":"assign","server":"Built-in MDM","devices":2,"activityId":"act-1"}"#
+        let tap = ArgvTap()
+        let client = AbctlClient(runner: TappedRunner(tap: tap, json: activityJSON))
+
+        let many = ["C02AAA", "C02BBB"]
+        _ = try await client.assignDevices(serials: many, server: "Built-in MDM")
+        var sent = await tap.argv
+        XCTAssertEqual(sent.first, "assign")
+        XCTAssertEqual(AbctlClient.assignArgs(serials: many, server: "Built-in MDM", unassign: false), sent)
+
+        _ = try await client.unassignDevices(serials: ["C02AAA"], server: "Built-in MDM")
+        sent = await tap.argv
+        XCTAssertEqual(sent.first, "unassign", "unassign must not preview as an assign: \(sent)")
+        XCTAssertEqual(AbctlClient.assignArgs(serials: ["C02AAA"], server: "Built-in MDM", unassign: true), sent)
+    }
+
+    func testRecordingRunnerRecordsExactlyWhatTheClientSent() async throws {
+        // The seam end to end: a real client call through the decorator. The record has to be
+        // the argv the runner received — not a re-spelling of it — and has to carry the cwd,
+        // since a copied diff/sync without the matching `cd` reconciles the wrong tree.
+        let tap = ArgvTap()
+        let sink = ParityCommandSink()
+        let inner = TappedRunner(tap: tap, json: #"{"configs":[],"blueprints":[]}"#)
+        var client = AbctlClient(runner: RecordingRunner(wrapping: inner,
+                                                         onStart: { sink.start($0) },
+                                                         onFinish: { sink.finish($0, $1) }))
+        client.context = "prod"
+        client.repoRoot = URL(fileURLWithPath: "/work/ws")
+        let plan = try await client.plan(gitSourceOfTruth: true, refresh: "full")
+        XCTAssertTrue(plan.isEmpty, "the decorator must forward the payload untouched")
+
+        let sent = await tap.argv
+        let started = sink.started
+        XCTAssertEqual(started.count, 1)
+        XCTAssertEqual(started.first?.argv, sent, "the record must be the argv the runner got")
+        XCTAssertEqual(started.first?.argv,
+                       AbctlClient.planArgs(gitSourceOfTruth: true, refresh: "full") + ["--context", "prod"],
+                       "…and that argv is the preview builder's, plus the context the run used")
+
+        let recordedCwd = started.first?.cwd
+        let sentCwd = await tap.cwd
+        XCTAssertEqual(recordedCwd?.path, "/work/ws")
+        XCTAssertEqual(sentCwd?.path, "/work/ws")
+        let script = started.first?.script ?? ""
+        XCTAssertTrue(script.hasPrefix("cd /work/ws\n"), "the copyable form must lead with the cd: \(script)")
+        XCTAssertTrue(script.contains(CommandFormatter.line(sent)), "…and then the command itself: \(script)")
+
+        let finished = sink.finished
+        XCTAssertEqual(finished.count, 1)
+        XCTAssertEqual(finished.first?.0, started.first?.id, "the finish is keyed to the record it closes")
+        XCTAssertEqual(finished.first?.1, .succeeded)
+    }
+
+    /// The seam the parity tests above do NOT reach: the preview's INPUTS. Those tests pin the
+    /// argv builder against the execution, which keeps the two from spelling a flag differently —
+    /// but ApplySheet composes the builder's ARGUMENTS from the sheet's toggles and the model,
+    /// and `AppModel.apply` composes its run from the same toggles. While the "git-as-truth forces
+    /// prune" rule was written out in both of those places, either copy could change alone and
+    /// every parity test would still pass while the sheet advertised a command without `--prune`.
+    ///
+    /// So this drives both expressions from ONE model state and asserts they agree — which is
+    /// also what makes the rule's new home (inside `syncApplyArgs`) enforceable.
+    @MainActor
+    func testApplyPreviewInputsMatchTheApplyPathAcrossTheToggleMatrix() async throws {
+        let applyJSON = #"{"configs":{"outcomes":[],"writes":0,"errors":0,"skipped":0},"blueprints":{"outcomes":[],"writes":0,"errors":0,"skipped":0}}"#
+        let model = AppModel()
+        model.context = "prod"
+        model.verifyMode = "targeted"
+
+        for git in [false, true] {
+            for pruneToggle in [false, true] {
+                model.gitSourceOfTruth = git
+                model.refreshMode = git ? "full" : "smart"
+
+                // ApplySheet.commandPreview, verbatim: the raw toggle, the model's own modes.
+                let previewed = model.previewArgv(
+                    AbctlClient.syncApplyArgs(prune: pruneToggle,
+                                              limitWrites: 5,
+                                              gitSourceOfTruth: model.gitSourceOfTruth,
+                                              refresh: model.refreshMode,
+                                              verify: model.verifyMode))
+
+                // AppModel.apply's own call, through a client carrying the model's context.
+                let tap = ArgvTap()
+                var client = AbctlClient(runner: TappedRunner(tap: tap, json: applyJSON))
+                client.context = model.context
+                _ = try await client.syncApply(prune: pruneToggle,
+                                               limitWrites: 5,
+                                               gitSourceOfTruth: model.gitSourceOfTruth,
+                                               refresh: model.refreshMode,
+                                               verify: model.verifyMode)
+                let sent = await tap.argv
+
+                XCTAssertEqual(previewed, sent,
+                               "the sheet previews \(previewed) but Apply runs \(sent)")
+                XCTAssertEqual(sent.suffix(2), ["--context", "prod"],
+                               "a preview that dropped the context would name the wrong tenant: \(sent)")
+                if git {
+                    XCTAssertTrue(sent.contains("--prune"),
+                                  "git-as-truth forces deletes/detaches on, toggle or not: \(sent)")
+                }
+            }
+        }
+    }
+
+    /// `AppModel.previewArgv` and the client's private `argv(_:)` now share one function, and this
+    /// pins the half of that rule a copy would most easily get wrong: an unset context means "use
+    /// abctl's own current context", so the preview must show NO `--context` flag rather than an
+    /// empty one — `abctl validate --json --context ''` is not what runs, and it would not work.
+    @MainActor
+    func testPreviewArgvThreadsTheContextExactlyLikeTheRun() async throws {
+        let emptyReport = #"{"ok":true,"libDir":"gitops/lib","checked":0,"passed":0,"failed":0,"warnings":0,"profiles":[],"treeIssues":[],"validator":"built-in"}"#
+        let model = AppModel() // no context chosen — makeClient passes nil, not ""
+        let tap = ArgvTap()
+        var client = AbctlClient(runner: TappedRunner(tap: tap, json: emptyReport))
+        client.context = model.context.isEmpty ? nil : model.context
+
+        _ = try await client.validateProfiles()
+        var sent = await tap.argv
+        var previewed = model.previewArgv(AbctlClient.validateArgs())
+        XCTAssertEqual(previewed, sent, "an unset context must not preview a --context flag: \(previewed)")
+
+        model.context = "prod"
+        client.context = "prod"
+        _ = try await client.validateProfiles()
+        sent = await tap.argv
+        previewed = model.previewArgv(AbctlClient.validateArgs())
+        XCTAssertEqual(previewed, sent)
+        XCTAssertEqual(sent.suffix(2), ["--context", "prod"])
+    }
 }
 
 extension AbctlError: Equatable {
@@ -733,4 +1120,37 @@ extension AbctlError: Equatable {
         default: return false
         }
     }
+}
+
+/// Captures the argv and cwd the client handed the runner, so a test can hold the preview
+/// builder's output up against what execution really passed. An actor because the client calls
+/// it from whatever task drove the command.
+private actor ArgvTap {
+    var argv: [String] = []
+    var cwd: URL?
+    func record(_ a: [String], _ c: URL?) { argv = a; cwd = c }
+}
+
+/// An `AbctlRunner` that taps the invocation and answers with one canned payload — enough for
+/// the client to decode and return, so the parity tests exercise the real call path.
+private struct TappedRunner: AbctlRunner {
+    let tap: ArgvTap
+    let json: String
+    func run(_ args: [String], cwd: URL?, stdin: Data?, timeout: Duration) async throws -> AbctlResult {
+        await tap.record(args, cwd)
+        return MockAbctlRunner.ok(json)
+    }
+}
+
+/// A lock-guarded collector for `RecordingRunner`'s sinks, which fire off the main thread.
+private final class ParityCommandSink: @unchecked Sendable {
+    private let lock = NSLock()
+    private var _started: [CommandRecord] = []
+    private var _finished: [(UUID, CommandRecord.Status)] = []
+
+    var started: [CommandRecord] { lock.withLock { _started } }
+    var finished: [(UUID, CommandRecord.Status)] { lock.withLock { _finished } }
+
+    func start(_ record: CommandRecord) { lock.withLock { _started.append(record) } }
+    func finish(_ id: UUID, _ status: CommandRecord.Status) { lock.withLock { _finished.append((id, status)) } }
 }

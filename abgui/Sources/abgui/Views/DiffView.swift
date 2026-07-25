@@ -8,17 +8,39 @@ import UniformTypeIdentifiers
 struct DiffView: View {
     @Environment(AppModel.self) private var model
     @State private var showWorkspacePicker = false
-    @State private var showApply = false
+    @State private var sheet: GitOpsSheet?
+    @State private var queuedSheet: GitOpsSheet?
+    /// The Git-source-of-truth value the toolbar switch staged, awaiting confirmation. It
+    /// lives HERE, not in the control, because the dialog that confirms it is presented from
+    /// `content` — a toolbar item is the one place on macOS where presenting is unreliable.
+    @State private var pendingGitSourceOfTruth: Bool?
+
+    /// Which modal is up — ONE piece of state instead of two independent booleans. On macOS,
+    /// presenting a second sheet while the first is still dismissing silently no-ops, and
+    /// swapping `.sheet(item:)`'s item inside a single update can drop the new presentation
+    /// outright. So the verify → apply hand-off *queues* the next sheet and `onDismiss`
+    /// presents it once the validate sheet is really gone: no timers, no lost hand-off, and
+    /// never two sheets racing for the same window.
+    private enum GitOpsSheet: String, Identifiable {
+        case validate, apply
+        var id: String { rawValue }
+    }
 
     var body: some View {
-        @Bindable var model = model
         content
+            .safeAreaInset(edge: .top) { NoticeBanner() } // a confirmed mode flip is announced, not silent
             .navigationTitle("Diff / Drift")
             .toolbar {
                 if model.repoRoot != nil {
-                    Toggle("Git source of truth", isOn: $model.gitSourceOfTruth)
-                        .onChange(of: model.gitSourceOfTruth) { _, _ in model.refreshPlan() }
-                    Button { showApply = true } label: { Label("Apply...", systemImage: "checkmark.circle") }
+                    // A plain button: it shows ON/OFF and stages the flip, nothing more. The
+                    // confirmation and the commit belong to `.gitSourceOfTruthConfirmation`
+                    // on `content` below — see that modifier for why.
+                    GitSourceOfTruthControl(layout: .toolbar,
+                                            isOn: model.gitSourceOfTruth,
+                                            pending: $pendingGitSourceOfTruth)
+                    Button { sheet = .validate } label: { Label("Verify Configs", systemImage: "checkmark.shield") }
+                        .disabled(model.isSeeding)
+                    Button { sheet = .apply } label: { Label("Apply...", systemImage: "checkmark.circle") }
                         .disabled((model.plan?.actionableChangeCount ?? 0) == 0)
                     Button { model.refreshPlan() } label: { Label("Refresh", systemImage: "arrow.clockwise") }
                         .disabled(model.isLoading || model.isSeeding)
@@ -28,10 +50,36 @@ struct DiffView: View {
             .fileImporter(isPresented: $showWorkspacePicker, allowedContentTypes: [.folder]) { result in
                 if case .success(let url) = result { model.setWorkspace(url) }
             }
-            .sheet(isPresented: $showApply) { ApplySheet() }
+            .sheet(item: $sheet, onDismiss: presentQueuedSheet) { which in
+                switch which {
+                case .validate:
+                    ValidateSheet(onContinue: {
+                        // Queue Apply, then make sure this sheet is on its way out — ValidateSheet
+                        // dismisses itself, and a second nil write is a harmless no-op. Either
+                        // order lands in `onDismiss`, which is what actually presents Apply.
+                        queuedSheet = .apply
+                        sheet = nil
+                    })
+                case .apply:
+                    ApplySheet()
+                }
+            }
+            // The toolbar switch's consent gate, presented from the content view like every
+            // other presentation on this screen. The callback keeps the old behavior of
+            // recomputing the plan after a real (confirmed) change.
+            .gitSourceOfTruthConfirmation(pending: $pendingGitSourceOfTruth) { _ in
+                model.refreshPlan()
+            }
             .task(id: model.repoRoot) {
                 if model.repoRoot != nil && model.plan == nil { model.refreshPlan() }
             }
+    }
+
+    /// Present whatever a closing sheet asked for next, now that it is fully dismissed.
+    private func presentQueuedSheet() {
+        guard let next = queuedSheet else { return }
+        queuedSheet = nil
+        sheet = next
     }
 
     @ViewBuilder private var content: some View {

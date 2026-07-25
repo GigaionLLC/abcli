@@ -242,10 +242,14 @@ help text:
 | Active context | `context current` | — | plain text name |
 | **Plan / diff** | `diff --json` **==** `sync --dry-run --json` | **`--json` only** (ignores `-o`) | `{configs:[…], blueprints:[…]}` |
 | **Drift signal** | `diff --exit-on-diff --json` | `--json` | plan on stdout, **exit 3** = drift badge |
+| **Pre-sync verification** | `validate --json` | `--json` (**also** honors `-o json\|yaml`) | `{ok, libDir, checked, passed, failed, warnings, profiles:[…], treeIssues:[…], validator, validatorCommand, validatorExitCode, validatorOutput}` |
 | Raw request | `api <path> [-X GET]` | n/a | response body on stdout, `HTTP <n>` on stderr |
 
 **Rule abgui hard-codes:** `-o json` for `get`/`status`/`context`; **`--json`** (never `-o`) for
-`diff`/`sync`; `diff`/`sync` have **no YAML**.
+`diff`/`sync`; `diff`/`sync` have **no YAML**. `validate` is the odd one out and the only verb abgui may run
+**without credentials or a tenant**: it takes `--json`, honors `-o json|yaml` as well, exits **1** when the
+report says `ok:false`, and prints the report on **stdout anyway** — so abgui decodes the payload *before* it
+maps the exit code (a failing report is data to render, not an error to throw).
 
 **The plan shape** (identical for `diff --json` and `sync --dry-run --json`) is the machine-readable input to
 the diff view:
@@ -310,14 +314,14 @@ up the write and status surfaces.
 | # | Addition | Payoff |
 |---|---|---|
 | **N1** | `sync --apply --stream` emitting **NDJSON** per-item outcome events | Live progress list during long applies instead of a spinner. |
-| **N2** | `validate --json` → `{profiles, ok, failed:[{file,reason}]}` | Inline per-file validation errors before apply. |
+| ✅ **N2** | `validate --json` → `{ok, libDir, checked, passed, failed, warnings, profiles:[…], treeIssues:[…], validator…}` | **Shipped**, wider than proposed: per-file errors/warnings with stable `code`s **plus** tree issues (a blueprint referencing a configuration missing from `lib/`), credential-free, and an `$ABCTL_VALIDATOR` run folded into the same report. Capability token `validate-json`. |
 | ✅ **N3** | List results serialize as `[]` not `null` when empty | **Shipped.** Removes a null-guard from every list view. |
 | **N4** | Real exit code `2` on usage errors (currently mapped to `1`) | Lets abgui distinguish its own argv bugs from tenant errors. |
 | **N5** | Uniform `--filter k=substr` across list commands; `--filter` on `get devices`; `-o csv` | Push simple search server-of-the-shell; native CSV export (also reusable in CI). |
 
-P1/P4/P5/P7 and N3 have landed. Until **P2** (version/capabilities) lands, abgui reads the version from the
-cobra `--version` text; the remaining proposals (P3 error envelope, P6 blueprint counts, N-series) are
-graceful-degradation niceties, not blockers.
+P1/P4/P5/P7, N2 and N3 have landed. Until **P2** (version/capabilities) lands, abgui reads the version from the
+cobra `--version` text; the remaining proposals (P3 error envelope, P6 blueprint counts, rest of the N-series)
+are graceful-degradation niceties, not blockers.
 
 ---
 
@@ -339,6 +343,7 @@ Legend: **v1** read-only browse + GitOps view · **v2** writes · **v3** GitOps 
 | **Audit viewer** (time-range) | `get audit --since 24h\|7d\|90d --json`, `status audit --json` | v1 | Strong match; better than the reference app. |
 | **Coverage inspector** ("which blueprints carry this / devices targeted") | `status config <id> -o json` | v1 | Change-verification proxy. |
 | **Raw API console** (GET) | `api <path>` | v1 | Power-user runner + response viewer; also the escape hatch for endpoints `abctl` doesn't model. |
+| **Command Log** (the session's abctl transcript) | none — it records the calls abgui already makes | v1 | Redacted argv + cwd + exit code + duration, copy-pasteable into a terminal; see §4.6. |
 
 ### 4.2 GitOps differentiators (the hero — no reference-app analog)
 
@@ -349,7 +354,7 @@ Legend: **v1** read-only browse + GitOps view · **v2** writes · **v3** GitOps 
 | **Config lifecycle editor** (create/replace/delete) | `create/replace/delete config … -f - --yes` | v2 | Edit `.mobileconfig` in-app with automatic pre-overwrite archiving. |
 | **Blueprint membership editor** (drag configs onto blueprints) | `attach`/`detach … --yes`; declarative `sync` (detach gated by `--prune`) | v2 | Never touches console-only configs it doesn't own. |
 | **Declarative spec apply / preview** | `apply -f <spec.yml> [--dry-run] --yes` | v2 | Import/preview `abctl/v1` resource specs (upsert-only). |
-| **Validation** | `validate` (`--json` via **N2**) | v2 | Lint profiles before apply. |
+| **Validation** (Verify Configs sheet) | `validate --json` (**N2**, shipped) | v2 | Per-profile errors/warnings **and** dangling blueprint references, checked locally before any write — no credentials, no tenant call (§4.5). |
 | **Apply / converge with gating** | `sync --apply --yes --json [--git-source-of-truth] [--prune] [--refresh MODE] [--verify MODE] [--limit-writes N]` | v3 | abgui shows its own confirm and exposes source-of-truth, prune, refresh, verify, and write-limit controls. |
 | **Streaming apply progress** | `sync --apply --stream` (**N1**) | v3 | Live per-item outcome list. |
 | **Archive / rollback browser** | `gitops/archive/<name>/<ts>--<reason>.mobileconfig` (+ `.json` sidecar); restore via `replace config -f - --yes` | v3 | One-click restore of a prior live version — a true undo history. |
@@ -381,6 +386,127 @@ These are the reference app's ADE/analytics territory. They are **not GUI-only f
 - No VPP toggle or content-token screen is permitted; see `docs/design-abctl.md` product boundary.
 
 Until then, the **raw API console** (v1) is the escape hatch for power users to probe these endpoints.
+
+### 4.5 Pre-sync verification + the confirm-gated source-of-truth switch
+
+- **Verify Configs** is a toolbar button on *Diff / Drift* (`checkmark.shield`, left of `Apply...`) presenting
+  `ValidateSheet`, and a **pre-flight verification row** inside the Apply sheet. Both run
+  `AppModel.validateProfiles()` → `abctl validate --json` in the workspace, which owns its own
+  `isValidating`/`validationError`/`lastValidatedAt` state so verifying never blanks the diff screen's spinner.
+- The sheet shows a verdict row (`checkmark.seal.fill` "All N profile(s) passed" / `exclamationmark.triangle.fill`
+  "N of M profile(s) have problems", warnings + `Checked HH:mm:ss`), a **Blueprint / tree issues** section with
+  errors first, a per-profile list with failing files sorted to the top and each finding's stable `code` shown as
+  a chip, and — when `validator == "external"` — a disclosure group with the `$ABCTL_VALIDATOR` command, exit
+  code, and captured output. The sheet always shows `libDir`, so a report with no rows to show can't be confused
+  with "pointed at the wrong folder".
+- **All three routes to `ok:false` get named.** abctl folds a non-zero `$ABCTL_VALIDATOR` exit into the verdict
+  without touching `failed` or adding a tree issue, so a report can fail with every profile green and the tree
+  intact. The verdict then reads "N profile(s) passed the built-in checks, but the external validator failed",
+  the detail line carries `validator exit N`, and the validator disclosure group opens by default — it is the
+  only evidence there is. `ValidationReport.problemCount` counts failing profiles **+** error-level tree issues
+  **+** a failed validator, so a not-ok report can never render as "0 problem(s)".
+- **Verification informs; it does not block.** `Continue to Apply…` is never disabled (it just drops from
+  prominent to plain, with a one-line caption when the report failed), and Apply gates only on a *failed* report:
+  `validationReport?.ok == false` puts one extra "Apply anyway" confirmation in front of the write, worded in
+  *problems* (with the failing-profile / tree-error / validator-exit breakdown) rather than in profiles — a
+  dangling blueprint reference fails the report without failing any file, and naming the wrong thing would send
+  the user hunting through a profile list that is entirely green. Never verified or clean = one click, exactly as
+  before. Verification state is per-workspace and never stale: `setWorkspace(_:)` clears
+  `validationReport`/`validationError`/`lastValidatedAt`, and so does a *failed* run of `validateProfiles()` —
+  after a timeout or a spawn failure the state is unknown, not the last known good one, so the row can't show a
+  green "Verified" (and hold Apply's one-click path open) next to a red error. A cancelled run keeps the last
+  good report.
+- **Git source of truth is never a bare `Toggle`.** `GitSourceOfTruthControl` (layouts `.toolbar` for the diff
+  toolbar, `.inline` for the Apply sheet) renders the literal word **ON** / **OFF** in a filled pill plus a
+  state-encoding symbol (`lock.fill` / `arrow.left.arrow.right`) — the state must be readable without relying on
+  colour. A click only stages a *pending* value; the model changes in `setGitSourceOfTruth` after a confirmation
+  dialog spells out the consequence (ON: Apple-only configurations are DELETED, removed members detached, prune
+  forced on; OFF: additive + newest-wins, Apple-only configurations pulled into `gitops/`). The `.inline` layout
+  is a `.bordered` button (it sits above a real `Toggle`; a borderless run of text does not read as a control)
+  and also prints the meaning of the *current* mode, so the Apply sheet explains itself without a click.
+- **The dialog is presented from a content view, never from a toolbar item.** macOS hosts toolbar items in a
+  separate `NSToolbar` hierarchy where dialog presentation is unreliable and environment propagation is not
+  guaranteed — and a consent gate that silently no-ops is worse than no gate. So the Diff toolbar's copy of the
+  control takes its state as a plain `isOn:` value, reads no environment, and only *stages* into DiffView's
+  `@State`; `.gitSourceOfTruthConfirmation(pending:)` on DiffView's `content` presents the dialog and commits.
+  The Apply sheet's `.inline` copy is inside an ordinary view hierarchy and still presents its own. Both share
+  one wording (`GitSourceOfTruthCopy`), so the two presenters can't drift apart.
+- A confirmed flip posts an `AppModel.Notice`, rendered by **`NoticeBanner`** on the diff screen and at the top of
+  the Apply sheet and retired after 10 seconds (by id, so a newer notice is never cancelled by an older timer) —
+  a mode change that authorizes deletes is announced on screen, not only inside the dialog the user dismissed.
+- Sheet sequencing on macOS: Diff drives one `.sheet(item:)` over a `GitOpsSheet` enum, and the verify → apply
+  hand-off *queues* the next sheet and presents it from `onDismiss`. Presenting a second sheet while the first is
+  still dismissing silently no-ops, so the hand-off must not be two independent booleans.
+
+### 4.6 The abctl command trail — every invocation shown, copyable, and true
+
+abgui is a facade over the CLI, so the command behind a button is not an implementation detail: it is what an
+administrator has to be able to read, copy, and re-run in a terminal. A preview that drifts from what actually
+executes is worse than none — it teaches a command that never ran — so this surface rests on structure, not on
+remembering to instrument each call site.
+
+- **One recording seam.** Every abgui action already funnels through `AbctlRunner.run(_:cwd:stdin:timeout:)`, so
+  ONE decorator captures the whole command surface: `RecordingRunner` (`init(wrapping:onStart:onFinish:)`) wraps
+  the `ProcessRunner` built in `AppModel.makeClient(narrating:)`, reports the invocation via
+  `recordCommandStart` / `recordCommandFinish`, and forwards the call untouched — it never alters a result or
+  swallows an error. Verbs added later are recorded for free. `AppModel.commands` is the session trail (append
+  order, capped at 200 like the progress logs; `lastCommand` is the newest), and `clearCommands()` empties
+  abgui's list only — nothing on the tenant or on disk.
+- **Terminal status is never invented.** `CommandRecord.Status` runs `.running` → `.succeeded` (exit 0) /
+  `.failed(code)` / `.cancelled` (a `CancellationError` — the user, not a fault) / `.timedOut`. The last case
+  exists because abgui's own watchdog (`AbctlError.timedOut`) is *not* an abctl exit code: rendering it as
+  `exit -1` would read as a real result from a command that may well have changed something before abgui stopped
+  waiting.
+- **One formatter, or the surfaces drift apart.** `CommandFormatter` is the only place argv becomes text —
+  `line(_:)` (one line, POSIX-quoted by `quote(_:)`) and `script(argv:cwd:stdin:)` (the copy form: the `cd` that
+  makes a tree-relative command correct, since `diff`/`sync`/`validate` resolve `gitops/` from the working
+  directory, plus the stdin note). `CommandRecord` re-exports them as `commandLine`, `script`, `startLogLine`,
+  `finishLogLine`, `statusText`, `durationText`, so no view re-derives display text and the live preview, the
+  progress logs, the Command Log and every copy button cannot disagree.
+- **Preview/execute parity is structural.** The previewable verbs' argv lives in pure `static` builders on
+  `AbctlClient` — `syncApplyArgs(prune:limitWrites:gitSourceOfTruth:refresh:verify:)`,
+  `planArgs(gitSourceOfTruth:refresh:)`, `validateArgs()`, `assignArgs(serials:server:unassign:)`, `seedArgs()` —
+  which the instance methods call, so a sheet shows exactly what will run and no view re-spells a flag. The
+  `--context` suffix is appended once per path: by the instance `argv(_:)` at run time, by
+  `AppModel.previewArgv(_:)` in a preview — a preview that dropped it would be a command an admin could paste
+  against the wrong tenant. `ContractTests` pins the guarantee per verb
+  (`testSyncApplyPreviewIsTheArgvThatActuallyRuns` and its validate/assign siblings) by comparing each builder's
+  output with the argv a tapped runner actually received.
+- **Redaction at record time, never at display time.** `CommandRecord.init` runs `CommandFormatter.redact(_:)`
+  before storing argv, so a credential cannot enter the type and nothing downstream — a copy button, a `$ …` log
+  line, a screenshot in a support ticket — can leak one. The deny-list is the explicit
+  `CommandFormatter.redactedFlags` (today `--vpp-token`; both `--flag value` and `--flag=value`; value → `****`;
+  idempotent, so re-redaction is a no-op). `--client-id`, `--context` and `--key` (a path, not key material) are
+  deliberately **not** redacted: hiding identifiers the UI already displays would protect nothing and make the
+  copied command unrunnable. `CommandRecordTests` asserts a raw token appears in no rendered form.
+- **stdin is a size, never content.** `CommandRecord.Stdin` is `.none` or `.profile(bytes:)` — profile XML is
+  never recorded. Because a pasted `-f -` would sit waiting on an empty terminal forever, `script(...)` rewrites
+  it to a `./<name>.mobileconfig` path derived (and sanitized) from the positional argument, and appends a `#`
+  note that abgui piped N bytes in.
+- **Where commands surface.**
+  1. **The GitOps progress logs** (the explicitly requested one): `makeClient(narrating:)` picks the transcript
+     — `.silent`, `.progress`, `.apply` — for abctl's stderr *and* the command lines together through one
+     `commandSink(into:)`, so `$ abctl diff --json --refresh smart`, abctl's own narration and
+     `→ exit 0 in 2.4s` interleave into a single log on Diff / Seed and Apply. The `$` / `→` prefixes are what
+     make those lines read as a shell transcript rather than more narration.
+  2. **`CommandPreview`** — a quiet "Equivalent CLI" block (monospaced, selectable, wrapping, copy button) in
+     `ApplySheet` (outside the scroll area above the footer, so it can be watched rewriting itself as prune /
+     limit-writes / refresh / verify / source-of-truth move; it passes the raw prune toggle, and
+     `AbctlClient.syncApplyArgs` owns the git-as-truth-implies-`--prune` rule, so the preview and the run share
+     one copy of the condition governing the most destructive thing this screen does), `ValidateSheet` (with the
+     workspace `cwd`) and `AssignSheet` (no `cwd` —
+     assignment resolves nothing from a tree, and a `cd` would imply otherwise). It displays the literal
+     invocation, `-f -` and all; the paste-able rewrite lives in the copy button.
+  3. **`CommandLogView`** — a sidebar page (**Overview**, after System Health, symbol `terminal`): newest-first
+     rows of status icon + monospaced selectable command + start time · outcome · duration · workspace · stdin
+     size, a per-row copy button and a "Copy command" / "Copy with cd" context menu, a **Copy All as Script**
+     toolbar action (`combinedScript(_:)` — oldest first, because a transcript only reproduces the session in
+     the order it ran, hoisting a shared `cd` when every command used one) and **Clear**, an explainer naming
+     the redaction and `-f -` rules, and a `ContentUnavailableView` empty state.
+  4. **`ConnectionFooter`** — one truncated monospaced line for `lastCommand` under the connection dot; clicking
+     it selects the Command Log (`RootView` owns the selection and passes `showCommandLog:`).
+- Read-only list screens get **no** inline preview: the log already covers them, and a preview on every table
+  would be noise. Restraint is part of the requirement.
 
 ---
 
@@ -672,6 +798,10 @@ frontend/backend split.
 - **No secrets in logs.** abgui captures stderr as a **log stream** for a diagnostics pane, but the tokens
   and key never appear there (`abctl` never logs them). abgui must not echo the bearer token in the UI; if
   expiry is ever needed, prefer the structured `whoami --json` field (P1) over scraping `auth token` text.
+  The **command trail** (§4.6) is redacted at *record* time, not at display time: `CommandRecord.init` runs
+  `CommandFormatter.redact(_:)` (deny-list `redactedFlags`) before argv is stored, so a credential never enters
+  the type that the Command Log, the `$ …` progress lines and every copy button render — and stdin is kept as a
+  byte count, never as profile content.
 - **Subprocess hygiene.** Resolve `abctl` to an **absolute** path (bundled `Resources/abctl` or an explicit
   Settings override), never via a mutable PATH. Pass arguments as an **argv array** (`Process.arguments`) —
   no shell interpolation, so profile names / paths can't inject. Set an explicit `cwd`, a minimal

@@ -22,6 +22,7 @@ var capabilities = []string{
 	"blueprint-counts-json", // P6: get blueprint --json member counts
 	"os-releases-json",      // get os-releases -o json (GDMF)
 	"activity-result-log",   // status activity includes completion + downloadUrl
+	"validate-json",         // validate --json: per-profile + blueprint-reference report, no credentials
 	// VPP content-token capabilities are intentionally NOT advertised: the `vpp` path is
 	// disabled by default (no content token under Apple Business Essentials). They are
 	// re-added when ABCTL_ENABLE_VPP-gated support is re-enabled for 3rd-party-MDM orgs.

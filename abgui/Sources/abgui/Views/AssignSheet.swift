@@ -49,6 +49,8 @@ struct AssignSheet: View {
 
             Divider()
 
+            commandPreview
+
             footer
         }
         .padding()
@@ -154,6 +156,29 @@ struct AssignSheet: View {
         if let created = activity.attr("createdDateTime"), !created.isEmpty { line += " — created \(created)" }
         if let completed = activity.attr("completedDateTime"), !completed.isEmpty { line += " — completed \(completed)" }
         return line
+    }
+
+    /// The gated device write, spelled out before it happens — same argv builder the client
+    /// runs, so switching Assign/Unassign or the server rewrites the line in step with the
+    /// button. No cwd: assignment is a pure tenant call that resolves nothing from a `gitops/`
+    /// tree, and a `cd` here would imply a workspace matters when it doesn't.
+    ///
+    /// Withheld until a server is resolved, mirroring the button's own `serverID.isEmpty` guard.
+    /// The picker is empty on open, and stays empty for good if the fetch failed — previewing
+    /// `--server ''` there would put a live copy button next to a command that cannot run, on the
+    /// one surface whose entire promise is "paste this and get the same effect".
+    @ViewBuilder private var commandPreview: some View {
+        if serverID.isEmpty {
+            Text("Choose an MDM server to see the exact abctl command this runs.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.vertical, 2)
+        } else {
+            CommandPreview(argv: model.previewArgv(
+                            AbctlClient.assignArgs(serials: serials, server: serverID, unassign: unassign)),
+                           caption: "\(unassign ? "Unassign" : "Assign") runs exactly this; --yes is the confirmation that button gives.")
+        }
     }
 
     private var footer: some View {
