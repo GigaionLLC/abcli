@@ -42,6 +42,23 @@ func Resolve(explicitContext string) (*Config, error) {
 	return loadFromEnv()
 }
 
+// TreeDir resolves the directory the gitops/ tree lives under WITHOUT requiring
+// credentials. Checking local files (`abctl validate`) must work offline and
+// before a tenant is ever configured, so an unresolvable config is not an error
+// here: fall back to the nearest .env's directory walking up from the cwd, then
+// to the cwd itself — the same places Resolve would have rooted the tree had the
+// credentials been present. Resolve/Load are unchanged for every other caller.
+func TreeDir(explicitContext string) string {
+	if cfg, err := Resolve(explicitContext); err == nil && cfg.EnvDir != "" {
+		return cfg.EnvDir
+	}
+	if path, err := findEnv(); err == nil {
+		return filepath.Dir(path)
+	}
+	cwd, _ := os.Getwd()
+	return cwd
+}
+
 func loadFromEnv() (*Config, error) {
 	path, err := findEnv()
 	if err != nil {

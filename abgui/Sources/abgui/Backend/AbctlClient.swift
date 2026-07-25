@@ -53,6 +53,9 @@ struct AbctlClient {
     /// `get usergroup --members` (one API call per member), and `get mdmserver
     /// --devices` (walks the whole org device inventory to resolve serials).
     private static let fanOutTimeout: Duration = .seconds(120)
+    /// `validate` only reads local files, but a big lib/ plus a slow external
+    /// `$ABCTL_VALIDATOR` still deserves more than the plain read budget.
+    private static let validateTimeout: Duration = .seconds(120)
 
     // MARK: reads
 
@@ -192,14 +195,31 @@ struct AbctlClient {
         try await decodeJSON([VPPUser].self, ["vpp", "users", "-o", "json", "--vpp-token", token])
     }
 
+    /// Validate the workspace's `gitops/` profiles + blueprint references. Local-only — it
+    /// reads files, so no tenant calls and no credentials are required (it is the one verb
+    /// that works before a connection exists). `validate` exits 1 when the report says
+    /// `ok:false` and STILL prints the report on stdout, so the payload is decoded BEFORE
+    /// the exit code is mapped: a failing report is data to render, not an error to throw.
+    func validateProfiles() async throws -> ValidationReport {
+        let result = try await runner.run(argv(Self.validateArgs()), cwd: repoRoot, stdin: nil,
+                                          timeout: Self.validateTimeout)
+        do {
+            return try Self.decoder.decode(ValidationReport.self, from: result.stdout)
+        } catch {
+            // Nothing decodable on stdout means the RUN failed (no gitops/ tree, a bad flag,
+            // an abctl too old to know --json), so abctl's own stderr is the better message;
+            // fall back to the decode error only when it somehow exited 0.
+            try Self.checkExit(result)
+            throw AbctlError.decode(error)
+        }
+    }
+
     /// The 3-way plan. `diff --json` prints it and exits 0 — drift is a non-empty plan.
     /// Resolved against the workspace (cwd), where the `gitops/` tree lives. Diff makes live
     /// API calls (and may mint/refresh a token), so it gets a longer budget than a plain read.
     func plan(gitSourceOfTruth: Bool = false, refresh: String = "smart") async throws -> Plan {
-        var args = ["diff", "--json"]
-        if gitSourceOfTruth { args.append("--git-source-of-truth") }
-        args += ["--refresh", refresh]
-        return try await decodeJSON(Plan.self, args, cwd: repoRoot, timeout: Self.planTimeout)
+        try await decodeJSON(Plan.self, Self.planArgs(gitSourceOfTruth: gitSourceOfTruth, refresh: refresh),
+                             cwd: repoRoot, timeout: Self.planTimeout)
     }
 
     /// Initialize (or refresh) the workspace's GitOps tree from live tenant state: `abctl seed`
@@ -208,20 +228,21 @@ struct AbctlClient {
     /// tenant mutation, so no --yes gate). Output is human text, not JSON.
     @discardableResult
     func seed() async throws -> String {
-        let result = try await runner.run(argv(["seed"]), cwd: repoRoot, stdin: nil, timeout: .seconds(120))
+        let result = try await runner.run(argv(Self.seedArgs()), cwd: repoRoot, stdin: nil, timeout: .seconds(120))
         try Self.checkExit(result)
         return String(decoding: result.stdout, as: UTF8.self)
     }
 
     /// Reconcile the tenant to the workspace's git desired state (gated; abgui confirms
-    /// first, so --yes). `--prune` allows deletes/detaches; `--limit-writes` caps writes.
+    /// first, so --yes). `prune` is the raw "allow deletes/detaches" toggle — `syncApplyArgs`
+    /// forces it on under git-as-truth, so callers pass what the user chose and nothing more;
+    /// `--limit-writes` caps writes.
     func syncApply(prune: Bool, limitWrites: Int?, gitSourceOfTruth: Bool = false, refresh: String = "smart", verify: String = "targeted") async throws -> ApplyResult {
-        var args = ["sync", "--apply", "--yes", "--json"]
-        if gitSourceOfTruth { args.append("--git-source-of-truth") }
-        if prune { args.append("--prune") }
-        args += ["--refresh", refresh, "--verify", verify]
-        if let limitWrites, limitWrites > 0 { args += ["--limit-writes", String(limitWrites)] }
-        return try await decodeJSON(ApplyResult.self, args, cwd: repoRoot, timeout: Self.applyTimeout)
+        try await decodeJSON(ApplyResult.self,
+                             Self.syncApplyArgs(prune: prune, limitWrites: limitWrites,
+                                                gitSourceOfTruth: gitSourceOfTruth,
+                                                refresh: refresh, verify: verify),
+                             cwd: repoRoot, timeout: Self.applyTimeout)
     }
 
     /// The raw `.mobileconfig` XML for a config (stdout is XML, not JSON).
@@ -262,12 +283,12 @@ struct AbctlClient {
     /// Assign org devices to an MDM server. Apple processes assignment asynchronously —
     /// the outcome carries the activity id to poll via `activityStatus`.
     func assignDevices(serials: [String], server: String) async throws -> ActivityOutcome {
-        try await decodeJSON(ActivityOutcome.self, ["assign", "--server", server] + serials + ["--yes", "--json"])
+        try await decodeJSON(ActivityOutcome.self, Self.assignArgs(serials: serials, server: server, unassign: false))
     }
 
     /// Unassign org devices from an MDM server (async, same activity-id contract).
     func unassignDevices(serials: [String], server: String) async throws -> ActivityOutcome {
-        try await decodeJSON(ActivityOutcome.self, ["unassign", "--server", server] + serials + ["--yes", "--json"])
+        try await decodeJSON(ActivityOutcome.self, Self.assignArgs(serials: serials, server: server, unassign: true))
     }
 
     // MARK: connection contexts (~/.abctl/contexts.yaml — the credential store)
@@ -299,12 +320,71 @@ struct AbctlClient {
     func useContext(_ name: String) async throws { try await runControl(["context", "use", name]) }
     func deleteContext(_ name: String) async throws { try await runControl(["context", "delete", name]) }
 
-    // MARK: plumbing
+    // MARK: argv builders — the preview/execute parity seam
+    //
+    // The verbs abgui PREVIEWS (ApplySheet, ValidateSheet, AssignSheet) build their argv from
+    // these same pure functions the methods above run, so the command an administrator reads
+    // before pressing a gated button is byte-for-byte the command that executes. Re-spelling a
+    // flag in a view is the one way that guarantee breaks — hence `static` and pure, so a view
+    // has no excuse to hand-roll one. There is a contract test asserting the parity.
+    //
+    // These deliberately do NOT carry the `--context` suffix: at run time `argv(_:)` appends it
+    // from this client's context, and a preview appends it from the model's via
+    // `AppModel.previewArgv(_:)`. One tail, added in one place per path.
 
-    private func argv(_ base: [String]) -> [String] {
+    /// `sync --apply` — the gated converge. `--yes` is baked in because abgui shows its OWN
+    /// confirmation first; the flag ordering is part of the contract test, so keep it.
+    ///
+    /// `prune` is the RAW "allow deletes / detaches" toggle: git-as-truth forces pruning ON here,
+    /// inside the one function that spells the flags, rather than at each callsite. That rule used
+    /// to live in `AppModel.apply` AND again in ApplySheet's preview expression — two copies of
+    /// the condition governing the most destructive flag this command has, where the preview
+    /// silently stops matching the run the moment one of them changes.
+    static func syncApplyArgs(prune: Bool, limitWrites: Int?, gitSourceOfTruth: Bool,
+                              refresh: String, verify: String) -> [String] {
+        var args = ["sync", "--apply", "--yes", "--json"]
+        if gitSourceOfTruth { args.append("--git-source-of-truth") }
+        // Desired state without deletes/detaches would only ever be half-applied, so git-as-truth
+        // implies --prune whatever the toggle says.
+        if prune || gitSourceOfTruth { args.append("--prune") }
+        args += ["--refresh", refresh, "--verify", verify]
+        if let limitWrites, limitWrites > 0 { args += ["--limit-writes", String(limitWrites)] }
+        return args
+    }
+
+    /// `diff --json` — the 3-way plan, resolved against the workspace cwd.
+    static func planArgs(gitSourceOfTruth: Bool, refresh: String) -> [String] {
+        var args = ["diff", "--json"]
+        if gitSourceOfTruth { args.append("--git-source-of-truth") }
+        args += ["--refresh", refresh]
+        return args
+    }
+
+    /// `validate --json` — local files only, so this is the one previewable command that needs
+    /// no credentials.
+    static func validateArgs() -> [String] { ["validate", "--json"] }
+
+    /// `assign` / `unassign` — one builder, because the two verbs differ only in that word and
+    /// splitting them would be two chances to get the gated device write's argv wrong.
+    static func assignArgs(serials: [String], server: String, unassign: Bool) -> [String] {
+        [unassign ? "unassign" : "assign", "--server", server] + serials + ["--yes", "--json"]
+    }
+
+    /// `seed` — initialize the workspace tree from the tenant (reads live, writes local files).
+    static func seedArgs() -> [String] { ["seed"] }
+
+    /// The `--context` tail every run appends. `static` so a PREVIEW can build the same tail from
+    /// the model's context without a client (`AppModel.previewArgv`) instead of re-spelling the
+    /// flag: the empty-means-omit rule then exists once, and a preview cannot name a different
+    /// tenant than the run it is advertising.
+    static func contextSuffixed(_ base: [String], context: String?) -> [String] {
         guard let context, !context.isEmpty else { return base }
         return base + ["--context", context]
     }
+
+    // MARK: plumbing
+
+    private func argv(_ base: [String]) -> [String] { Self.contextSuffixed(base, context: context) }
 
     /// Run a context-store command (raw argv, no --context threading, no repo cwd).
     @discardableResult

@@ -1,7 +1,8 @@
 # abctl — roadmap / TODO
 
 `[x]` done · `[~]` in progress · `[ ]` todo. Context: [HANDOFF.md](HANDOFF.md) ·
-design: [docs/design-abctl.md](docs/design-abctl.md).
+design: [docs/design-abctl.md](docs/design-abctl.md) · app provisioning:
+[docs/app-provisioning-research.md](docs/app-provisioning-research.md).
 
 ## Shipped (don't redo)
 - [x] **Auth** — ES256, `kid` omitted, token cache, 429/5xx backoff. Live-verified.
@@ -13,9 +14,9 @@ design: [docs/design-abctl.md](docs/design-abctl.md).
 - [x] **CI** — GitHub Actions: build/vet/race-test on **Linux + macOS**, golangci-lint v2, and a **gated
   read-only live integration test** (`TestLiveReadOnly`, `-tags=integration`) that self-skips without secrets.
 - [x] **Phase 2 client write methods** — `Create/Update/DeleteConfiguration`, blueprint member add/remove
-  (429-safe `rawWrite`). Not yet wired into an apply engine.
+  (429-safe `rawWrite`). Wired into the apply engine and CLI below.
 
-## Next — Phase 2 (gated apply)
+## Phase 2 — shipped; live-validation gaps remain
 - [x] **`internal/archive`** — `Write(root, name, reason, xml, meta, now)` →
   `gitops/archive/<name>/<UTC-ts>--<reason>.mobileconfig` + a JSON sidecar. Windows-safe timestamps (no
   colons); reasons `replaced` | `overwritten-by-newer` | `pruned`.
@@ -49,7 +50,8 @@ design: [docs/design-abctl.md](docs/design-abctl.md).
   CUSTOM_SETTING config membership (git-authoritative): `gitops.LoadBlueprints` reads `blueprints/*.yml`
   (yaml.v3), `ab.FetchBlueprints` resolves live membership to config names, `reconcile.ComputeBlueprints`
   plans **attach** (config in git, not ABM) / **detach** (in ABM, not git — gated `--prune`) / reports
-  `blueprint-new` (git-only; create needs a console member) + `blueprint-adopt` (ABM-only; run `seed`), and
+  `blueprint-new` (git-only; creation resolves and inlines declared member + content, failing closed if either
+  is missing or ambiguous) + `blueprint-adopt` (ABM-only; run `seed`), and
   `Engine.ApplyBlueprints` executes it (attach always, detach gated, `--limit-writes` shared with configs).
   Never touches native/console configs it doesn't own. Verified live 2026-07-05 (merge-additive) + unit-tested.
 - [x] **Blueprint create/update/delete + full membership — BUILT 2026-07-09** (unlocked by Apple's API v2.0,
@@ -59,8 +61,12 @@ design: [docs/design-abctl.md](docs/design-abctl.md).
   `groups:` keys; an absent key = unmanaged, never touched; git-only blueprints plan a real CREATE with
   resolvable members riding inside the POST). Users/groups themselves remain API-read-only (`POST /users` →
   `403`) — member identities are still console/SCIM-created. **Remaining live checks:** first end-to-end
-  sync of the non-config collections against the tenant, and the one-blueprint-per-device reassignment
-  question (still needs a real test device).
+  sync of the non-config collections against the tenant. Apple documents multiple Blueprint assignments to a
+  device/user/group, resolving the conceptual one-Blueprint-only question; transport still needs a real device.
+- [ ] **Live-verify app provisioning through a Blueprint** — portal-acquire one free test app, use one
+  throwaway ADE device enrolled in built-in management, dry-run then attach app + device, confirm
+  `appLicenseDeficient == false` and the portal/on-device state, then detach and clean up. This is the first
+  live check for the app/device relationship transports; do not use production targets or a VPP token.
 
 ## Phase 3 — CI/CD
 - [x] **Live tests in CI** — read-only (`integration`) + gated write round-trip (`integration-write`) jobs
@@ -76,8 +82,9 @@ design: [docs/design-abctl.md](docs/design-abctl.md).
 ## Imperative CLI + binary release — determined + built 2026-07-05
 Full design + capability map + reconciliation model in **[docs/imperative-cli.md](docs/imperative-cli.md)**.
 Same binary, two planes (GitOps + an imperative plane); full capability on the authoring/deploy/
-assignment plane the API exposes; live device query / per-device MDM command / on-device install
-verification are architecturally impossible and are scoped out honestly (no agent, no command channel).
+assignment plane the API exposes. Apple Business exposes last-reported built-in-MDM device posture, but not a
+generic per-device MDM command channel or definitive on-device app-install verification; label those limits
+honestly.
 - [x] **Phase 0 — foundation:** global `-o/--output json|yaml|table`; named-connection **contexts**
   (`abctl context …`, `~/.abctl/contexts.yaml`, `--context`/`$ABCTL_CONTEXT`, `.env` stays the CI
   path); `api` extended to write-gated `-X/-F/--input`; GoReleaser v2 (`.goreleaser.yaml` +
@@ -114,6 +121,69 @@ developer.apple.com. Research + roadmap context: the ABMate/portal/API gap analy
 - Deliberately NOT built: third-party MDM integrations (Jamf/Intune/Kandji/Mosyle) and iTunes-lookup
   enrichment — out of scope per project direction (no third-party integrations).
 
+## API v2.2 organizational-unit reads — published 2026-07-15
+
+Apple added three read-only Apple Business endpoints: list organizational units, get one organizational unit,
+and get the user IDs related to an organizational unit. These improve OU visibility but do not create OUs,
+transfer Apps & Books licenses, download/manage content tokens, or assign apps.
+
+- [ ] Pin the three v2.2 DocC contracts in `docs/endpoints/`, implement read-only client/CLI coverage if it
+  materially helps identity or token-pool visibility, and live-verify with a read-only key.
+- [ ] Do not infer an external-MDM/VPP product expansion from OU visibility; the boundary below still applies.
+
+## Pre-sync verification + source-of-truth clarity — shipped 2026-07-25
+
+- [x] **`validate` needs no credentials** — the implementation moved to `internal/cli/validate.go` and roots the
+  tree with the new `config.TreeDir(explicitContext)` (resolved `EnvDir` → nearest `.env` → cwd) instead of
+  `config.Load()`, so it runs offline, in CI, and before a tenant exists. Other `config.Load`/`Resolve` callers
+  are untouched.
+- [x] **Built-in structural pass** — each `lib/` profile parsed as an XML plist (hand-rolled `encoding/xml`
+  walker, no new module deps). Errors: `unreadable`, `empty`, `binary-plist`, `signed-profile`, `xml-parse`,
+  `not-plist`, `size-cap` (≥ 1 MiB), `missing-payload-content`, `missing-payload-type`, `not-configuration`,
+  `missing-payload-identifier`, `duplicate-identifier` (both files flagged, each naming the other). Warnings
+  (never fail a run): `missing-payload-uuid`, `missing-display-name`, `no-inner-payloads`,
+  `inner-payload-missing-type`, `approaching-size-cap` (≥ 512 KiB). Files come from `Tree.LoadDesired`, so
+  validate and sync can't disagree about which files are profiles.
+- [x] **Tree checks (the high-value pre-sync one)** — a blueprint `configurations:` entry with no file in `lib/`
+  is an error (`missing-config`); plus `blueprint-parse`, `empty-lib`, and `ignored-file` for a stray
+  non-`.mobileconfig`.
+- [x] **`validate --json` (N2)** — also honors `-o json|yaml`; `-o csv` stays rejected. Exit codes unchanged (1
+  when `ok:false`) with the report printed on **stdout before** the exit, so a GUI/CI job can render what it
+  gated on. `$ABCTL_VALIDATOR` is unchanged on the human path and folded into
+  `validator`/`validatorCommand`/`validatorExitCode`/`validatorOutput` (16 KiB cap) on the JSON path. Capability
+  token `validate-json`.
+- [x] **abgui** — **Verify Configs** sheet (Diff toolbar button + Apply pre-flight row; a failed report adds one
+  "Apply anyway" confirm and nothing more — verification informs, it does not block) and the confirm-gated
+  `GitSourceOfTruthControl`: a literal **ON**/**OFF** pill, a dialog that spells out the consequence *before* the
+  value changes, and a `NoticeBanner` announcing the new mode.
+- [ ] Click through the two new sheets on macOS against a real seeded tree (Go + Swift unit tests cover the
+  report and the argv/decode contract; the verify → apply sheet hand-off has not been exercised on device).
+
+## abgui shows the abctl commands it runs — shipped 2026-07-25 (Swift only; no CLI change)
+
+- [x] **One recording seam** — `RecordingRunner`, an `AbctlRunner` decorator wrapped around `ProcessRunner` in
+  `AppModel.makeClient(narrating:)`. Every call is recorded at the one chokepoint it already passes through and
+  forwarded untouched, so verbs added later are captured without new code. `AppModel.commands` (append order,
+  capped at 200), `lastCommand`, `recordCommandStart`/`recordCommandFinish`, `clearCommands()`.
+- [x] **One record, one formatter** — `CommandRecord` + `CommandFormatter` (`line`, `script(argv:cwd:stdin:)`,
+  `redact`, `quote`) is the only argv→text conversion in the app, shared by the previews, the `$ …` / `→ …`
+  progress lines, the Command Log and every copy button, so the surfaces cannot drift. `.timedOut` is a status of
+  its own — abgui's watchdog is not an abctl exit code, and `exit -1` would read as a real result.
+- [x] **Redaction before storage** — `CommandRecord.init` redacts (`redactedFlags`: `--vpp-token`, both
+  `--flag value` and `--flag=value`, → `****`), so a secret can't enter the type; `--client-id`, `--key` (a path)
+  and `--context` deliberately stay visible or the copied command won't run. stdin is a byte count, never profile
+  XML, and the copy form rewrites `-f -` into a real path plus a `#` note.
+- [x] **Preview/execute parity** — pure static `AbctlClient.syncApplyArgs` / `planArgs` / `validateArgs` /
+  `assignArgs` / `seedArgs`, called by both the sheets and the client (no argv changed); `--context` appended once
+  per path (`argv(_:)` at run time, `AppModel.previewArgv(_:)` in a preview). Contract tests hold each builder
+  against the argv a tapped runner actually received.
+- [x] **Surfaces** — `CommandPreview` in the Apply / Verify Configs / Assign sheets, `$ abctl …` and
+  `→ exit 0 in 2.4s` inline in the GitOps progress logs, a **Command Log** sidebar page (per-row copy, Copy All as
+  Script, Clear, empty state) and the connection footer's last-command line. Read-only lists get none by design.
+- [ ] Click through on macOS: watch the Apply preview rewrite itself as prune/limit/refresh/verify move, check the
+  footer's command line doesn't crowd the connection dot, and paste a copied `sync`/`validate` snippet into a
+  terminal against a real seeded tree (the tests cover argv and rendering, not layout).
+
 ## Later — enterprise polish
 - [ ] **`--platform business|school`** (Apple School Manager uses `api-school` + `school.api`).
 - [ ] `log/slog` structured logging + `--verbose`.
@@ -141,6 +211,10 @@ truth.
 - Do not enable the hidden VPP commands as a supported feature and do not add a GUI toggle. A content token
   connects an external MDM to an organizational unit; Apple warns that using an external token for the primary
   organization alongside built-in management can cause license inventory and app-assignment failures.
+- Apple explicitly permits an external service to use a token from an additional organizational unit with
+  transferred unassigned licenses. That supported coexistence mechanism corrects the overbroad idea that all
+  external MDM use is blocked, but it remains outside `abctl` by product decision. One client must own each
+  token/pool; never race an existing MDM or assume a secondary pool feeds built-in Blueprint installation.
 - Keep the existing implementation quarantined as developer/reference code for now. Manage apps through the
   modern Apple Business API catalog and Blueprint app relationships. Revisit removal of the hidden code before
   1.0; revisit product support only if the goal explicitly expands to external-MDM organizational units.

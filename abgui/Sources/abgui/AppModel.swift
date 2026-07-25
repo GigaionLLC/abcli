@@ -75,6 +75,49 @@ final class AppModel {
     var needsSeed = false  // workspace chosen but has no gitops/ tree yet → offer to initialize
     var isSeeding = false  // `abctl seed` in flight
 
+    // Pre-flight verification of the local gitops/ profiles (`abctl validate --json`). Reads
+    // files only — no tenant call, no credentials — so it can run before anything is synced.
+    var validationReport: ValidationReport?
+    var isValidating = false
+    var validationError: String?
+    var lastValidatedAt: Date?
+
+    /// A short-lived, user-visible notice (banner). Posted when a consequential setting
+    /// changes, so a flip of Git-source-of-truth is never silent.
+    struct Notice: Identifiable, Equatable {
+        enum Kind: Equatable { case info, success, warning }
+        let id = UUID()
+        let kind: Kind
+        let title: String
+        let message: String
+    }
+
+    /// The one notice on screen; a newer post replaces an older one (banners don't stack).
+    var notice: Notice?
+
+    func post(_ notice: Notice) { self.notice = notice }
+
+    /// Dismiss by id, so a banner's auto-dismiss timer can't retire a NEWER notice that
+    /// replaced it while the timer was still running.
+    func dismissNotice(_ id: UUID) {
+        if notice?.id == id { notice = nil }
+    }
+
+    /// Flip the Git-source-of-truth mode and announce what it now means. The CONFIRMATION
+    /// is the caller's job (GitSourceOfTruthControl) — this is the committed change.
+    func setGitSourceOfTruth(_ enabled: Bool) {
+        gitSourceOfTruth = enabled
+        if enabled {
+            post(Notice(kind: .warning,
+                        title: "Git source of truth is ON",
+                        message: "gitops/ is now the complete desired state. Apply will change Apple Business to match your repo — configurations that exist only in Apple are deleted and removed blueprint members are detached."))
+        } else {
+            post(Notice(kind: .info,
+                        title: "Git source of truth is OFF",
+                        message: "Sync is additive and newest-wins. Configurations that exist only in Apple are pulled into gitops/ instead of deleted, and nothing is removed unless you enable \"Allow deletes / detaches\"."))
+        }
+    }
+
     // Per-screen UI state
     var isLoading = false
     var loadError: String?
@@ -100,15 +143,124 @@ final class AppModel {
         lastWriteError = nil
     }
 
+    // MARK: the command trail — every abctl invocation abgui has made this session
+    //
+    // abgui is a thin facade over the CLI, so this doubles as the answer to "how would I do
+    // that in a terminal?": the Command Log replays it, the GitOps screens narrate it inline,
+    // and the sheets preview it before they run it. Nothing here is instrumented per callsite —
+    // `makeClient` wraps the runner in a `RecordingRunner`, so every verb is captured for free.
+
+    /// Newest LAST (append order), capped like the progress logs so a long session can't grow
+    /// unbounded. Records arrive already redacted — a secret cannot reach this array.
+    var commands: [CommandRecord] = []
+
+    /// The most recent invocation — what the footer shows as "the last thing abgui ran".
+    var lastCommand: CommandRecord? { commands.last }
+
+    private static let commandLimit = 200
+
+    func recordCommandStart(_ record: CommandRecord) {
+        commands.append(record)
+        if commands.count > Self.commandLimit { commands.removeFirst(commands.count - Self.commandLimit) }
+    }
+
+    /// Stamp the terminal status and hand the finished record back, so the caller can narrate
+    /// `→ exit 0 in 2.4s` from `CommandRecord.finishLogLine` instead of re-deriving that text.
+    /// nil means the record already aged out of the cap (or never started) — nothing to say.
+    @discardableResult
+    func recordCommandFinish(_ id: UUID, _ status: CommandRecord.Status) -> CommandRecord? {
+        guard let index = commands.lastIndex(where: { $0.id == id }) else { return nil }
+        commands[index].finishedAt = Date()
+        commands[index].status = status
+        return commands[index]
+    }
+
+    func clearCommands() { commands = [] }
+
+    /// The argv a preview should DISPLAY: a pure builder's output plus the `--context` suffix the
+    /// run appends. Previews route through here so the line on screen names the same connection
+    /// the real run will use — a preview that silently dropped `--context` would be a command the
+    /// administrator could paste and have hit the wrong tenant.
+    ///
+    /// The suffix itself comes from `AbctlClient.contextSuffixed` — the very function the client's
+    /// private `argv(_:)` calls — rather than a second copy of the rule here, so the preview and
+    /// the execution cannot disagree about the tail (or about empty meaning "omit it").
+    func previewArgv(_ base: [String]) -> [String] {
+        AbctlClient.contextSuffixed(base, context: context)
+    }
+
     // Write state (v2)
     var isWriting = false
     var lastWriteError: String?
 
+    /// Which GitOps transcript a client narrates into. The `$ …` command lines and abctl's own
+    /// stderr have to share ONE log or a screen shows two half-stories side by side, so this
+    /// picks both sinks at once — they cannot be wired to different logs by mistake.
+    private enum Narration: Sendable { case silent, progress, apply }
+
+    /// The line sink for a channel — deliberately the very appenders the stderr stream uses, so
+    /// `$ abctl diff …`, abctl's narration and `→ exit 0 in 2.4s` interleave into one transcript
+    /// in real time. `.silent` (the default) still RECORDS the command; it just doesn't narrate,
+    /// which is right for the list screens that have no progress log to narrate into.
+    ///
+    /// This is the STDERR sink (it is handed to `ProcessRunner`, which calls it off the main
+    /// thread and therefore needs the hop each closure performs). The command's own `$ …` / `→ …`
+    /// lines do NOT go through it — see `narrate(_:into:)`.
+    private func commandSink(into narration: Narration) -> (@Sendable (String) -> Void)? {
+        switch narration {
+        case .silent: return nil
+        case .progress: return progressSink
+        case .apply: return applyProgressSink
+        }
+    }
+
+    /// Append a command's own transcript line to the log that channel narrates into. Already ON
+    /// the main actor, so it appends DIRECTLY rather than routing through `commandSink`, whose
+    /// closures each wrap their append in another `Task { @MainActor }`.
+    ///
+    /// That second hop is not cosmetic: it would push `→ exit 0 in 2.4s` a full main-actor job
+    /// PAST the state change it describes — after `isLoading`/`isSeeding` flip (so the GitOps
+    /// progress log is torn down before the line lands) and after the next run's
+    /// `progressLog = []` (so it reappears at the TOP of the following transcript). Appending
+    /// here keeps the line in the same turn as `recordCommandFinish`, which is the only ordering
+    /// that reads truthfully.
+    private func narrate(_ line: String, into narration: Narration) {
+        switch narration {
+        case .silent: break
+        case .progress: appendProgress(line)
+        case .apply: appendApplyProgress(line)
+        }
+    }
+
     /// Build a client for the current context + workspace, or nil if abctl isn't found.
-    /// Pass `onProgress` to stream abctl's stderr narration (used by diff/seed for live progress).
-    private func makeClient(onProgress: (@Sendable (String) -> Void)? = nil) -> AbctlClient? {
+    /// `narrating` streams abctl's stderr AND the command's own `$ …` / `→ …` lines into one of
+    /// the GitOps progress logs (used by diff/seed/apply for live progress).
+    ///
+    /// Every client records what it runs: the `ProcessRunner` is wrapped in a `RecordingRunner`,
+    /// which is why the Command Log needs no per-verb code and picks up verbs added later.
+    private func makeClient(narrating narration: Narration = .silent) -> AbctlClient? {
         guard let binary = AbctlLocator.resolve() else { return nil }
-        var client = AbctlClient(runner: ProcessRunner(executable: binary, onStderrLine: onProgress))
+        let transcript = commandSink(into: narration)
+        let process = ProcessRunner(executable: binary, onStderrLine: transcript)
+        // The recorder's sinks fire off the main thread (its documented contract), so each hops
+        // back itself — the same shape as progressSink/applyProgressSink below.
+        let runner = RecordingRunner(
+            wrapping: process,
+            onStart: { [weak self] record in
+                Task { @MainActor in
+                    guard let self else { return }
+                    self.recordCommandStart(record)
+                    self.narrate(record.startLogLine, into: narration)
+                }
+            },
+            onFinish: { [weak self] id, status in
+                Task { @MainActor in
+                    // No record (aged out of the cap) means there is nothing truthful to print.
+                    guard let self, let record = self.recordCommandFinish(id, status) else { return }
+                    self.narrate(record.finishLogLine, into: narration)
+                }
+            })
+        var client = AbctlClient(runner: runner)
         client.context = context.isEmpty ? nil : context
         client.repoRoot = repoRoot
         return client
@@ -134,6 +286,11 @@ final class AppModel {
         archiveEntries = []
         needsSeed = false // recomputed by loadPlan
         loadError = nil
+        // A new workspace's verification state is unknown — never carry the last folder's
+        // green light over to files nobody has checked.
+        validationReport = nil
+        validationError = nil
+        lastValidatedAt = nil
         UserDefaults.standard.set(url.path, forKey: Self.workspaceKey)
     }
 
@@ -176,13 +333,17 @@ final class AppModel {
 
     /// Reconcile the tenant to the workspace git state. Returns true on a clean apply.
     func apply(prune: Bool, limitWrites: Int?) async -> Bool {
-        guard let client = makeClient(onProgress: applyProgressSink) else {
+        guard let client = makeClient(narrating: .apply) else {
             lastWriteError = "abctl was not found in the app bundle."
             return false
         }
         isWriting = true
         lastWriteError = nil
         applyResult = nil
+        // Same ordering rule as loadPlan: reset here, above the await, so the `$ abctl sync
+        // --apply …` and `→ exit 0 in 12.3s` lines the recorder emits from inside syncApply(...)
+        // land after it — and, because the finish line is appended on the recorder's own
+        // main-actor turn, before the outcome rows below rather than trailing them.
         applyProgressLog = []
         appendApplyProgress("starting sync --apply")
         if let plan {
@@ -196,7 +357,9 @@ final class AppModel {
             }
         }
         do {
-            let result = try await client.syncApply(prune: prune || gitSourceOfTruth,
+            // The raw toggle: `AbctlClient.syncApplyArgs` is what forces --prune on under
+            // git-as-truth, so this callsite (and ApplySheet's preview of it) never re-derives it.
+            let result = try await client.syncApply(prune: prune,
                                                     limitWrites: limitWrites,
                                                     gitSourceOfTruth: gitSourceOfTruth,
                                                     refresh: refreshMode,
@@ -368,7 +531,11 @@ final class AppModel {
     func loadConfigurations() async { await run { self.configurations = try await $0.configurations() } }
     func loadBlueprints() async { await run { self.blueprints = try await $0.blueprints() } }
 
-    func loadPlan() async {
+    /// Compute the 3-way plan. `resetLog: false` keeps whatever is already in `progressLog` and
+    /// appends this run's transcript underneath it — the seed → diff hand-off, where wiping the
+    /// log would throw away the `$ abctl seed` / `→ exit 0` lines the user just watched scroll by
+    /// (the seed and the diff it triggers are one operation from the screen's point of view).
+    func loadPlan(resetLog: Bool = true) async {
         // Fast pre-flight: diff resolves the tree at <workspace>/gitops. If that's absent, the
         // folder isn't a GitOps workspace yet — surface the "needs seed" state (DiffView offers
         // to initialize it) instead of waiting out a network diff that has nothing to compare.
@@ -379,13 +546,16 @@ final class AppModel {
             return
         }
         needsSeed = false
-        guard let client = makeClient(onProgress: progressSink) else {
+        guard let client = makeClient(narrating: .progress) else {
             loadError = "abctl was not found in the app bundle."
             return
         }
         isLoading = true
         loadError = nil
-        progressLog = []
+        // Clearing the log MUST stay above the await: both transcript lines are emitted from
+        // inside client.plan(...) on later main-actor hops, so this reset can only ever run
+        // before them, never wipe them.
+        if resetLog { progressLog = [] }
         defer { isLoading = false }
         do {
             plan = try await client.plan(gitSourceOfTruth: gitSourceOfTruth, refresh: refreshMode)
@@ -408,13 +578,13 @@ final class AppModel {
     /// live, writes local files), then compute drift. This is what turns a plain folder into a
     /// GitOps workspace from inside the app. Returns true on success.
     func seedWorkspace() async -> Bool {
-        guard repoRoot != nil, let client = makeClient(onProgress: progressSink) else {
+        guard repoRoot != nil, let client = makeClient(narrating: .progress) else {
             loadError = "Choose a workspace folder first."
             return false
         }
         isSeeding = true
         loadError = nil
-        progressLog = []
+        progressLog = [] // before the await, so the seed's own transcript survives it (see loadPlan)
         do {
             _ = try await client.seed()
         } catch is CancellationError {
@@ -427,7 +597,10 @@ final class AppModel {
         }
         isSeeding = false
         needsSeed = false
-        await loadPlan() // tree exists now → drift (a fresh seed should read back in sync)
+        // tree exists now → drift (a fresh seed should read back in sync). The log is NOT reset:
+        // the seed's `$ abctl seed` / `→ exit 0` lines and the diff's belong to one transcript,
+        // and clearing here would erase the command the user just ran the instant it finished.
+        await loadPlan(resetLog: false)
         return true
     }
 
@@ -436,6 +609,44 @@ final class AppModel {
         var isDir: ObjCBool = false
         let path = root.appendingPathComponent("gitops", isDirectory: true).path
         return FileManager.default.fileExists(atPath: path, isDirectory: &isDir) && isDir.boolValue
+    }
+
+    /// Run `abctl validate --json` against the workspace: the local, credential-free check of
+    /// gitops/lib/ plus the blueprint references that point at it, meant to run BEFORE a sync
+    /// pushes a broken profile to Apple. Returns true when the report is clean.
+    /// Owns its own busy/error state (like the inspect sheets) so verifying never blanks the
+    /// diff screen's spinner or overwrites its error.
+    @discardableResult
+    func validateProfiles() async -> Bool {
+        guard repoRoot != nil else {
+            validationError = "Choose a GitOps workspace folder first."
+            return false
+        }
+        guard let client = makeClient() else {
+            validationError = "abctl was not found in the app bundle."
+            return false
+        }
+        isValidating = true
+        validationError = nil
+        defer { isValidating = false }
+        do {
+            let report = try await client.validateProfiles()
+            validationReport = report
+            lastValidatedAt = Date() // stamped on every completed check, clean or not
+            return report.ok
+        } catch is CancellationError {
+            return false // sheet dismissed / cancelled — the last good report stands
+        } catch {
+            if Task.isCancelled { return false } // a race: cancelled just after abctl returned
+            // A check that failed to complete leaves the verification state UNKNOWN, not
+            // "whatever it was last time": keeping the old report would render a green
+            // "Verified" row (and hold Apply's one-click path open) on the strength of a run
+            // that never produced a verdict. Same rule setWorkspace(_:) follows.
+            validationReport = nil
+            lastValidatedAt = nil
+            validationError = error.localizedDescription
+            return false
+        }
     }
 
     /// The currently-loaded rows for a read-only resource.
@@ -632,3 +843,6 @@ final class AppModel {
         if generation == loadGeneration { isLoading = false }
     }
 }
+
+/// The model owns the notice type; the banner that renders it spells it plainly.
+typealias Notice = AppModel.Notice

@@ -49,15 +49,6 @@ func newSeedCmd() *cobra.Command {
 	return c
 }
 
-func newValidateCmd() *cobra.Command {
-	return &cobra.Command{
-		Use:   "validate",
-		Short: "Validate the gitops/ profiles ($ABCTL_VALIDATOR, else a built-in check)",
-		Args:  cobra.NoArgs,
-		RunE:  func(*cobra.Command, []string) error { return runValidate() },
-	}
-}
-
 func newDiffCmd() *cobra.Command {
 	var asJSON, exitOnDiff, gitSourceOfTruth bool
 	var refresh string
@@ -485,55 +476,6 @@ func managedList(names []string) *[]string {
 		names = []string{}
 	}
 	return &names
-}
-
-func runValidate() error {
-	cfg, err := config.Load()
-	if err != nil {
-		return err
-	}
-	t := gitops.NewTree(cfg.EnvDir)
-	files, _ := filepath.Glob(filepath.Join(t.LibDir, "*.mobileconfig"))
-	if len(files) == 0 {
-		fmt.Println("no profiles in", rel(t.LibDir), "(run `abctl seed` first)")
-		return nil
-	}
-	if v := resolveValidator(); len(v) > 0 {
-		cmd := exec.Command(v[0], append(append([]string{}, v[1:]...), t.LibDir)...)
-		cmd.Stdout, cmd.Stderr = os.Stdout, os.Stderr
-		if err := cmd.Run(); err != nil {
-			if ee, ok := err.(*exec.ExitError); ok {
-				return ExitError{Code: ee.ExitCode()}
-			}
-			return err
-		}
-		return nil
-	}
-	bad := 0
-	for _, f := range files {
-		b, _ := os.ReadFile(f)
-		s := string(b)
-		switch {
-		case len(b) >= 1<<20:
-			fmt.Printf("FAIL %s: >= 1 MB (ABM cap)\n", filepath.Base(f))
-			bad++
-		case !strings.Contains(s, "<key>PayloadType</key>") || !strings.Contains(s, "Configuration") || !strings.Contains(s, "PayloadContent"):
-			fmt.Printf("FAIL %s: missing Configuration/PayloadContent structure\n", filepath.Base(f))
-			bad++
-		}
-	}
-	fmt.Printf("%d profile(s): %d ok, %d failed (built-in check; set $ABCTL_VALIDATOR for deep validation)\n", len(files), len(files)-bad, bad)
-	if bad > 0 {
-		return ExitError{Code: 1}
-	}
-	return nil
-}
-
-func resolveValidator() []string {
-	if v := os.Getenv("ABCTL_VALIDATOR"); v != "" {
-		return strings.Fields(v)
-	}
-	return nil
 }
 
 func validateRefreshMode(mode string) error {

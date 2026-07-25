@@ -1,0 +1,288 @@
+// Copyright 2026 Gigaion, LLC
+// SPDX-License-Identifier: AGPL-3.0-or-later
+import SwiftUI
+import AppKit
+
+/// "Here is the abctl command this button will run." A monospaced, selectable line with a copy
+/// button — the GUI teaching its own CLI, sitting next to the controls that compose it.
+///
+/// It is reference material, not a control: quiet, uncoloured, and never the thing the eye lands
+/// on first. The text comes from `CommandFormatter`, the same function that renders the progress
+/// logs and the Command Log, and `argv` must come from an `AbctlClient` argv builder — a preview
+/// that re-spells the flags by hand is exactly the drift this whole surface exists to prevent.
+struct CommandPreview: View {
+    let argv: [String]
+    var cwd: URL? = nil
+    var stdin: CommandRecord.Stdin = .none
+    var caption: String? = nil
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Text("Equivalent CLI")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                Spacer(minLength: 0)
+                CommandCopyButton(text: script, help: copyHelp)
+            }
+            // Shown as it actually executes (`-f -` and all) — the copy button is where the
+            // paste-able rewrite lives, so what is displayed stays literally true.
+            Text(CommandFormatter.line(argv))
+                .font(.system(.caption, design: .monospaced))
+                .textSelection(.enabled)
+                .lineLimit(nil)
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            if let detail {
+                Text(detail)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .padding(8)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(.quaternary, in: RoundedRectangle(cornerRadius: 6))
+    }
+
+    /// The copy form: the `cd` that makes a tree-relative command correct plus, for a
+    /// stdin-fed profile, a real file path in place of `-f -`.
+    private var script: String {
+        CommandFormatter.script(argv: argv, cwd: cwd, stdin: stdin)
+    }
+
+    private var copyHelp: String {
+        cwd == nil ? "Copy this command to the clipboard."
+                   : "Copy this command, with the cd into the workspace, to the clipboard."
+    }
+
+    /// One quiet line underneath: the caller's explanation, which directory the command is
+    /// relative to, and — when abgui pipes the profile in — why `-f -` can't be pasted as-is.
+    private var detail: String? {
+        var parts: [String] = []
+        if let caption, !caption.isEmpty { parts.append(caption) }
+        if let cwd { parts.append("Runs in \(cwd.lastPathComponent); the copied form includes the cd.") }
+        if case .profile = stdin {
+            parts.append("abgui sends the profile on stdin (-f -); the copied form reads it from a file instead.")
+        }
+        return parts.isEmpty ? nil : parts.joined(separator: " ")
+    }
+}
+
+/// The session's abctl transcript: every command abgui ran, newest first, in a form that can be
+/// pasted into Terminal. abgui is a thin facade over the CLI, so this page is both an audit trail
+/// ("what did it just do to my tenant?") and the migration path for an administrator who would
+/// rather script it.
+struct CommandLogView: View {
+    @Environment(AppModel.self) private var model
+
+    /// Newest first on screen — the command you are looking for is almost always the last one
+    /// you triggered. `AppModel.commands` is stored oldest-first, and the Copy All script keeps
+    /// that order: a transcript only reproduces the session if it runs in the order it ran.
+    private var rows: [CommandRecord] { Array(model.commands.reversed()) }
+
+    var body: some View {
+        content
+            .navigationTitle("Command Log")
+            .toolbar {
+                CommandCopyButton(text: Self.combinedScript(model.commands),
+                                  title: "Copy All as Script",
+                                  showsTitle: true,
+                                  help: "Copy every recorded command, oldest first, as one paste-able shell snippet.")
+                    .disabled(model.commands.isEmpty)
+                Button { model.clearCommands() } label: { Label("Clear", systemImage: "trash") }
+                    .disabled(model.commands.isEmpty)
+                    .help("Forget the recorded commands. This empties abgui's list only — nothing on the tenant or on disk changes.")
+            }
+    }
+
+    @ViewBuilder private var content: some View {
+        if model.commands.isEmpty {
+            ContentUnavailableView {
+                Label("No commands yet", systemImage: "terminal")
+            } description: {
+                Text("Every abctl command abgui runs is recorded here — with its working directory, "
+                     + "exit code and duration — so you can reproduce it in a terminal. "
+                     + "Run a diff, a validate or a sync and it will show up.")
+            }
+        } else {
+            VStack(alignment: .leading, spacing: 0) {
+                // Non-literal String on purpose: a Text string LITERAL is parsed as Markdown,
+                // which would eat the **** in the redaction example.
+                Text(explainer)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .textSelection(.enabled)
+                    .padding([.horizontal, .top])
+                    .padding(.bottom, 6)
+                List {
+                    ForEach(rows) { record in
+                        CommandLogRow(record: record)
+                    }
+                }
+                .listStyle(.inset)
+            }
+        }
+    }
+
+    /// Scoped deliberately to what redaction actually guarantees. Credentials are the only thing
+    /// stripped: a recorded command still names the tenant's client id, the private key's path,
+    /// device serial numbers, user email addresses and the workspace path — so promising that
+    /// "anything here is safe to paste into a ticket" would be endorsing sending tenant
+    /// identifiers and end-user PII to a third party on the strength of a narrower guarantee.
+    private var explainer: String {
+        "abgui is a front end for abctl: these are the exact commands it ran, newest first. "
+            + "Credentials are redacted before a command is recorded (--vpp-token ****). Commands "
+            + "still name your connection, configurations and devices, so review one before sharing "
+            + "it. A -f - means abgui piped the profile in on stdin; copying a command rewrites that "
+            + "to a file path so it runs unattended."
+    }
+
+    /// Every recorded command as one snippet, oldest first — a transcript, not a list. When all
+    /// of them shared a working directory the `cd` is hoisted to a single line at the top;
+    /// otherwise each command keeps its own, because a tree-relative abctl command run from the
+    /// wrong directory doesn't fail, it silently works on someone else's gitops/ tree.
+    static func combinedScript(_ records: [CommandRecord]) -> String {
+        guard !records.isEmpty else { return "" }
+        let dirs = Set(records.compactMap(\.cwd))
+        if dirs.count == 1, let shared = dirs.first, records.allSatisfy({ $0.cwd != nil }) {
+            let commands = records.map { CommandFormatter.script(argv: $0.argv, cwd: nil, stdin: $0.stdin) }
+            return (["cd \(CommandFormatter.quote(shared.path))"] + commands).joined(separator: "\n\n")
+        }
+        return records.map(\.script).joined(separator: "\n\n")
+    }
+}
+
+/// One recorded invocation: how it ended, what it was, and enough context to tell two otherwise
+/// identical lines apart. The command itself is monospaced and selectable and wraps rather than
+/// truncating — a `sync` line with a dozen flags is precisely the one worth reading in full.
+private struct CommandLogRow: View {
+    let record: CommandRecord
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 10) {
+            statusIcon
+                .frame(width: 16)
+                // Symbol + tint are the entire outcome for this row, so it has to be spoken.
+                .accessibilityLabel(Text(record.statusText))
+            VStack(alignment: .leading, spacing: 3) {
+                Text(record.commandLine)
+                    .font(.system(.caption, design: .monospaced))
+                    .textSelection(.enabled)
+                    .lineLimit(nil)
+                    .fixedSize(horizontal: false, vertical: true)
+                Text(metadata)
+                    .font(.caption2)
+                    .foregroundStyle(record.isFailure ? Color.red : Color.secondary)
+                    .textSelection(.enabled)
+            }
+            Spacer(minLength: 0)
+            CommandCopyButton(text: record.script,
+                              help: record.cwd == nil
+                                  ? "Copy this command to the clipboard."
+                                  : "Copy this command, with the cd into the workspace, to the clipboard.")
+        }
+        .padding(.vertical, 4)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .contextMenu {
+            Button("Copy command") { CommandClipboard.copy(record.commandLine) }
+            Button("Copy with cd") { CommandClipboard.copy(record.script) }
+        }
+    }
+
+    @ViewBuilder private var statusIcon: some View {
+        switch record.status {
+        case .running:
+            ProgressView().controlSize(.small)
+        case .succeeded:
+            Image(systemName: "checkmark.circle").foregroundStyle(Color.green)
+        case .failed:
+            Image(systemName: "xmark.circle").foregroundStyle(Color.red)
+        case .timedOut:
+            // abgui's own watchdog fired — a distinct outcome from a non-zero exit, since the
+            // command may well still have changed something before we stopped waiting.
+            Image(systemName: "clock.badge.exclamationmark").foregroundStyle(Color.red)
+        case .cancelled:
+            Image(systemName: "slash.circle").foregroundStyle(Color.secondary)
+        }
+    }
+
+    /// Time · outcome · duration · workspace · stdin. The workspace is load-bearing, not
+    /// decoration: the same `abctl sync` line means something different in another folder.
+    private var metadata: String {
+        var parts = [record.startedAt.formatted(date: .omitted, time: .standard), record.statusText]
+        if let duration = record.durationText { parts.append(duration) }
+        if let cwd = record.cwd { parts.append(cwd.lastPathComponent) }
+        if case .profile(let bytes) = record.stdin { parts.append("profile on stdin (\(bytes) bytes)") }
+        return parts.joined(separator: " · ")
+    }
+}
+
+/// The copy affordance shared by the preview, the log rows and the toolbar. It copies the SCRIPT
+/// form — the one carrying the `cd` and the stdin note — because a command copied without its
+/// working directory doesn't fail, it quietly runs somewhere else. Clicking flips it to a
+/// checkmark for a moment: without that, a copy button gives no evidence it did anything.
+struct CommandCopyButton: View {
+    let text: String
+    var title = "Copy"
+    var showsTitle = false
+    var help = "Copy to the clipboard."
+
+    /// When the last copy happened; nil once the confirmation has been withdrawn. A Date (not a
+    /// Bool) so a second click re-arms the `.task(id:)` timer instead of inheriting the first
+    /// click's remaining time.
+    @State private var copiedAt: Date?
+
+    private var copied: Bool { copiedAt != nil }
+
+    var body: some View {
+        styled
+            .help(help)
+            // Icon-only in most placements, and VoiceOver would otherwise read the symbol name.
+            .accessibilityLabel(Text(copied ? "Copied" : title))
+            .task(id: copiedAt) {
+                guard copiedAt != nil else { return }
+                try? await Task.sleep(for: .seconds(1.5))
+                guard !Task.isCancelled else { return }
+                copiedAt = nil
+            }
+    }
+
+    /// Bordered where it is a real toolbar action; plain and unobtrusive where it sits inside
+    /// reference material, which must not look like the primary thing to click.
+    @ViewBuilder private var styled: some View {
+        if showsTitle {
+            button
+        } else {
+            button
+                .buttonStyle(.plain)
+                .controlSize(.small)
+                .foregroundStyle(copied ? Color.green : Color.secondary)
+        }
+    }
+
+    private var button: some View {
+        Button {
+            CommandClipboard.copy(text)
+            copiedAt = Date()
+        } label: {
+            if showsTitle {
+                Label(copied ? "Copied" : title, systemImage: copied ? "checkmark" : "doc.on.doc")
+            } else {
+                Image(systemName: copied ? "checkmark" : "doc.on.doc")
+            }
+        }
+    }
+}
+
+/// The one place abgui writes to the pasteboard. `clearContents()` first is mandatory — without
+/// it the new string is added alongside whatever types are already on the board, and a paste can
+/// come back as the previous copy.
+enum CommandClipboard {
+    static func copy(_ text: String) {
+        let board = NSPasteboard.general
+        board.clearContents()
+        _ = board.setString(text, forType: .string)
+    }
+}
