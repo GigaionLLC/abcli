@@ -132,25 +132,14 @@ struct DiffView: View {
         VStack(spacing: 12) {
             ProgressView(title)
             if !model.progressLog.isEmpty {
-                ScrollViewReader { proxy in
-                    ScrollView {
-                        VStack(alignment: .leading, spacing: 2) {
-                            ForEach(model.progressLog.indices, id: \.self) { idx in
-                                Text(model.progressLog[idx])
-                                    .font(.system(.caption, design: .monospaced))
-                                    .foregroundStyle(.secondary)
-                                    .frame(maxWidth: .infinity, alignment: .leading)
-                                    .id(idx)
-                            }
-                        }
-                        .padding(8)
-                    }
-                    .frame(maxWidth: 460, maxHeight: 160)
-                    .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 6))
-                    .onChange(of: model.progressLog.count) { _, count in
-                        if count > 0 { withAnimation { proxy.scrollTo(count - 1, anchor: .bottom) } }
-                    }
-                }
+                // The same transcript component the Apply sheet uses: one selectable string,
+                // a Copy button, a visible scroller and a way to grow it. The per-line Text
+                // stack that used to live here could not be selected across lines at all — and
+                // this is the pane the user watches while a slow diff or seed runs.
+                TranscriptView(title: "Progress",
+                               lines: model.progressLog,
+                               logURL: model.lastRunLogURL)
+                    .frame(maxWidth: 460)
             }
             Button("Cancel") { model.cancelWork() }
                 .buttonStyle(.bordered)
@@ -222,6 +211,9 @@ struct DiffView: View {
                 }
             }
         }
+        // macOS hides the overlay scroller until you scroll, which makes a long plan look like it
+        // ends at the fold — the same defect the sync sheet was reported for.
+        .scrollIndicators(.visible)
     }
 
     private func planSummary(_ plan: Plan) -> String {

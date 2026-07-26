@@ -116,12 +116,27 @@ struct CommandLogView: View {
                     .textSelection(.enabled)
                     .padding([.horizontal, .top])
                     .padding(.bottom, 6)
-                List {
-                    ForEach(rows) { record in
-                        CommandLogRow(record: record)
+                // ScrollView + VStack, NOT List. These rows wrap: monospaced command text with
+                // .fixedSize(vertical:) inside a .frame(maxWidth: .infinity). A macOS List asks a
+                // self-sizing row for its height at an unbounded width, and that combination
+                // cycles — the window stops rendering and the app has to be relaunched (it hangs
+                // rather than crashing, so there is no report to find afterwards). Every other
+                // wrapping surface here (ApplySheet's results and log panes, DiffView's plan rows)
+                // uses this pattern for the same reason; the two List screens pass a collection
+                // directly and have fixed-height rows. `commands` is capped at 200, so a plain
+                // VStack is cheap and keeps this identical to the panes that are known to work.
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 0) {
+                        ForEach(rows) { record in
+                            CommandLogRow(record: record)
+                            Divider()
+                        }
                     }
+                    .padding(.horizontal)
                 }
-                .listStyle(.inset)
+                // Indicators stay hidden until you scroll on macOS, which makes a full log look
+                // like it has nothing below the fold.
+                .scrollIndicators(.visible)
             }
         }
     }
@@ -224,10 +239,23 @@ private struct CommandLogRow: View {
 /// working directory doesn't fail, it quietly runs somewhere else. Clicking flips it to a
 /// checkmark for a moment: without that, a copy button gives no evidence it did anything.
 struct CommandCopyButton: View {
-    let text: String
+    /// `@autoclosure @escaping`, so the string is built when the button is CLICKED rather than on
+    /// every view update. The toolbar's "Copy All as Script" concatenates every recorded command;
+    /// evaluating that eagerly rebuilt the whole transcript on each render of the page.
+    private let makeText: () -> String
     var title = "Copy"
     var showsTitle = false
     var help = "Copy to the clipboard."
+
+    init(text: @autoclosure @escaping () -> String,
+         title: String = "Copy",
+         showsTitle: Bool = false,
+         help: String = "Copy to the clipboard.") {
+        self.makeText = text
+        self.title = title
+        self.showsTitle = showsTitle
+        self.help = help
+    }
 
     /// When the last copy happened; nil once the confirmation has been withdrawn. A Date (not a
     /// Bool) so a second click re-arms the `.task(id:)` timer instead of inheriting the first
@@ -264,7 +292,7 @@ struct CommandCopyButton: View {
 
     private var button: some View {
         Button {
-            CommandClipboard.copy(text)
+            CommandClipboard.copy(makeText())
             copiedAt = Date()
         } label: {
             if showsTitle {

@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -111,7 +112,10 @@ func newSyncCmd() *cobra.Command {
 			"unless --yes (or $ABCTL_APPROVE) is set. --prune (off by default) allows deleting live\n" +
 			"configs removed from git and detaching blueprint members removed from git;\n" +
 			"--limit-writes N caps tenant writes as a circuit breaker. --git-source-of-truth treats\n" +
-			"gitops/ as the complete desired state and applies/deletes so Apple matches it.",
+			"gitops/ as the complete desired state and applies/deletes so Apple matches it.\n" +
+			"After --apply the configs just written are read back from Apple and compared to git\n" +
+			"(--verify; a mismatch is reported and exits 1) — a 2xx write response alone does not\n" +
+			"prove Apple persisted the profile.",
 		Args: cobra.NoArgs,
 		RunE: func(*cobra.Command, []string) error { return runSync(fl) },
 	}
@@ -125,7 +129,8 @@ func newSyncCmd() *cobra.Command {
 	c.Flags().StringVar(&fl.platforms, "platforms", "", "comma-separated configuredForPlatforms for created configs (default PLATFORM_MACOS)")
 	c.Flags().BoolVar(&fl.gitSourceOfTruth, "git-source-of-truth", false, "treat gitops/ as authoritative; apply implies --prune so Apple matches git")
 	c.Flags().StringVar(&fl.refresh, "refresh", refreshSmart, "live refresh mode: smart, full, metadata-only")
-	c.Flags().StringVar(&fl.verify, "verify", verifyTargeted, "post-apply verification: targeted, full, none")
+	c.Flags().StringVar(&fl.verify, "verify", verifyTargeted,
+		"post-apply verification: targeted (re-read just the configs written), full (re-read every config), none")
 	return c
 }
 
@@ -195,10 +200,13 @@ func runSync(fl syncFlags) error {
 		},
 		GitTime: gitTimeResolver(pc.tree),
 	}
-	// Phase 1: configs. Save the baseline even on partial success.
+	// Phase 1: configs. Save the baseline even on partial success. From here on the
+	// tenant has already changed, so EVERY failure exit goes through finishApply —
+	// the operator must get the receipt of what was written before the error.
 	res := eng.Apply(pc.plan, pc.desired, pc.live, pc.base, opts)
 	if err := pc.base.Save(pc.tree.StateFile); err != nil {
-		return fmt.Errorf("apply ran but saving the baseline failed (re-run sync to reconcile): %w", err)
+		return finishApply(machine, planFmt, res, nil, nil,
+			fmt.Errorf("apply ran but saving the baseline failed (re-run sync to reconcile): %w", err))
 	}
 
 	// Phase 2: blueprint membership. Recompute with config IDs from the post-apply
@@ -215,16 +223,27 @@ func runSync(fl syncFlags) error {
 	}
 	nameByID := withCollection(pc.memberNameByID, ab.CollectionConfigurations, cfgNameByID)
 	idByName := withCollection(pc.memberIDByName, ab.CollectionConfigurations, cfgIDByName)
+
+	// Post-apply verification. A 2xx write response is NOT proof the bytes landed:
+	// Apple Business accepts a configuration PATCH and then silently declines to
+	// persist an out-of-spec profile (confirmed live — an outer PayloadVersion != 1,
+	// where the spec requires exactly 1, left the stored XML and updatedDateTime
+	// frozen while every run re-planned the identical change). So the writes are
+	// read back and compared to the desired bytes; the baseline can't answer this,
+	// since reconcile records it from the bytes we SENT.
+	written := writtenConfigs(res)
 	liveBPs := pc.liveBPs
+	var liveAfter []ab.LiveConfig
 	switch fl.verify {
 	case verifyFull:
 		fmt.Fprintln(os.Stderr, "post-apply verification: full live configuration and blueprint refresh...")
-		liveAfter, err := fetchLiveConfigsForPlan(pc.c, pc.desired, pc.base, fl.gitSourceOfTruth, refreshFull, func(line string) {
+		fetched, err := fetchLiveConfigsForPlan(pc.c, pc.desired, pc.base, fl.gitSourceOfTruth, refreshFull, func(line string) {
 			fmt.Fprintln(os.Stderr, "post-apply verification: "+line)
 		})
 		if err != nil {
-			return err
+			return finishApply(machine, planFmt, res, nil, nil, err)
 		}
+		liveAfter = fetched
 		for _, l := range liveAfter {
 			if l.ID != "" {
 				cfgIDByName[l.Name] = l.ID
@@ -233,33 +252,340 @@ func runSync(fl syncFlags) error {
 		}
 		liveBPs, err = fetchLiveBlueprintsForPlan(pc.c, pc.bpCollections, nameByID)
 		if err != nil {
-			return err
+			return finishApply(machine, planFmt, res, nil, nil, err)
 		}
 	case verifyTargeted:
-		fmt.Fprintln(os.Stderr, "post-apply verification: refreshing blueprint membership only...")
+		fmt.Fprintf(os.Stderr, "post-apply verification: %d of %d written configuration(s) confirmed during the apply; re-reading the rest + refreshing blueprint membership...\n",
+			confirmedCount(written), len(written))
 		var err error
 		liveBPs, err = fetchLiveBlueprintsForPlan(pc.c, pc.bpCollections, nameByID)
 		if err != nil {
-			return err
+			return finishApply(machine, planFmt, res, nil, nil, err)
 		}
 	case verifyNone:
-		fmt.Fprintln(os.Stderr, "post-apply verification: skipped by --verify=none.")
+		fmt.Fprintln(os.Stderr, "post-apply verification: the apply's own read-back still ran; this only skips the second look.")
 	}
+	// Costs, per mode, on top of the ONE read-back the apply already spent per config
+	// written (reconcile.push): full adds none — it diffs the refresh it had to fetch
+	// anyway; targeted adds one GET only for a write the apply could NOT confirm
+	// (normally zero); none adds none and reaches no verdict. --verify=none does not
+	// make the run silent about a dropped write — the apply itself still fails one.
+	mismatches := verifyApply(fl.verify, pc.c, written, pc.desired, pc.base, liveAfter, func(line string) {
+		fmt.Fprintln(os.Stderr, "post-apply verification: "+line)
+	})
+	reportVerification(os.Stderr, fl.verify, written, mismatches)
+
 	bpPlan := reconcile.ComputeBlueprints(pc.bpDesired, liveBPs, idByName)
 	bpRes := eng.ApplyBlueprints(bpPlan, opts, res.Writes)
 
+	var cause error
+	if len(mismatches) > 0 {
+		// git and the tenant do NOT agree — or could not be shown to agree — whatever
+		// the write responses said. Fail the run (after the receipt) so CI stops instead
+		// of looping on the same diff.
+		cause = ExitError{Code: 1}
+	}
+	return finishApply(machine, planFmt, res, bpRes, newVerificationReport(fl.verify, written, mismatches), cause)
+}
+
+// finishApply renders the apply receipt — the per-item table, or the machine-format
+// object under --json/-o — and only THEN returns the terminating error. Every
+// --apply exit path after eng.Apply goes through it: the tenant has already been
+// written to by that point, so a later failure (baseline save, a verification fetch,
+// a verification mismatch) must never swallow the record of WHAT was written. The
+// operator previously got a single error line and no way to tell which profiles had
+// changed. cause wins over the item-error exit code because it carries the diagnosis;
+// a nil cause falls back to the existing contract (exit 1 on any item error).
+//
+// ver is the machine-readable verification verdict (nil when the run ended before
+// verification could run) — without it, `--json` could describe a clean converge and
+// still exit 1, with the reason only in stderr prose.
+func finishApply(machine bool, planFmt string, res *reconcile.Result, bpRes *reconcile.BlueprintResult, ver *verificationReport, cause error) error {
+	if bpRes == nil { // the blueprint phase never ran — keep the machine shape stable
+		bpRes = &reconcile.BlueprintResult{Outcomes: []reconcile.BlueprintOutcome{}}
+	}
 	if machine {
-		if err := render(planFmt, map[string]any{"configs": res, "blueprints": bpRes}, nil, nil); err != nil {
-			return err
+		doc := map[string]any{"configs": res, "blueprints": bpRes}
+		if ver != nil { // absent only when the run died before verification could run
+			doc["verification"] = ver
+		}
+		if err := render(planFmt, doc, nil, nil); err != nil && cause == nil {
+			cause = err
 		}
 	} else {
 		printApplyResult(res)
 		printBlueprintResult(bpRes)
 	}
+	if cause != nil {
+		return cause
+	}
 	if res.Errors > 0 || bpRes.Errors > 0 {
 		return ExitError{Code: 1}
 	}
 	return nil
+}
+
+// verificationReport is the post-apply read-back as DATA — the third key of the
+// `--json` / `-o` receipt, next to configs and blueprints.
+//
+// Without it `sync --apply --json` could emit a document in which every outcome is
+// "done" and errors == 0 and then exit 1, leaving the reason nowhere a machine could
+// read it (the verdict was stderr prose only, which is why abgui had to grep stderr
+// for the word FAILED). Consumers that decode only the two older keys are unaffected.
+type verificationReport struct {
+	Mode       string           `json:"mode"`     // targeted | full | none
+	Written    int              `json:"written"`  // configs this run pushed to Apple
+	Verified   int              `json:"verified"` // of those, shown to match git (always 0 for mode "none")
+	Mismatches []verifyMismatch `json:"mismatches"`
+}
+
+// newVerificationReport pairs the verdict with the mode that produced it. An empty
+// (never nil) mismatch list keeps the JSON shape stable for a consumer that indexes
+// it, and "none" reports zero verified rather than claiming writes it never checked.
+func newVerificationReport(mode string, written []writtenConfig, mismatches []verifyMismatch) *verificationReport {
+	out := &verificationReport{Mode: mode, Written: len(written), Mismatches: []verifyMismatch{}}
+	if mismatches != nil {
+		out.Mismatches = mismatches
+	}
+	if mode != verifyNone {
+		out.Verified = len(written) - len(out.Mismatches)
+	}
+	return out
+}
+
+// configDetailReader is the read-back half of the tenant API that post-apply
+// verification needs (satisfied by *ab.Client) — an interface so the verifier is
+// unit-testable without a live tenant.
+type configDetailReader interface {
+	FetchCustomSettingDetail(id string) (ab.LiveConfig, error)
+}
+
+// verifyMismatch is one written config that could NOT be shown to match git after
+// the apply: its live bytes demonstrably differ, or they could not be read back at
+// all. An unverifiable write is deliberately not counted as a verified one.
+//
+// Observed separates those two: true means a difference was actually SEEN (the
+// stored hash differs, or the config is missing from the tenant), false means the
+// question went unanswered. Only the first justifies telling an operator their
+// profile did not land — see reportVerification.
+type verifyMismatch struct {
+	Name     string `json:"name"`
+	Detail   string `json:"detail"`
+	Observed bool   `json:"observed"`
+}
+
+// writtenConfig is one config this run PUSHED to Apple, carrying the verdict the
+// apply's own confirming read-back already reached for it, and the configuration id
+// the write used. Keeping the verdict is what stops post-apply verification from
+// fetching the same profile a second time; keeping the id is what lets it fetch the
+// ones the apply could NOT confirm — those have no baseline entry to look the id up
+// in, because reconcile deliberately does not record one for an unconfirmed write.
+type writtenConfig struct {
+	Name     string
+	ABMID    string
+	Verified reconcile.Verification
+}
+
+// writtenConfigs lists the configs this run actually PUSHED to Apple: completed
+// create/update outcomes only. pull/delete-git outcomes touch the git tree, not the
+// tenant, and a pruned config is gone by design — none of them have desired bytes
+// to read back.
+func writtenConfigs(res *reconcile.Result) []writtenConfig {
+	if res == nil {
+		return nil
+	}
+	out := make([]writtenConfig, 0, len(res.Outcomes))
+	for _, o := range res.Outcomes {
+		if o.Status == "done" && (o.Action == reconcile.Create || o.Action == reconcile.Update) {
+			out = append(out, writtenConfig{Name: o.Name, ABMID: o.ABMID, Verified: o.Verified})
+		}
+	}
+	return out
+}
+
+// confirmedCount reports how many writes the apply already read back and matched.
+func confirmedCount(written []writtenConfig) int {
+	n := 0
+	for _, w := range written {
+		if w.Verified == reconcile.VerifyConfirmed {
+			n++
+		}
+	}
+	return n
+}
+
+// verifyApply dispatches the post-apply read-back by mode: full compares the
+// written configs against the live refresh already fetched for id harvesting,
+// targeted re-reads the configs whose write is not already confirmed, none
+// verifies nothing.
+func verifyApply(mode string, r configDetailReader, written []writtenConfig, desired map[string][]byte, base *state.State, liveAfter []ab.LiveConfig, progress func(string)) []verifyMismatch {
+	switch mode {
+	case verifyFull:
+		return verifyAgainstLive(written, desired, liveAfter)
+	case verifyTargeted:
+		return verifyWrittenConfigs(r, written, desired, base, progress)
+	}
+	return nil // verifyNone — the operator opted out; no reads, no verdict
+}
+
+// verifyWrittenConfigs re-reads the configs this run wrote whose write is not
+// ALREADY confirmed. The apply confirms each write as it makes it (reconcile.push
+// reads the profile back before it will record a baseline), so re-fetching a
+// config it already matched byte-for-byte would ask Apple the same question twice
+// and could never return a different answer — pure duplicate traffic, and AGENT.md
+// is explicit that Apple rate-limits hard. What is left is the write the apply
+// could NOT confirm (its read-back failed, or returned no XML): that one is worth a
+// second attempt, because nobody has an answer for it yet.
+//
+// Targeted also stays targeted: never a fan-out over every configuration in the
+// tenant, because re-listing 39 profiles to confirm one write is exactly the chatty
+// traffic AGENT.md forbids.
+func verifyWrittenConfigs(r configDetailReader, written []writtenConfig, desired map[string][]byte, base *state.State, progress func(string)) []verifyMismatch {
+	if r == nil {
+		return nil
+	}
+	pending := make([]writtenConfig, 0, len(written))
+	for _, w := range written {
+		if w.Verified != reconcile.VerifyConfirmed {
+			pending = append(pending, w)
+		}
+	}
+	var out []verifyMismatch
+	for i, w := range pending {
+		want, ok := desired[w.Name]
+		if !ok { // a tenant write with no git source shouldn't exist — nothing to compare
+			continue
+		}
+		// The apply's own id first, the baseline only as a fallback. An unconfirmed
+		// CREATE has no baseline entry at all (reconcile writes one only for a write it
+		// verified), so deriving the id from the baseline made verification impossible
+		// in exactly the case it exists for — and reported that as a dropped write.
+		id := w.ABMID
+		if id == "" && base != nil {
+			id = base.Configs[w.Name].ABMID
+		}
+		if id == "" {
+			out = append(out, verifyMismatch{Name: w.Name, Detail: "no configuration id was recorded for the write — it cannot be re-read from Apple"})
+			continue
+		}
+		if progress != nil {
+			progress(fmt.Sprintf("re-reading unconfirmed configuration %d/%d: %s", i+1, len(pending), w.Name))
+		}
+		live, err := r.FetchCustomSettingDetail(id)
+		if err != nil {
+			// A failed read-back is not evidence of a good write. Record it and keep
+			// going, so one flaky GET neither aborts the blueprint phase nor hides the
+			// verdict on the other writes.
+			out = append(out, verifyMismatch{Name: w.Name, Detail: "re-reading the configuration from Apple failed: " + err.Error()})
+			continue
+		}
+		if m, bad := compareWritten(w.Name, want, live); bad {
+			out = append(out, m)
+		}
+	}
+	return out
+}
+
+// verifyAgainstLive compares the written configs against the full post-apply
+// refresh (--verify=full). That fetch previously served only to harvest ids for
+// membership resolution — the live bytes it already carries are the read-back.
+// It re-checks every written config, including ones the apply already confirmed:
+// the bytes are already in hand (the refresh was paid for regardless), so the
+// second opinion is free — unlike targeted, it costs no extra request.
+func verifyAgainstLive(written []writtenConfig, desired map[string][]byte, liveAfter []ab.LiveConfig) []verifyMismatch {
+	byName := make(map[string]ab.LiveConfig, len(liveAfter))
+	for _, l := range liveAfter {
+		byName[l.Name] = l
+	}
+	var out []verifyMismatch
+	for _, w := range written {
+		want, ok := desired[w.Name]
+		if !ok {
+			continue
+		}
+		live, found := byName[w.Name]
+		if !found {
+			// Observed: the tenant listed its configurations and this one — which this
+			// run just wrote — was not among them. That IS a difference from desired.
+			out = append(out, verifyMismatch{Name: w.Name, Observed: true,
+				Detail: "the configuration is absent from the post-apply live refresh"})
+			continue
+		}
+		if m, bad := compareWritten(w.Name, want, live); bad {
+			out = append(out, m)
+		}
+	}
+	return out
+}
+
+// compareWritten is the proof itself: the desired bytes vs what Apple stored.
+func compareWritten(name string, want []byte, live ab.LiveConfig) (verifyMismatch, bool) {
+	got := live.ContentHash()
+	if got == "" {
+		return verifyMismatch{Name: name, Detail: "Apple returned no profile XML on the read-back — the write could not be confirmed"}, true
+	}
+	if got == hash.Raw(want) {
+		return verifyMismatch{}, false
+	}
+	detail := "live content hash " + shortHash(got) + " != desired " + shortHash(hash.Raw(want))
+	if live.Updated != "" {
+		// A frozen updatedDateTime is Apple's tell that the PATCH was accepted (2xx)
+		// and then dropped; it is the fastest thing for an operator to confirm.
+		detail += "; live updatedDateTime " + live.Updated
+	}
+	return verifyMismatch{Name: name, Detail: detail, Observed: true}, true
+}
+
+func shortHash(h string) string {
+	if len(h) > 12 {
+		return h[:12]
+	}
+	return h
+}
+
+// reportVerification prints the read-back verdict to w (stderr in the command).
+// The per-config FAILED line is the wording operators grep for and CI matches on
+// (abgui mines the same word out of stderr — see SyncFailure.verdictLines), so both
+// kinds of failure carry it — but they say DIFFERENT things: a difference that was
+// actually observed is reported as "still differs", while a read-back that produced
+// no answer is reported as "could NOT be verified". Stating a difference nobody
+// measured, and attaching the PayloadVersion hint to it, sends the operator hunting
+// for a defect in a profile that may well have landed perfectly.
+//
+// The trailing hint names the failure mode this check exists for — Apple answers 2xx
+// and silently drops a profile whose top-level PayloadVersion isn't exactly 1, which
+// makes a GitOps loop re-plan the identical change forever — so it is printed only
+// when a real difference was seen.
+func reportVerification(w io.Writer, mode string, written []writtenConfig, mismatches []verifyMismatch) {
+	if mode == verifyNone {
+		return
+	}
+	if len(mismatches) == 0 {
+		if len(written) > 0 {
+			_, _ = fmt.Fprintf(w, "post-apply verification: %d written configuration(s) confirmed live on Apple Business.\n", len(written))
+		}
+		return
+	}
+	observed := 0
+	for _, m := range mismatches {
+		if m.Observed {
+			observed++
+			_, _ = fmt.Fprintf(w, "post-apply verification FAILED: %s still differs from desired on Apple Business\n", m.Name)
+		} else {
+			_, _ = fmt.Fprintf(w, "post-apply verification FAILED: %s could NOT be verified — Apple was not asked, or did not answer, with a comparable profile\n", m.Name)
+		}
+		if m.Detail != "" {
+			_, _ = fmt.Fprintf(w, "  %s\n", m.Detail)
+		}
+	}
+	if observed > 0 {
+		_, _ = fmt.Fprintf(w, "post-apply verification: %d of %d written configuration(s) did not land. Apple can accept a PATCH with 2xx and silently not persist an out-of-spec profile — check the top-level (outer) PayloadVersion is exactly 1.\n",
+			observed, len(written))
+	}
+	if unread := len(mismatches) - observed; unread > 0 {
+		_, _ = fmt.Fprintf(w, "post-apply verification: %d of %d written configuration(s) could not be checked, so this run cannot claim the tenant matches git — re-run sync to check them.\n",
+			unread, len(written))
+	}
 }
 
 func printBlueprintResult(res *reconcile.BlueprintResult) {

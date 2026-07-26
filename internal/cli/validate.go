@@ -89,10 +89,12 @@ func newValidateCmd() *cobra.Command {
 		Long: "validate is the pre-sync check, and it reads local files only: no credentials,\n" +
 			"no Apple Business calls, works offline. Every lib/ profile is parsed as an XML\n" +
 			"plist and checked for the Configuration/PayloadContent structure, a\n" +
-			"PayloadIdentifier, the 1 MiB Apple Business size cap, and an identifier shared\n" +
-			"with another profile; every blueprint manifest is checked for configurations it\n" +
-			"references that are missing from lib/ — the mistake that makes a sync attach\n" +
-			"nothing. Exit 1 means something failed; warnings never fail the run.\n" +
+			"PayloadIdentifier, a top-level PayloadVersion of exactly 1 (Apple accepts an\n" +
+			"upload that violates it and then silently never stores it), the 1 MiB Apple\n" +
+			"Business size cap, and an identifier shared with another profile; every\n" +
+			"blueprint manifest is checked for configurations it references that are missing\n" +
+			"from lib/ — the mistake that makes a sync attach nothing. Exit 1 means something\n" +
+			"failed; warnings never fail the run.\n" +
 			"$ABCTL_VALIDATOR runs your own linter over lib/ instead (on --json its output\n" +
 			"joins the report), and --json / -o json|yaml emits the machine report on stdout\n" +
 			"even when the exit code is 1.",
@@ -329,6 +331,24 @@ func inspectProfile(pr *profileReport, f libFile) {
 	case ptype.text != "Configuration":
 		fail("not-configuration", "the top-level PayloadType is %q; Apple Business requires \"Configuration\".", ptype.text)
 	}
+	// The one check that exists because it already burned someone. Apple pins the
+	// OUTER PayloadVersion to exactly 1 — it versions the profile FORMAT, not the
+	// operator's content — and Apple Business answers a PATCH carrying any other
+	// value with a 2xx and then does not persist the profile. The live bytes never
+	// move, so a GitOps run recomputes the identical change forever and archives a
+	// snapshot every pass; nothing downstream can see it without reading the stored
+	// copy back. It is therefore an ERROR here, before anything is ever pushed.
+	switch pv, hasVersion := top.dict["PayloadVersion"]; {
+	case !hasVersion:
+		fail("payload-version", "the top-level dictionary has no PayloadVersion; Apple requires it to be exactly 1 "+
+			"(https://developer.apple.com/documentation/devicemanagement/toplevel). Add <key>PayloadVersion</key><integer>1</integer>.")
+	case pv.text != "1":
+		fail("payload-version", "the top-level PayloadVersion is %s; Apple requires exactly 1 — it is the version of the profile FORMAT, "+
+			"not of your content (https://developer.apple.com/documentation/devicemanagement/toplevel). Apple Business accepts an upload "+
+			"carrying any other value with a 2xx and then silently does not store the profile, so the live copy never changes and every "+
+			"sync recomputes the same change forever. Set it back to <integer>1</integer> and track your own revisions in git.",
+			describeScalar(pv))
+	}
 	// Missing and present-but-blank are the same failure to Apple: the identifier
 	// is how a profile is addressed on the device.
 	if pr.Identifier == "" {
@@ -345,7 +365,8 @@ func inspectProfile(pr *profileReport, f libFile) {
 			warn("no-inner-payloads", "the profile carries no inner payloads, so it configures nothing.")
 		}
 		for i, item := range content.array {
-			switch pt := item.dict["PayloadType"].text; {
+			pt := item.dict["PayloadType"].text // a nil map on a non-dict item reads as ""
+			switch {
 			case item.kind != "dict":
 				warn("inner-payload-missing-type", "inner payload #%d is a <%s>, not a <dict>.", i+1, item.kind)
 			case pt == "":
@@ -353,8 +374,37 @@ func inspectProfile(pr *profileReport, f libFile) {
 			default:
 				pr.PayloadTypes = append(pr.PayloadTypes, pt)
 			}
+			// Apple's CommonPayloadKeys documents the per-payload PayloadVersion as a
+			// schema version whose allowed value is 1 as well, so a 2 here is still
+			// wrong — but only the OUTER one is known to trigger the silent drop, so
+			// this stays a warning. A payload that simply omits the key is not flagged:
+			// the observed failure needs a present, out-of-spec value.
+			if pv, ok := item.dict["PayloadVersion"]; ok && pv.text != "1" {
+				warn("inner-payload-version", "inner payload %s has PayloadVersion %s; Apple defines the per-payload PayloadVersion as a schema version whose value is 1.",
+					innerPayloadLabel(i, pt), describeScalar(pv))
+			}
 		}
 	}
+}
+
+// innerPayloadLabel names an inner payload the way an operator finds it in the
+// file — by PayloadType, falling back to its position when it has none.
+func innerPayloadLabel(i int, payloadType string) string {
+	if payloadType == "" {
+		return fmt.Sprintf("#%d", i+1)
+	}
+	return fmt.Sprintf("%q", payloadType)
+}
+
+// describeScalar renders what a plist key ACTUALLY holds, for a message an
+// operator can act on: the text of a scalar such as <integer>2</integer>, else
+// the element itself, so a <true/> or a nested <dict> is never reported as an
+// empty value.
+func describeScalar(v plistValue) string {
+	if v.text != "" {
+		return v.text
+	}
+	return "<" + v.kind + ">"
 }
 
 // flagDuplicateIdentifiers adds a duplicate-identifier error to EVERY profile

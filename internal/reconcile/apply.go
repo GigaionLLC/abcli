@@ -16,11 +16,28 @@ const (
 	reasonPruned   = "pruned"               // removed from git, --prune → deleted from live
 )
 
+// notPersisted reports a write Apple acknowledged but did not store. Apple answers
+// the POST/PATCH 2xx and then silently discards a profile that violates its schema:
+// the live bytes never change, so the next run recomputes the identical change and
+// the GitOps sync loops forever (one operator saw exactly this, one profile of 39,
+// its live updatedDateTime frozen across every attempt while the other eight edits
+// in the same run converged). The message names the top cause because that is what
+// makes it actionable — the outer Configuration PayloadVersion must be exactly 1
+// (https://developer.apple.com/documentation/devicemanagement/toplevel).
+const notPersisted = "write accepted (2xx) but Apple did not persist it — the stored profile still differs from git. " +
+	"Apple silently drops profiles that violate its schema; check that the TOP-LEVEL Configuration PayloadVersion " +
+	"is exactly 1 (Apple requires 1; a value of 2 reproduces this exactly)."
+
 // Applier is the subset of the Apple Business write API the executor needs. It is
 // an interface so Apply can be unit-tested with a fake — no production writes.
 type Applier interface {
 	CreateConfiguration(name, xml string, platforms []string) (id, updated string, err error)
 	UpdateConfiguration(id, name, xml string) (updated string, err error)
+	// FetchCustomSettingDetail re-reads one configuration *with its profile XML* so a
+	// write can be confirmed against what Apple actually stored (see push). The name
+	// and signature are *ab.Client's own, so the real client keeps satisfying Applier
+	// with no adapter.
+	FetchCustomSettingDetail(id string) (ab.LiveConfig, error)
 	DeleteConfiguration(id string) error
 	CreateBlueprint(name, description string, members map[string][]string) (*ab.Resource, error)
 	AddBlueprintMembers(bpID, rel, memberType string, ids []string) error
@@ -62,6 +79,27 @@ type Engine struct {
 	Files    FileStore
 }
 
+// Verification is the verdict of the confirming read-back a create/update performs
+// (see push). It is recorded on the Outcome so a caller can report on the write
+// WITHOUT re-reading the config: the GET has already happened, and Apple rate-limits
+// hard, so a second identical fetch buys nothing.
+type Verification string
+
+// Read-back verdicts. Only create/update outcomes carry one; everything else (pull,
+// delete, skip, a write that never reached Apple) leaves it empty.
+const (
+	// VerifyConfirmed: read back from Apple and byte-identical to git. This is the
+	// only verdict that lets the baseline be written.
+	VerifyConfirmed Verification = "confirmed"
+	// VerifyNotPersisted: Apple answered 2xx and did NOT store the profile — the
+	// stored bytes still differ, or the write echoed an unchanged updatedDateTime.
+	VerifyNotPersisted Verification = "not-persisted"
+	// VerifyUnconfirmed: the read-back itself did not produce an answer (it failed,
+	// or came back without profile XML). This says nothing about the write, which
+	// may well have landed — it is NOT evidence of failure.
+	VerifyUnconfirmed Verification = "unconfirmed"
+)
+
 // Outcome records what happened to one planned item.
 type Outcome struct {
 	Name    string `json:"name"`
@@ -69,6 +107,16 @@ type Outcome struct {
 	Status  string `json:"status"` // "done" | "skipped" | "error"
 	Detail  string `json:"detail"`
 	Archive string `json:"archive,omitempty"` // archive path, when one was written
+	// ABMID is the configuration id the write targeted (Update) or created (Create).
+	// It is recorded on EVERY create/update outcome, including the ones whose baseline
+	// entry is deliberately not written (see push) — a caller that wants to re-read an
+	// unconfirmed write has no other source for the id, since the baseline only ever
+	// describes a confirmed one.
+	ABMID string `json:"abm_id,omitempty"`
+	// Verified is the read-back verdict for a create/update (empty for everything
+	// else). "done" + VerifyUnconfirmed is a real state: the write was made, the
+	// confirmation was not obtained, and the baseline was deliberately left alone.
+	Verified Verification `json:"verified,omitempty"`
 }
 
 // Result summarizes an apply run.
@@ -151,47 +199,147 @@ func (e *Engine) conflict(res *Result, opts Opts, name string, want []byte, l ab
 	e.push(res, opts, name, Update, want, l, reasonNewer, base)
 }
 
-// push creates (Create) or updates (Update) the live config. For an update it
-// archives the current live version first. Both consume the write budget.
+// push creates (Create) or updates (Update) the live config, then CONFIRMS the
+// write by reading back what Apple stored. For an update it archives the current
+// live version first. Both consume the write budget.
+//
+// The read-back is the whole point: this function used to record the baseline
+// optimistically from the desired bytes (Hash: hash.Raw(want)), so a write Apple
+// accepted-and-dropped (see notPersisted) was booked as success and the drift came
+// back on the very next run, forever. The baseline must describe what Apple stored,
+// never what we intended, so it is now written from the OBSERVED read-back — or not
+// written at all.
+//
+// Rate limits (AGENT.md): this costs exactly ONE extra GET per config *actually
+// written* — never per planned item, never for pulls, skips or budget-capped items,
+// and never twice for the same write (internal/cli only re-reads what this could not
+// confirm). Tenant writes are rare and human-gated behind --apply, so the added
+// traffic is bounded by the number of real changes and stays well inside Apple's
+// limits.
 func (e *Engine) push(res *Result, opts Opts, name string, act Action, want []byte, l ab.LiveConfig, reason string, base *state.State) {
 	if !e.budget(opts, res.Writes) {
 		e.skip(res, name, act, "skipped: --limit-writes reached")
 		return
 	}
+
+	// Perform the write. Both branches converge on the confirmation step below with:
+	// id (what to read back), prevUpdated (the pre-apply timestamp, empty for a
+	// create), updated (the timestamp the write response echoed), detail + archPath
+	// (the success reporting).
+	var id, prevUpdated, updated, archPath, detail string
 	if act == Create {
 		progress(opts, "creating configuration in ABM: "+name)
-		id, updated, err := e.Client.CreateConfiguration(name, string(want), opts.Platforms)
+		newID, ts, err := e.Client.CreateConfiguration(name, string(want), opts.Platforms)
 		if err != nil {
 			e.fail(res, name, act, "create failed: "+err.Error())
 			return
 		}
 		res.Writes++
-		base.Configs[name] = state.Entry{ABMID: id, Hash: hash.Raw(want), UpdatedDateTime: updated}
-		res.Outcomes = append(res.Outcomes, Outcome{Name: name, Action: Create, Status: "done", Detail: "created on ABM (id " + id + ")"})
+		id, updated, detail = newID, ts, "created on ABM (id "+newID+")"
+	} else {
+		// Update: archive the live version before overwriting it.
+		if l.XML == "" {
+			e.fail(res, name, act, "live profile XML unavailable for archive (use --refresh=full or smart refresh)")
+			return
+		}
+		progress(opts, "archiving current ABM configuration: "+name)
+		path, err := e.Archiver.Archive(name, reason, []byte(l.XML), map[string]string{
+			"abm_id": l.ID, "hash": l.ContentHash(), "updatedDateTime": l.Updated,
+		})
+		if err != nil {
+			e.fail(res, name, act, "archive failed (write skipped to preserve the audit trail): "+err.Error())
+			return
+		}
+		archPath = path
+		progress(opts, "patching configuration in ABM: "+name)
+		ts, err := e.Client.UpdateConfiguration(l.ID, name, string(want))
+		if err != nil {
+			e.fail(res, name, act, "update failed: "+err.Error())
+			return
+		}
+		res.Writes++
+		id, prevUpdated, updated, detail = l.ID, l.Updated, ts, "patched ABM ("+reason+")"
+	}
+
+	// unverified records a write we could not check. It is deliberately "done", not
+	// "error": a read-back that never happened says nothing about the write, which
+	// may well have landed, so failing the run would cry wolf. The baseline is left
+	// alone for the same reason it is not written on a mismatch — an optimistic entry
+	// claims a convergence nobody observed and would hide a genuinely dropped write
+	// (exactly the incident above), while a stale entry costs at most one redundant,
+	// archived re-write next run. Re-doing a gated write is recoverable; masking
+	// drift is not.
+	unverified := func(why string) {
+		res.Outcomes = append(res.Outcomes, Outcome{Name: name, Action: act, Status: "done",
+			Detail:   detail + " — NOT VERIFIED (" + why + "); baseline left unchanged so the next run re-checks it",
+			Archive:  archPath,
+			ABMID:    id,
+			Verified: VerifyUnconfirmed})
+	}
+
+	// The echoed timestamp is CORROBORATION, never the verdict on its own. Apple bumps
+	// updatedDateTime on every change it stores, so a write response echoing the
+	// pre-apply value is a strong hint the write did not take — but by that same
+	// reasoning a PATCH that stores nothing *because nothing changed* cannot bump it
+	// either, and that case is reachable: Compute yields Conflict whenever both sides
+	// moved relative to a stale baseline, which resolves to an Update whose bytes are
+	// already byte-identical to what Apple holds. Failing on the hint alone would then
+	// blame the operator's PayloadVersion for a profile that already matches git, and —
+	// since a failure never advances the baseline — do it again on every future run.
+	// So the authoritative read-back below always happens, and the frozen timestamp is
+	// only allowed to decide when the read-back itself produces no answer.
+	frozen := unchangedTimestamp(prevUpdated, updated)
+	frozenSignal := "the write response echoed the unchanged updatedDateTime " + updated
+	frozenNote := ""
+	if frozen {
+		frozenNote = "; " + frozenSignal
+	}
+
+	// unreadable turns "the read-back gave no answer" into a verdict: normally
+	// unverified (a GET that failed says nothing about the write), but with the frozen
+	// timestamp beside it the two independent signals agree and it is a dropped write.
+	unreadable := func(why string) {
+		if frozen {
+			e.dropped(res, name, act, id, notPersisted+" (signal: "+frozenSignal+"; "+why+")", archPath)
+			return
+		}
+		unverified(why)
+	}
+
+	if id == "" { // nothing to read back — never GET /configurations/ with an empty id
+		unreadable("the write response carried no configuration id")
 		return
 	}
-	// Update: archive the live version before overwriting it.
-	if l.XML == "" {
-		e.fail(res, name, act, "live profile XML unavailable for archive (use --refresh=full or smart refresh)")
-		return
+	progress(opts, "verifying the stored configuration in ABM: "+name)
+	stored, err := e.Client.FetchCustomSettingDetail(id)
+	switch {
+	case err != nil:
+		unreadable("read-back failed: " + err.Error())
+	case stored.ContentHash() == "":
+		// Detail response without profile XML: we cannot compare, so we must not
+		// accuse Apple of dropping a write it may have stored. Same posture as above.
+		unreadable("read-back returned no profile XML to compare")
+	case stored.ContentHash() != hash.Raw(want):
+		// Apple kept different bytes than we sent. Same raw-hash signal the planner
+		// uses, so "match" here means the next Compute really will see convergence.
+		e.dropped(res, name, act, id,
+			notPersisted+" (signal: the stored profile still differs after the write; stored updatedDateTime "+stored.Updated+frozenNote+")", archPath)
+	default:
+		// The stored bytes ARE what git wants — including when the timestamp never
+		// moved, because a no-op write is a converged config, not a dropped one.
+		base.Configs[name] = state.Entry{ABMID: id, Hash: stored.ContentHash(), UpdatedDateTime: stored.Updated}
+		res.Outcomes = append(res.Outcomes, Outcome{Name: name, Action: act, Status: "done", Detail: detail, Archive: archPath, ABMID: id, Verified: VerifyConfirmed})
 	}
-	progress(opts, "archiving current ABM configuration: "+name)
-	archPath, err := e.Archiver.Archive(name, reason, []byte(l.XML), map[string]string{
-		"abm_id": l.ID, "hash": l.ContentHash(), "updatedDateTime": l.Updated,
-	})
-	if err != nil {
-		e.fail(res, name, act, "archive failed (write skipped to preserve the audit trail): "+err.Error())
-		return
-	}
-	progress(opts, "patching configuration in ABM: "+name)
-	updated, err := e.Client.UpdateConfiguration(l.ID, name, string(want))
-	if err != nil {
-		e.fail(res, name, act, "update failed: "+err.Error())
-		return
-	}
-	res.Writes++
-	base.Configs[name] = state.Entry{ABMID: l.ID, Hash: hash.Raw(want), UpdatedDateTime: updated}
-	res.Outcomes = append(res.Outcomes, Outcome{Name: name, Action: Update, Status: "done", Detail: "patched ABM (" + reason + ")", Archive: archPath})
+}
+
+// unchangedTimestamp reports whether a write response carried the very same
+// updatedDateTime the config had before the write. Both sides must be present (a
+// write response may omit the field — see internal/ab), and the comparison is by
+// instant rather than by string so a serialization difference (Z vs +00:00,
+// fractional precision) between the write response and the list endpoint is not
+// mistaken for progress.
+func unchangedTimestamp(before, after string) bool {
+	return before != "" && after != "" && !liveTimeChanged(before, after)
 }
 
 // pull writes the live version into the git tree (no tenant write).
@@ -263,8 +411,25 @@ func (e *Engine) skip(res *Result, name string, act Action, detail string) {
 }
 
 func (e *Engine) fail(res *Result, name string, act Action, detail string) {
+	e.failWithArchive(res, name, act, detail, "")
+}
+
+// failWithArchive records a failure that nonetheless produced an archive. A write
+// rejected *after* the pre-overwrite copy was filed still has that copy, and the
+// operator needs the path: it is the evidence that the live bytes never moved.
+func (e *Engine) failWithArchive(res *Result, name string, act Action, detail, archive string) {
 	res.Errors++
-	res.Outcomes = append(res.Outcomes, Outcome{Name: name, Action: act, Status: "error", Detail: detail})
+	res.Outcomes = append(res.Outcomes, Outcome{Name: name, Action: act, Status: "error", Detail: detail, Archive: archive})
+}
+
+// dropped records the accepted-but-not-persisted write: a failure whose verdict is
+// known, so callers can report it without re-reading the config. The id rides along
+// for the same reason it does on a successful write — it is the only handle an
+// operator (or a later check) has on the configuration Apple did not store.
+func (e *Engine) dropped(res *Result, name string, act Action, id, detail, archive string) {
+	res.Errors++
+	res.Outcomes = append(res.Outcomes, Outcome{Name: name, Action: act, Status: "error",
+		Detail: detail, Archive: archive, ABMID: id, Verified: VerifyNotPersisted})
 }
 
 func progress(opts Opts, line string) {
