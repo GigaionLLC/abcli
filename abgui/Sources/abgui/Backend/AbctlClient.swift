@@ -34,6 +34,15 @@ enum AbctlError: Error, LocalizedError {
     }
 }
 
+/// One `sync --apply` run: the decoded per-item result PLUS the raw termination facts. The two
+/// are inseparable because abctl's exit code carries a verdict the result document does not
+/// (see `AbctlClient.syncApplyRun`), and stderr carries the sentence explaining it.
+struct ApplyRun {
+    let result: ApplyResult
+    let code: Int32
+    let stderr: String
+}
+
 /// The facade: one Swift method per abctl verb. Owns argv, JSON decoding, and exit-code
 /// mapping so views never touch `Process`. This v0 covers the read + version surface;
 /// write verbs land in v2 (all gated by `--yes` behind an in-app confirm).
@@ -237,12 +246,44 @@ struct AbctlClient {
     /// first, so --yes). `prune` is the raw "allow deletes/detaches" toggle — `syncApplyArgs`
     /// forces it on under git-as-truth, so callers pass what the user chose and nothing more;
     /// `--limit-writes` caps writes.
+    ///
+    /// Decodes stdout BEFORE mapping the exit code — the same rule `validateProfiles()` follows,
+    /// and for the same reason. `sync --apply --json` prints the COMPLETE ApplyResult (with a
+    /// per-item `status:"error"` and a detail naming each failure) and only THEN returns
+    /// `ExitError{1}` (internal/cli/phase1.go), and `cmd/abctl/main.go` exits SILENTLY for an
+    /// ExitError. Running that through the shared `decodeJSON` — which calls `checkExit` first —
+    /// threw the structured truth away and raised `.cli(stderr)`: a hundred lines of "building
+    /// plan: …" narration presented to the user as "the error". A partially-failed apply is
+    /// DATA to render, not an error to throw; only a run that produced no result document at
+    /// all falls through to the exit-code mapping. Every other verb keeps today's mapping, so
+    /// `decodeJSON`/`checkExit` are deliberately untouched.
     func syncApply(prune: Bool, limitWrites: Int?, gitSourceOfTruth: Bool = false, refresh: String = "smart", verify: String = "targeted") async throws -> ApplyResult {
-        try await decodeJSON(ApplyResult.self,
-                             Self.syncApplyArgs(prune: prune, limitWrites: limitWrites,
-                                                gitSourceOfTruth: gitSourceOfTruth,
-                                                refresh: refresh, verify: verify),
-                             cwd: repoRoot, timeout: Self.applyTimeout)
+        try await syncApplyRun(prune: prune, limitWrites: limitWrites, gitSourceOfTruth: gitSourceOfTruth,
+                               refresh: refresh, verify: verify).result
+    }
+
+    /// The same run, with the exit code and stderr KEPT alongside the decoded result. abctl can
+    /// print a complete, every-item-`done` result document and still exit non-zero — post-apply
+    /// verification re-reads what it wrote and fails the run when Apple did not persist it
+    /// (`internal/cli/phase1.go` → `finishApply`), and Apple answers `2xx` to a PATCH it then
+    /// silently drops. Reporting that as a clean sync would be the same class of bug as showing
+    /// narration as the error, so the caller gets both halves and `SyncFailure` decides.
+    func syncApplyRun(prune: Bool, limitWrites: Int?, gitSourceOfTruth: Bool = false,
+                      refresh: String = "smart", verify: String = "targeted") async throws -> ApplyRun {
+        let args = Self.syncApplyArgs(prune: prune, limitWrites: limitWrites,
+                                      gitSourceOfTruth: gitSourceOfTruth,
+                                      refresh: refresh, verify: verify)
+        let result = try await runner.run(argv(args), cwd: repoRoot, stdin: nil, timeout: Self.applyTimeout)
+        do {
+            let decoded = try Self.decoder.decode(ApplyResult.self, from: result.stdout)
+            return ApplyRun(result: decoded, code: result.code, stderr: result.stderr)
+        } catch {
+            // Nothing decodable on stdout means abctl never got as far as applying (bad
+            // credentials, no gitops/ tree, an Apple 403 while building the plan), so its own
+            // stderr is the better message; fall back to the decode error only if it exited 0.
+            try Self.checkExit(result)
+            throw AbctlError.decode(error)
+        }
     }
 
     /// The raw `.mobileconfig` XML for a config (stdout is XML, not JSON).

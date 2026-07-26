@@ -216,7 +216,20 @@ Two realities abgui bakes in, straight from `abctl`'s source:
   actually emit `2` so abgui can distinguish its own argv bugs.
 - **Partial apply:** `sync --apply --json` prints the full result JSON (with per-item `status:"error"`)
   **and** exits `1` when any item failed — abgui gets both, and renders per-item outcomes even on a nonzero
-  code.
+  code. **This is now true in the code, not just in this document** (2026-07-25): `syncApply` used to go
+  through the shared `decodeJSON`, which calls `checkExit` *first*, so the structured truth was thrown away
+  and `.cli(stderr)` — a hundred lines of `building plan: …` narration — was raised as "the error". The
+  decode now happens **before** the exit-code mapping (`AbctlClient.syncApplyRun`), exactly as
+  `validateProfiles()` has always done: *a partially-failed apply is data to render, not an error to throw.*
+  Only a run that produced **no** result document at all falls through to the exit-code mapping — and then
+  abctl's own stderr is the better message, so `checkExit` runs first and `AbctlError.decode` is the exit-0
+  fallback. `decodeJSON`/`checkExit` are deliberately untouched; every other verb keeps today's mapping.
+- **A clean result document does not mean a clean run.** abctl can report every item `done` and still exit
+  non-zero: post-apply verification re-reads what it wrote and fails the run when Apple did not persist it
+  (`internal/cli/phase1.go` → `finishApply`), and that verdict exists **only on stderr**. So `syncApplyRun`
+  returns an `ApplyRun { result, code, stderr }` — the decoded rows and the termination facts inseparably —
+  and `SyncFailure` decides. Reporting that run as a clean sync would be the same class of bug as showing
+  narration as the error.
 - **Empty lists serialize as `[]`** (fixed — N3): every `get … -o json` list returns a JSON array even when
   empty, so abgui needs no null-guard. (Older `abctl` builds returned `null`; the version guard (P2) covers
   that if abgui ever runs against one.)
@@ -507,6 +520,78 @@ remembering to instrument each call site.
      it selects the Command Log (`RootView` owns the selection and passes `showCommandLog:`).
 - Read-only list screens get **no** inline preview: the log already covers them, and a preview on every table
   would be noise. Restraint is part of the requirement.
+
+### 4.7 When a sync fails — the verdict, the transcript, and the run log
+
+A gated tenant write is the one screen that must never leave an administrator guessing. The complaint this
+answers was literal: *"I had to read the log blob to find out whether the sync even failed."* Three things
+were wrong — the failure was a string (`error.localizedDescription`, which for a failed `sync --apply` is
+abctl's entire stderr), it was rendered as an 11pt red caption at the **bottom** of a scrolling stack, and a
+partially-failed apply returned `false` while setting no error at all.
+
+- **`SyncFailure` (`Models/SyncFailure.swift`) ranks, it never discards.** `headline` is the shortest summary
+  the code can justify (whitespace-collapsed, cut at a word boundary, `headlineLimit` 180 — an `ab.APIError`
+  can be ~500 characters of Apple's raw response body); `details` keeps everything it was derived from,
+  verbatim and untruncated. Every rule degrades toward *showing more*, because losing the cause is the bug
+  being fixed. `Kind` names the shape of the fix, not the shape of the message: `.itemsFailed`, `.aborted`,
+  `.timedOut`, `.cancelled`, `.unreadable`, `.exitedNonZero`.
+- **`from(applyResult:exitCode:stderr:transcript:)` is the whole pass/fail test.** It returns `nil` **only**
+  when every item reported `done` *and* abctl exited `0`, so no second condition can disagree with it. Failing
+  rows lead (`1 change failed — update-abm Wi-Fi: 403 …`); verdict lines mined from stderr are appended rather
+  than outranked, since a run can fail items *and* fail the read-back. A non-zero exit with clean rows routes
+  to `fromNonZeroExit`, which prefers lines containing the `FAILED` marker abctl prints (`verdictMarker` —
+  the summary line shares the `post-apply verification: ` prefix with the progress narration, so the explicit
+  `FAILED` lines are looked at first).
+- **The stderr extractor is pure and conservative.** `cmd/abctl/main.go` prints `Error: <err>` for a plain
+  error and exits **silently** for a `cli.ExitError`, so a marked line is not guaranteed: take the *last*
+  `Error:` line (the outermost wrap), else the last line that is not narration, else synthesize
+  `abctl stopped during: <last line>`. `narrationPrefixes` is a verified allow-list of what abctl actually
+  emits (`building plan: `, `post-apply verification: `, `archiving `, `patching `, …) — a line wrongly
+  classified as narration is a hidden cause, which is exactly the defect being fixed, whereas a line wrongly
+  kept only makes the headline less pretty. Being pure, the rule is testable against real captured stderr.
+- **The verdict banner is pinned above the scroll view** in `ApplySheet` — *Applying…* (spinner) ·
+  **Applied N change(s)** (green seal) · **Applied N, M failed** (orange triangle) · **Sync FAILED** (red
+  octagon), structurally the same vocabulary as `ValidateSheet`'s verdict so the two screens read alike. The
+  outcome of a tenant write must not be scrollable off screen. Rules that matter: a *result* decides between
+  succeeded and partial, and `syncFailure` alone means "failed" — reading the failure first would report a
+  sync that wrote nine of ten configurations as an outright failure; either signal (phase counters **or**
+  per-item rows) withholds the green verdict, and `failedCount` takes the larger of the two; a terminal
+  failure that still wrote something says so, because "Sync FAILED" alone reads as "nothing changed"; the
+  dismiss button becomes **Done** on any terminal outcome, not only on a result. `lastWriteError` is shared
+  with every other gated write in the app, so it only counts here once this sheet has actually run something.
+- **Copy affordances, because this text ends up in tickets.** The banner's **Copy Error** (failure states
+  only) pastes headline + detail + the failing rows + `Log file: <path>` in one go; the Results box gained
+  **Copy Results** (every outcome row as text, in display order). `CommandCopyButton` now takes its text as an
+  `@autoclosure @escaping` builder, so *Copy All as Script* stops rebuilding the whole session transcript on
+  every view update.
+- **One transcript component.** `Views/TranscriptView.swift` replaces the per-line `Text` stacks in
+  `ApplySheet`, `DiffView` and `ValidateSheet`'s validator output. The entire log is **one** `Text`: a stack
+  of per-line `Text`s draws identically but each owns its own selection, so a drag can never cross a line
+  boundary and "copy the log" degrades into copying one line at a time. It adds a line count, `Copy Log`, a
+  context menu, `.scrollIndicators(.visible)` and — the part that actually solves "I can't tell there's more"
+  — an **expand toggle** (macOS treats indicator visibility as a user preference, so a visible scroller alone
+  cannot fix a 150pt pane); `ApplySheet` owns that toggle so the *sheet* grows with it. Auto-follow is
+  measured, not assumed: a geometry probe pins to the tail only while the tail is on screen, and the scroll is
+  deliberately un-animated (an animated scroll's intermediate frames read as "scrolled up" and unpin it).
+  `follow: false` for the validator report — it is finished when it appears, and opening it at the last line
+  would hide the first failure.
+- **`CommandLogView` moved off `List`.** Its rows wrap (monospaced text with `.fixedSize(vertical:)` inside a
+  `.frame(maxWidth: .infinity)`), and a macOS `List` asks a self-sizing row for its height at an unbounded
+  width; that combination cycles and the window stops rendering — it *hangs* rather than crashing, so there is
+  no report to find afterwards. It is now `ScrollView` + `VStack` + `Divider`, the pattern every other
+  wrapping surface here already uses, with `commands` capped at 200.
+- **Every run is also written to a file** — see `Backend/RunLog.swift` and §8. A sync that fails at 2 a.m. is
+  worth nothing if the only copy of the evidence is a scroll view the user closes. `AppModel` opens one
+  (`beginRunLog(_:argv:)`, verb `sync` / `diff` / `seed`) **before** the first narrated line, so
+  the file is the complete transcript and not the tail of one, and closes it with an outcome sentence
+  (`finishRunLog(_:)`). At most one is ever open, and *one operation = one file*: the seed → diff hand-off
+  writes both phases into the seed's log (`loadPlan(resetLog:newRunLog:)`), and the post-apply refresh
+  deliberately opens none, because `lastRunLogURL` must keep naming the sync the UI is reporting on. The URL
+  also survives `clearApplyOutput()` — clearing what is on *screen* must not make a file that is still on disk
+  unreachable — and the argv in the header comes from the same pure builder the run uses (via `previewArgv`),
+  so the header names the command that actually executed. `TranscriptView` surfaces the path when there is one:
+  a middle-truncated line (the file name at the tail is what identifies the run), **Copy Log File Path**, and
+  **Reveal in Finder**; all three disappear when logging is unavailable rather than offering a dead path.
 
 ---
 
@@ -802,6 +887,34 @@ frontend/backend split.
   `CommandFormatter.redact(_:)` (deny-list `redactedFlags`) before argv is stored, so a credential never enters
   the type that the Command Log, the `$ …` progress lines and every copy button render — and stdin is kept as a
   byte count, never as profile content.
+- **The run log is on disk, so its rules are file rules.** `Backend/RunLog.swift` writes one plain-text
+  transcript per run to **`~/Library/Logs/abgui/`** (`<verb>-<UTC>-<6 hex>.log`, e.g.
+  `sync-20260725T143005Z-3f9ac1.log`) — the macOS convention (Console.app finds it), and deliberately **not**
+  inside the user's GitOps workspace: abgui does not own that repo's `.gitignore`, so logs written there would
+  eventually be committed with tenant identifiers in them. Files are created `0600` up front inside a `0700`
+  directory — the same posture as `CredentialStore`, and created that way rather than tightened afterwards so
+  the file is never world-readable even for an instant.
+  - **What a log may contain:** everything abctl prints on stderr plus abgui's own transcript lines — that
+    means **tenant identifiers** (context/organization names, configuration and blueprint names, device
+    serials, Apple resource ids) and up to a few hundred bytes of Apple's raw error-response body.
+  - **What it cannot contain:** credentials. The header's command line is `CommandRecord.commandLine` — the
+    **redacted** form, and `RunLog.Header.command` is typed `String` precisely so no caller can hand it a raw
+    `[String]` argv; key material is never on argv in the first place (contexts pass a key *path*); the one
+    verb that prints a bearer token (`auth token --raw`) writes it to stdout and abgui has no client method
+    for it; anything piped in is recorded as a byte count only. The header states all of this in the file
+    itself, so whoever receives it in a ticket knows what they are holding.
+  - **Retention (whichever bites first, oldest deleted first):** `maxFiles` 50 · `maxAge` 14 days ·
+    `maxTotalBytes` 20 MiB, plus a `maxFileBytes` 5 MiB per-file cap so one pathological run cannot eat the
+    budget — the overflow is dropped after a `[log truncated]` marker and the footer reports how many lines
+    went. Pruning runs detached after the footer is written, never on a run's critical path, and
+    `isRunLogName` matches **only** abgui's own `<verb>-<stamp>-<hex>.log` shape: the pruner deletes, so
+    whatever else a user parked in that folder is not ours to remove.
+  - **It cannot break a sync.** Nothing in the public API throws: `begin` returns `nil` on any failure (no
+    directory, read-only disk, sandbox denial) and every call site is `runLog?.line(…)`, so a machine that
+    cannot write logs runs exactly as before; `line(_:)` costs an append under a lock (no syscall, no
+    main-actor hop — a 2,000-line run does not spend 2,000 hops on logging), with ordering preserved by that
+    buffer rather than by task scheduling; a failed write quietly retires the log. A file with no footer is
+    itself the signal that the app died mid-run.
 - **Subprocess hygiene.** Resolve `abctl` to an **absolute** path (bundled `Resources/abctl` or an explicit
   Settings override), never via a mutable PATH. Pass arguments as an **argv array** (`Process.arguments`) —
   no shell interpolation, so profile names / paths can't inject. Set an explicit `cwd`, a minimal

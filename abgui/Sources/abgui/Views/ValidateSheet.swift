@@ -23,6 +23,12 @@ struct ValidateSheet: View {
     /// is, and burying that behind a click leaves the verdict unexplained.
     @State private var validatorExpanded: Bool?
 
+    /// Owned HERE, exactly as ApplySheet owns its own: this sheet does not resize either, so a
+    /// transcript that grows inside it would only squeeze the report above it and re-create the
+    /// scroll-inside-a-scroll the expand button exists to remove. Growing the pane grows the
+    /// sheet (see the frame below).
+    @State private var logExpanded = false
+
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             header
@@ -45,7 +51,9 @@ struct ValidateSheet: View {
             footer
         }
         .padding()
-        .frame(minWidth: 640, minHeight: 360, idealHeight: 560)
+        // The taller ideal is what gives an expanded validator transcript somewhere to go —
+        // same rule as ApplySheet, since both are fixed-height sheets hosting the same pane.
+        .frame(minWidth: 640, minHeight: 360, idealHeight: logExpanded ? 820 : 560)
         .task {
             // First open only. Re-opening the sheet must not re-run a (possibly slow)
             // external validator — Re-run is the explicit refresh.
@@ -235,15 +243,19 @@ struct ValidateSheet: View {
                         .foregroundStyle(code == 0 ? Color.secondary : Color.red)
                 }
                 if let output = report.validatorOutput, !output.isEmpty {
-                    ScrollView {
-                        Text(output)
-                            .font(.system(.caption, design: .monospaced))
-                            .textSelection(.enabled)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .padding(6)
-                    }
-                    .frame(maxHeight: 160)
-                    .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 6))
+                    // The same transcript pane the sync path uses. When $ABCTL_VALIDATOR is why the
+                    // report failed this output is the ONLY evidence there is, so it needs the copy
+                    // button and the expand toggle at least as much as the progress logs do.
+                    // `follow: false` — this output is finished when it appears, and opening it
+                    // scrolled to the last line would hide the first failure, not show the newest.
+                    // `expansion:` is the sheet's own state: without it the pane would grow to
+                    // 520pt inside a ~400pt viewport and put the nested scroll straight back.
+                    TranscriptView(title: "Validator output",
+                                   text: output,
+                                   collapsedHeight: 160,
+                                   expandedHeight: 460,
+                                   follow: false,
+                                   expansion: $logExpanded)
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)

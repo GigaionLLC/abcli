@@ -41,7 +41,13 @@ them, so your MDM profiles and blueprint membership live in version control like
 - **Archive-on-overwrite.** Before overwriting or deleting any live config, `abctl` downloads and files the
   current version to `gitops/archive/` — a permanent, greppable record of everything ever replaced.
 - **Exact drift detection.** Apple stores custom profiles byte-for-byte (verified live), so drift is a plain
-  SHA-256 of the profile XML.
+  SHA-256 of the profile XML — of the profile Apple actually *stored*.
+- **Confirmed writes, not hopeful ones.** Apple can answer a `POST`/`PATCH` with a `2xx` and then silently
+  discard an out-of-spec profile: the live bytes never change, and a hash comparison alone reads that as drift
+  and re-plans the identical change forever. So `abctl` **reads every write back** and records the baseline
+  from what Apple stored, never from what it sent; a write that didn't land is an error with the archived
+  pre-overwrite copy attached, and `validate` catches the top cause (a top-level `PayloadVersion` ≠ `1`)
+  offline, before anything is pushed.
 - **Safe blueprint GitOps.** Declare which profiles — and optionally which apps, packages, devices, users,
   and groups — each Blueprint carries; `abctl` attaches/detaches to match (detach gated behind `--prune`),
   creates git-only blueprints (members ride inside the create POST), leaves any collection you don't declare
@@ -98,6 +104,14 @@ CLI, decodes its JSON, and renders it.
   with its working directory, exit code, and duration — copyable one at a time or as one shell script. Secrets
   are redacted before a command is ever recorded, so an administrator can watch, copy, and replicate abgui in a
   terminal.
+- **Says what went wrong, in one line:** the Apply sheet is topped by a verdict banner that can't be scrolled
+  away — *Applied N change(s)* · *Applied N, M failed* · **Sync FAILED** — carrying abctl's own short reason
+  (including a `2xx`-but-not-persisted verdict, which arrives on stderr with every item still marked `done`)
+  and a **Copy Error** button that pastes the headline, the failing rows and the log path in one go.
+- **Logs you can actually copy:** every progress pane is one selectable transcript with a **Copy Log** button
+  and an expand toggle, and each run is *also* written to a plain-text log in `~/Library/Logs/abgui/` — path
+  shown, copyable, revealable in Finder — with a self-describing header (abgui/abctl versions, context,
+  workspace, the **redacted** command), an outcome footer, and 50-file / 14-day / 20 MiB retention.
 - **Archive / rollback:** browse every pre-overwrite live version abctl archived and restore one in a click.
 - **Mac distribution:** local builds are ad-hoc signed; tagged GitHub releases can be Developer ID-signed
   and notarized when the Apple signing secrets are configured. Build it with `make gui-app` (macOS 14+).
@@ -218,12 +232,21 @@ app/package/device/user/group writes are unit-tested but still await their first
 `validate` reads **local files only** — no credentials, no Apple Business calls, works offline (so it runs in CI
 before any `AB_*` secret is in scope, and on a workspace whose tenant was never configured). It parses every
 `lib/` profile as an XML plist and checks the `Configuration` / `PayloadContent` structure, a top-level
-`PayloadIdentifier`, the **1 MiB** Apple Business size cap, and an identifier **declared by two profiles** (they
-overwrite each other on the device — both files are flagged, each naming the other). Then it checks the
-blueprint manifests: a `configurations:` entry with no matching file in `lib/` is an error — that's the mistake
-that syncs cleanly and attaches nothing. Warnings (`missing-payload-uuid`, `missing-display-name`,
-`no-inner-payloads`, `approaching-size-cap` at ≥ 512 KiB, a stray non-`.mobileconfig` file sync will ignore)
-never fail the run.
+`PayloadIdentifier`, a **top-level `PayloadVersion` of exactly `1`**, the **1 MiB** Apple Business size cap, and
+an identifier **declared by two profiles** (they overwrite each other on the device — both files are flagged,
+each naming the other). Then it checks the blueprint manifests: a `configurations:` entry with no matching file
+in `lib/` is an error — that's the mistake that syncs cleanly and attaches nothing. Warnings
+(`missing-payload-uuid`, `missing-display-name`, `no-inner-payloads`, `inner-payload-version`,
+`approaching-size-cap` at ≥ 512 KiB, a stray non-`.mobileconfig` file sync will ignore) never fail the run.
+
+> **Why `payload-version` is an error and not a warning.** The outer `PayloadVersion` is the version of the
+> profile *format*, not of your content, and Apple pins it to exactly `1`
+> ([TopLevel](https://developer.apple.com/documentation/devicemanagement/toplevel)). Apple Business accepts an
+> upload carrying any other value with a `2xx` and then **silently never stores it** — the live copy never
+> changes, so every subsequent sync recomputes the same change and archives another snapshot, forever. Set it
+> back to `<integer>1</integer>` and track your own revisions in git. A missing key is the same error; a
+> per-payload `PayloadVersion` other than `1` is only a warning (`inner-payload-version`), since only the outer
+> one is known to trigger the silent drop.
 
 ```sh
 abctl validate                # tree issues, then per-file errors/warnings, then the "N profile(s): …" summary
@@ -232,7 +255,8 @@ abctl validate --json         # the machine report (also -o json | -o yaml); -o 
 
 **Exit `1`** means something failed — and on `--json` the report is still printed on **stdout** *before* that
 non-zero exit, so a CI job (or abgui) can render exactly what it just gated on. Every finding carries a stable
-`code` (`size-cap`, `binary-plist`, `duplicate-identifier`, `missing-config`, …) plus one plain sentence.
+`code` (`size-cap`, `binary-plist`, `duplicate-identifier`, `missing-config`, `payload-version`, …) plus one
+plain sentence.
 `$ABCTL_VALIDATOR` still hands `lib/` to your own linter: on the human path it owns stdout and its exit code;
 on `--json` it runs *alongside* the built-in pass and lands in `validator` / `validatorCommand` /
 `validatorExitCode` / `validatorOutput` (16 KiB cap), where a non-zero exit fails the report.
@@ -289,6 +313,18 @@ Current sync controls also include `--git-source-of-truth` (treat `gitops/` as a
 `--refresh smart|full|metadata-only` (`smart` is the default cheap-list/cache mode), and
 `--verify targeted|full|none` after apply (`targeted` is the default).
 
+**What `--verify` now checks.** All three modes answer one question — *does the tenant match git?* — and differ
+only in what they read. The apply itself already confirms each write as it makes it (one detail `GET` per
+configuration actually written), so `targeted` refreshes blueprint membership and re-reads **only the writes
+that could not be confirmed** — normally none, and never a fan-out over the tenant, because Apple rate-limits
+hard. `full` re-reads every configuration and blueprint and compares the written ones against the refresh it
+already paid for (no extra calls). `none` reads nothing and prints no verdict. A config that can't be read back
+at all counts as a mismatch, not as verified. Mismatches print one of two lines — `post-apply verification
+FAILED: <name> still differs from desired on Apple Business` when Apple showed us a difference, or
+`post-apply verification FAILED: <name> could NOT be verified …` when it never answered — and exit `1`.
+**Grep for the uppercase `FAILED`**, which both carry. The verdict is printed **after** the per-item result
+table (or the `--json` object), so a failed run never hides *what was written*.
+
 **Exit codes:** `0` ok · `1` error · `2` usage · `3` changes pending (with `--exit-on-diff`).
 Data → stdout, diagnostics → stderr; `--json` for machine output.
 
@@ -299,6 +335,10 @@ Data → stdout, diagnostics → stderr; `--json` for machine output.
   detached unless you ask).
 - **Archive-before-overwrite** — a failed archive *skips* the write it protects, so the audit trail is never
   bypassed.
+- **Read-back-and-confirm** — the sync baseline records what Apple **stored** (re-read after the write), never
+  what was sent. A write Apple accepted but didn't persist is reported as an error with its archived copy, and
+  the baseline is left alone so the next run re-checks it — a stale baseline costs one redundant, archived
+  re-write; an optimistic one hides real drift.
 - **Newest-wins conflicts** compare the live `updatedDateTime` against the git file's commit time (else its
   mtime); an ambiguous case is skipped, never guessed.
 - **Never commit secrets** — `.env`, `secrets/`, keys, tokens, and the generated `gitops/` tree are all
@@ -344,6 +384,11 @@ It's the same logic the workflows run, so local and CI never disagree.
 - Only `CUSTOM_SETTING` configs are API-writable; their profile XML is **raw** (not base64) and `GET`
   round-trips it **byte-identically** → drift = raw SHA-256. `POST 201` / `PATCH 200` / `DELETE 204`.
 - The API validates uploads: a malformed profile (e.g. empty `PayloadContent`) → `400 PARAMETER_ERROR`.
+- **That validation is not exhaustive, and the gap fails silently:** Apple can answer a write `2xx` and then not
+  store the profile at all (stored XML and `updatedDateTime` unchanged, no error). Confirmed trigger: a
+  **top-level `PayloadVersion` ≠ `1`** — Apple requires exactly `1`
+  ([TopLevel](https://developer.apple.com/documentation/devicemanagement/toplevel)). Never treat a `2xx` as
+  proof of persistence; `abctl` reads the config back instead.
 - A Blueprint **create requires both a member** (device/user/group) **and content** (app/package/config).
 - Blueprint membership `POST` is **additive (merges)**; `DELETE`-with-body removes a specific member — so
   `abctl` converges membership per-member.

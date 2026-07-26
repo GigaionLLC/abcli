@@ -126,13 +126,33 @@ final class AppModel {
     var lastCheckedAt: Date?       // when the plan was last successfully computed (refresh confirmation)
     private var workTask: Task<Void, Never>? // the in-flight diff/seed, so a Cancel button can stop it
 
+    /// Why the last sync did not do what was asked — a SHORT headline plus the full text.
+    /// nil after a clean apply. This is the thing the user reads; `applyProgressLog` is the
+    /// evidence they read only if they want to (see `SyncFailure`).
+    var syncFailure: SyncFailure?
+
+    /// The file the current (or most recent) run's transcript was written to, so the UI can
+    /// copy the path and reveal it in Finder. nil when logging is unavailable — the affordance
+    /// hides rather than offering a path that leads nowhere.
+    private(set) var lastRunLogURL: URL?
+
+    /// The open log for the run in flight. One at a time: abgui runs one operation at a time
+    /// (`workTask` is singular, apply is awaited), so both progress channels narrate into
+    /// whichever run is currently open.
+    private var runLog: RunLog?
+
     /// Append a progress line (called from abctl's stderr stream), capped so it can't grow unbounded.
+    /// The on-disk log is written FIRST and is deliberately uncapped-by-count: the cap here exists
+    /// so a long run can't grow a SwiftUI list without bound, and truncating the evidence for the
+    /// same reason would defeat the point of having a log at all.
     func appendProgress(_ line: String) {
+        runLog?.line(line)
         progressLog.append(line)
         if progressLog.count > 200 { progressLog.removeFirst(progressLog.count - 200) }
     }
 
     func appendApplyProgress(_ line: String) {
+        runLog?.line(line)
         applyProgressLog.append(line)
         if applyProgressLog.count > 300 { applyProgressLog.removeFirst(applyProgressLog.count - 300) }
     }
@@ -141,6 +161,46 @@ final class AppModel {
         applyProgressLog = []
         applyResult = nil
         lastWriteError = nil
+        syncFailure = nil
+        // lastRunLogURL survives on purpose: clearing what is on SCREEN must not make the file
+        // that is still on disk unreachable.
+    }
+
+    // MARK: the run log (~/Library/Logs/abgui) — see Backend/RunLog.swift
+    //
+    // Opening one is fire-and-forget in spirit: `RunLog.begin` cannot throw and returns nil on
+    // any failure, and every write site is `runLog?.line(…)`, so a machine that cannot write
+    // logs runs exactly as it does today.
+
+    /// Open a log for `verb`. `argv` is the same pure-builder output the preview shows; it is
+    /// laundered through `CommandRecord` (which REDACTS at construction) so the header can only
+    /// ever contain the redacted form — no callsite can hand `RunLog` a raw secret-bearing arg.
+    /// This record is a redaction vehicle only; the Command Log's records still come from the
+    /// `RecordingRunner`, which sees the real invocation.
+    private func beginRunLog(_ verb: RunLog.Verb, argv: [String]) async {
+        // Belt and braces: a run that somehow never reached its `finishRunLog` would otherwise
+        // hold an open file handle and leave a footerless file. At most one log is ever open.
+        await finishRunLog("superseded by a new run")
+        let redacted = CommandRecord(argv: argv, cwd: repoRoot)
+        var version: VersionInfo?
+        if case .connected(let info, _) = connection { version = info }
+        runLog = await RunLog.begin(RunLog.Header(verb: verb,
+                                                  command: redacted.commandLine,
+                                                  workspace: repoRoot,
+                                                  context: context,
+                                                  abctlVersion: version?.version,
+                                                  abctlCommit: version?.commit,
+                                                  stdin: redacted.stdin))
+        // Deliberately assigned even when nil: this URL names the CURRENT run, and pointing at
+        // the previous run's file would be worse than offering nothing.
+        lastRunLogURL = runLog?.url
+    }
+
+    /// Close the open log with its outcome. `lastRunLogURL` is kept — the file is the point.
+    private func finishRunLog(_ outcome: String) async {
+        guard let log = runLog else { return }
+        runLog = nil
+        await log.finish(outcome: outcome)
     }
 
     // MARK: the command trail — every abctl invocation abgui has made this session
@@ -332,19 +392,39 @@ final class AppModel {
     }
 
     /// Reconcile the tenant to the workspace git state. Returns true on a clean apply.
+    ///
+    /// The outcome is reported through `syncFailure`: a SHORT headline plus the full text,
+    /// rather than the old `error.localizedDescription`, which for a failed sync was abctl's
+    /// entire stderr. Two things had to change for that to be possible — `AbctlClient.syncApply`
+    /// now decodes stdout before mapping the exit code (so a partially-failed apply arrives as
+    /// per-item rows instead of narration), and a partially-failed apply — which used to return
+    /// false while setting NO error at all — now names what failed.
     func apply(prune: Bool, limitWrites: Int?) async -> Bool {
         guard let client = makeClient(narrating: .apply) else {
-            lastWriteError = "abctl was not found in the app bundle."
+            let message = "abctl was not found in the app bundle."
+            lastWriteError = message
+            syncFailure = SyncFailure(kind: .aborted, headline: message,
+                                      details: "abgui runs the embedded CLI at abgui.app/Contents/Resources/abctl.")
             return false
         }
         isWriting = true
         lastWriteError = nil
+        syncFailure = nil
         applyResult = nil
         // Same ordering rule as loadPlan: reset here, above the await, so the `$ abctl sync
         // --apply …` and `→ exit 0 in 12.3s` lines the recorder emits from inside syncApply(...)
         // land after it — and, because the finish line is appended on the recorder's own
         // main-actor turn, before the outcome rows below rather than trailing them.
         applyProgressLog = []
+        // Open the on-disk log BEFORE the first narrated line, so the file is the complete
+        // transcript and not the tail of one. The argv comes from the same pure builder the
+        // run below uses (via `previewArgv`, which adds the `--context` tail the run adds),
+        // so the header names the command that actually executed.
+        await beginRunLog(.sync, argv: previewArgv(AbctlClient.syncApplyArgs(prune: prune,
+                                                                            limitWrites: limitWrites,
+                                                                            gitSourceOfTruth: gitSourceOfTruth,
+                                                                            refresh: refreshMode,
+                                                                            verify: verifyMode)))
         appendApplyProgress("starting sync --apply")
         if let plan {
             for item in plan.configs {
@@ -359,24 +439,45 @@ final class AppModel {
         do {
             // The raw toggle: `AbctlClient.syncApplyArgs` is what forces --prune on under
             // git-as-truth, so this callsite (and ApplySheet's preview of it) never re-derives it.
-            let result = try await client.syncApply(prune: prune,
+            // `syncApplyRun` keeps the exit code + stderr next to the decoded rows: abctl can
+            // report every item `done` and still exit non-zero when post-apply verification
+            // finds Apple didn't persist a write, and that verdict lives only on stderr.
+            let run = try await client.syncApplyRun(prune: prune,
                                                     limitWrites: limitWrites,
                                                     gitSourceOfTruth: gitSourceOfTruth,
                                                     refresh: refreshMode,
                                                     verify: verifyMode)
+            let result = run.result
             applyResult = result
             appendApplyProgress("sync --apply finished: \(result.totalWrites) write(s), \(result.totalErrors) error(s), \(result.totalSkipped) skipped")
             for row in result.rows {
                 appendApplyProgress("\(row.status): \(row.action) \(row.name) - \(row.detail)")
             }
+            // nil ⇔ every item succeeded AND abctl exited 0, so this IS the pass/fail test
+            // rather than a second condition that could disagree with the one below.
+            let failure = SyncFailure.from(applyResult: result, exitCode: run.code,
+                                           stderr: run.stderr, transcript: applyProgressLog)
+            syncFailure = failure
+            lastWriteError = failure?.headline // the short form; the blob is never the message
             isWriting = false
-            await loadPlan()           // refresh drift
-            await loadConfigurations() // the tenant changed
-            return result.totalErrors == 0
+            let outcome = failure.map { "failed — \($0.headline)" }
+                ?? "succeeded: \(result.totalWrites) write(s), \(result.totalSkipped) skipped"
+            await finishRunLog(outcome)
+            // The refresh below belongs to the sync the user just ran, so it does NOT open a
+            // second log file — `lastRunLogURL` must keep naming the sync the UI is reporting.
+            await loadPlan(newRunLog: false) // refresh drift
+            await loadConfigurations()       // the tenant changed
+            return failure == nil
         } catch {
-            lastWriteError = error.localizedDescription
-            appendApplyProgress("sync --apply failed: \(error.localizedDescription)")
-            isWriting = false
+            let failure = SyncFailure.from(error: error, transcript: applyProgressLog)
+            syncFailure = failure
+            lastWriteError = failure.headline
+            // Only the HEADLINE goes into the transcript: abctl's stderr was already streamed
+            // into it line by line by ProcessRunner, so appending the whole blob again was
+            // duplicating the log the user was complaining about.
+            appendApplyProgress("sync --apply failed: \(failure.headline)")
+            isWriting = false // drop the spinner before the log's final write, not after it
+            await finishRunLog("failed — \(failure.headline)")
             return false
         }
     }
@@ -535,7 +636,12 @@ final class AppModel {
     /// appends this run's transcript underneath it — the seed → diff hand-off, where wiping the
     /// log would throw away the `$ abctl seed` / `→ exit 0` lines the user just watched scroll by
     /// (the seed and the diff it triggers are one operation from the screen's point of view).
-    func loadPlan(resetLog: Bool = true) async {
+    ///
+    /// `newRunLog: false` says the same thing about the file on disk: the caller already owns an
+    /// open `RunLog` and this diff belongs in it (the seed hand-off) — or the caller's log is
+    /// already closed and this refresh must not steal `lastRunLogURL` from it (the post-apply
+    /// refresh, where that URL is what the sync's failure UI offers to copy).
+    func loadPlan(resetLog: Bool = true, newRunLog: Bool = true) async {
         // Fast pre-flight: diff resolves the tree at <workspace>/gitops. If that's absent, the
         // folder isn't a GitOps workspace yet — surface the "needs seed" state (DiffView offers
         // to initialize it) instead of waiting out a network diff that has nothing to compare.
@@ -557,15 +663,28 @@ final class AppModel {
         // before them, never wipe them.
         if resetLog { progressLog = [] }
         defer { isLoading = false }
+        if newRunLog {
+            await beginRunLog(.diff, argv: previewArgv(AbctlClient.planArgs(gitSourceOfTruth: gitSourceOfTruth,
+                                                                           refresh: refreshMode)))
+        }
+        var outcome = "plan computed"
         do {
             plan = try await client.plan(gitSourceOfTruth: gitSourceOfTruth, refresh: refreshMode)
             lastCheckedAt = Date() // stamp every successful check, so a refresh confirms even when in sync
         } catch is CancellationError {
             // user cancelled — clear the in-flight state, no error shown
+            outcome = "cancelled"
         } catch {
-            if Task.isCancelled { return } // a race: cancelled just after the process returned
-            loadError = error.localizedDescription
+            if Task.isCancelled {
+                outcome = "cancelled" // a race: cancelled just after the process returned
+            } else {
+                loadError = error.localizedDescription
+                outcome = "failed — \(SyncFailure.from(error: error, transcript: progressLog).headline)"
+            }
         }
+        // Only the call that OPENED a log closes it: the seed hand-off's diff writes into the
+        // seed's file and lets `seedWorkspace` stamp the single outcome both phases share.
+        if newRunLog { await finishRunLog(outcome) }
     }
 
     /// Seed the workspace as a cancellable task (so the Cancel button can stop it).
@@ -585,14 +704,17 @@ final class AppModel {
         isSeeding = true
         loadError = nil
         progressLog = [] // before the await, so the seed's own transcript survives it (see loadPlan)
+        await beginRunLog(.seed, argv: previewArgv(AbctlClient.seedArgs()))
         do {
             _ = try await client.seed()
         } catch is CancellationError {
             isSeeding = false
+            await finishRunLog("cancelled")
             return false
         } catch {
             isSeeding = false
             loadError = "Couldn't initialize the workspace from the tenant: \(error.localizedDescription)"
+            await finishRunLog("failed — \(SyncFailure.from(error: error, transcript: progressLog).headline)")
             return false
         }
         isSeeding = false
@@ -600,7 +722,9 @@ final class AppModel {
         // tree exists now → drift (a fresh seed should read back in sync). The log is NOT reset:
         // the seed's `$ abctl seed` / `→ exit 0` lines and the diff's belong to one transcript,
         // and clearing here would erase the command the user just ran the instant it finished.
-        await loadPlan(resetLog: false)
+        // The FILE follows the same rule (`newRunLog: false`) — one operation, one log.
+        await loadPlan(resetLog: false, newRunLog: false)
+        await finishRunLog("workspace initialized")
         return true
     }
 

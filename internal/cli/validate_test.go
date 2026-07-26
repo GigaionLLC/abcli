@@ -46,6 +46,15 @@ func goodProfile(identifier string) string {
 	<integer>1</integer>`)
 }
 
+// thinProfile is the minimum Apple accepts: legal, so it must only ever WARN.
+// PayloadVersion 1 is part of that minimum — Apple requires the key — so it is
+// here even though nothing else in this fixture is optional.
+func thinProfile() string {
+	return profileXML("\t<key>PayloadContent</key>\n\t<array/>\n\t<key>PayloadType</key>\n" +
+		"\t<string>Configuration</string>\n\t<key>PayloadIdentifier</key>\n" +
+		"\t<string>com.example.thin</string>\n\t<key>PayloadVersion</key>\n\t<integer>1</integer>")
+}
+
 // newTestTree builds a throwaway gitops tree (lib/ + blueprints/) under t.TempDir()
 // and returns it with the dir the tree is rooted at, so a case can also point
 // config.TreeDir at it.
@@ -131,6 +140,13 @@ func TestValidateGoodProfilePasses(t *testing.T) {
 	if len(p.PayloadTypes) != 1 || p.PayloadTypes[0] != "com.apple.wifi.managed" {
 		t.Errorf("payloadTypes = %v, want the inner payload type", p.PayloadTypes)
 	}
+	// A compliant PayloadVersion of 1 (and an inner payload that simply omits the
+	// key) must stay silent — the check may not add noise to a healthy tree.
+	for _, code := range []string{"payload-version", "inner-payload-version"} {
+		if hasCode(p.Errors, code) || hasCode(p.Warnings, code) {
+			t.Errorf("clean profile flagged %q: %+v / %+v", code, p.Errors, p.Warnings)
+		}
+	}
 	if rep.Validator != "built-in" {
 		t.Errorf("validator = %q, want built-in", rep.Validator)
 	}
@@ -184,6 +200,7 @@ func profileOfSize(t *testing.T, n int) string {
 		return profileXML("\t<key>PayloadContent</key>\n\t<array/>\n\t<key>PayloadType</key>\n" +
 			"\t<string>Configuration</string>\n\t<key>PayloadIdentifier</key>\n" +
 			"\t<string>com.example.sized</string>\n\t<key>PayloadUUID</key>\n\t<string>SIZED</string>\n" +
+			"\t<key>PayloadVersion</key>\n\t<integer>1</integer>\n" +
 			"\t<key>PayloadDisplayName</key>\n\t<string>Sized</string>\n\t<key>Padding</key>\n\t<string>" +
 			pad + "</string>")
 	}
@@ -247,7 +264,7 @@ func TestValidateUnreadableProfile(t *testing.T) {
 // true on the profile AND on the report (exit 0), while the warnings still count.
 func TestValidateWarningsDoNotFail(t *testing.T) {
 	tr, _ := newTestTree(t)
-	writeProfile(t, tr, "Thin.mobileconfig", profileXML("\t<key>PayloadContent</key>\n\t<array/>\n\t<key>PayloadType</key>\n\t<string>Configuration</string>\n\t<key>PayloadIdentifier</key>\n\t<string>com.example.thin</string>"))
+	writeProfile(t, tr, "Thin.mobileconfig", thinProfile())
 
 	rep := buildValidationReport(tr)
 	p := rep.Profiles[0]
@@ -289,7 +306,9 @@ func TestValidateInnerPayloadWarnings(t *testing.T) {
 	<key>PayloadIdentifier</key>
 	<string>com.example.inner.top</string>
 	<key>PayloadUUID</key>
-	<string>ABCD</string>`))
+	<string>ABCD</string>
+	<key>PayloadVersion</key>
+	<integer>1</integer>`))
 
 	p := buildValidationReport(tr).Profiles[0]
 	if !p.OK || !hasCode(p.Warnings, "inner-payload-missing-type") {
@@ -297,6 +316,180 @@ func TestValidateInnerPayloadWarnings(t *testing.T) {
 	}
 	if len(p.PayloadTypes) != 1 || p.PayloadTypes[0] != "com.apple.dock" {
 		t.Errorf("payloadTypes = %v, want only the typed payload", p.PayloadTypes)
+	}
+}
+
+// versionedProfile is a structurally complete profile whose top-level
+// PayloadVersion element is supplied raw, so a case can hand it
+// <integer>2</integer>, a non-integer value, or nothing at all.
+func versionedProfile(rawVersion string) string {
+	return profileXML(`	<key>PayloadContent</key>
+	<array>
+		<dict>
+			<key>PayloadType</key>
+			<string>com.apple.wifi.managed</string>
+		</dict>
+	</array>
+	<key>PayloadDisplayName</key>
+	<string>Corp Wi-Fi</string>
+	<key>PayloadIdentifier</key>
+	<string>com.example.wifi</string>
+	<key>PayloadType</key>
+	<string>Configuration</string>
+	<key>PayloadUUID</key>
+	<string>6E8B0F2A-2E4E-4E3A-9C2F-2A0C7D3B1E55</string>
+` + rawVersion)
+}
+
+// TestValidateOuterPayloadVersion is the regression for a real incident: a
+// profile whose TOP-LEVEL PayloadVersion had been bumped to 2 was accepted by
+// Apple Business with a 2xx, never stored, and the GitOps sync then recomputed
+// the identical change on every run forever. Apple requires exactly 1, so every
+// other value — and the missing key — is an error BEFORE anything is pushed.
+func TestValidateOuterPayloadVersion(t *testing.T) {
+	const key = "\t<key>PayloadVersion</key>\n\t"
+	cases := []struct {
+		name    string
+		raw     string
+		wantMsg string // the observed value the message has to name back
+	}{
+		{"the incident: bumped to 2", key + "<integer>2</integer>", "2"},
+		{"zero", key + "<integer>0</integer>", "0"},
+		{"a later revision", key + "<integer>17</integer>", "17"},
+		{"not an integer element", key + "<string>2.0</string>", "2.0"},
+		{"not a scalar at all", key + "<true/>", "<true>"},
+		{"key missing entirely", "", ""},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			tr, _ := newTestTree(t)
+			writeProfile(t, tr, "ManagedLoginItems-Policy.mobileconfig", versionedProfile(c.raw))
+
+			rep := buildValidationReport(tr)
+			p := rep.Profiles[0]
+			if !hasCode(p.Errors, "payload-version") {
+				t.Fatalf("errors = %+v, want a payload-version error", p.Errors)
+			}
+			if p.OK || rep.OK || rep.Failed != 1 || rep.Passed != 0 {
+				t.Errorf("payload-version must fail the profile and the run: profile.ok=%v report=%+v", p.OK, rep)
+			}
+			if len(p.Errors) != 1 { // nothing else about this fixture is wrong
+				t.Errorf("errors = %+v, want only payload-version", p.Errors)
+			}
+			msg := p.Errors[0].Message
+			// The message is the whole value of the check: it has to be actionable
+			// without opening Apple's docs, so it names the observed value, the
+			// required 1, and the silent-drop behavior that hides the failure.
+			for _, want := range []string{"PayloadVersion", "1", "developer.apple.com"} {
+				if !strings.Contains(msg, want) {
+					t.Errorf("message %q does not mention %q", msg, want)
+				}
+			}
+			if c.wantMsg == "" { // the missing-key case has no observed value to name
+				if !strings.Contains(msg, "no PayloadVersion") {
+					t.Errorf("message %q does not say the key is absent", msg)
+				}
+				return
+			}
+			if !strings.Contains(msg, c.wantMsg) {
+				t.Errorf("message %q does not name the observed value %q", msg, c.wantMsg)
+			}
+			if !strings.Contains(msg, "silently") {
+				t.Errorf("message %q does not explain that Apple accepts the write and silently drops it", msg)
+			}
+		})
+	}
+}
+
+// TestValidateInnerPayloadVersionWarns: the same rule one level down is worth
+// naming, but only the OUTER PayloadVersion is known to trigger the silent drop
+// — so an inner 2 is a WARNING, `ok` stays true, and the run still exits 0.
+func TestValidateInnerPayloadVersionWarns(t *testing.T) {
+	tr, _ := newTestTree(t)
+	writeProfile(t, tr, "Dock.mobileconfig", profileXML(`	<key>PayloadContent</key>
+	<array>
+		<dict>
+			<key>PayloadType</key>
+			<string>com.apple.dock</string>
+			<key>PayloadVersion</key>
+			<integer>2</integer>
+		</dict>
+		<dict>
+			<key>PayloadType</key>
+			<string>com.apple.wifi.managed</string>
+			<key>PayloadVersion</key>
+			<integer>1</integer>
+		</dict>
+	</array>
+	<key>PayloadDisplayName</key>
+	<string>Dock</string>
+	<key>PayloadIdentifier</key>
+	<string>com.example.dock</string>
+	<key>PayloadType</key>
+	<string>Configuration</string>
+	<key>PayloadUUID</key>
+	<string>ABCD</string>
+	<key>PayloadVersion</key>
+	<integer>1</integer>`))
+
+	rep := buildValidationReport(tr)
+	p := rep.Profiles[0]
+	if !p.OK || !rep.OK || rep.Failed != 0 || rep.Passed != 1 {
+		t.Fatalf("an inner PayloadVersion must not fail anything: profile.ok=%v report=%+v", p.OK, rep)
+	}
+	if len(p.Errors) != 0 {
+		t.Fatalf("errors = %+v, want none", p.Errors)
+	}
+	var got []validationIssue
+	for _, w := range p.Warnings {
+		if w.Code == "inner-payload-version" {
+			got = append(got, w)
+		}
+	}
+	if len(got) != 1 {
+		t.Fatalf("inner-payload-version warnings = %+v, want exactly one (the compliant payload is fine)", p.Warnings)
+	}
+	for _, want := range []string{"com.apple.dock", "2"} {
+		if !strings.Contains(got[0].Message, want) {
+			t.Errorf("warning %q does not name %q", got[0].Message, want)
+		}
+	}
+	if strings.Contains(got[0].Message, "com.apple.wifi.managed") {
+		t.Errorf("warning %q blames the compliant payload", got[0].Message)
+	}
+}
+
+// TestValidateInnerPayloadVersionUntyped: a wrong inner PayloadVersion in a
+// payload that has no PayloadType is still reported — by position, since there
+// is no type to name.
+func TestValidateInnerPayloadVersionUntyped(t *testing.T) {
+	tr, _ := newTestTree(t)
+	writeProfile(t, tr, "Untyped.mobileconfig", profileXML(`	<key>PayloadContent</key>
+	<array>
+		<dict>
+			<key>PayloadVersion</key>
+			<integer>3</integer>
+		</dict>
+	</array>
+	<key>PayloadDisplayName</key>
+	<string>Untyped</string>
+	<key>PayloadIdentifier</key>
+	<string>com.example.untyped</string>
+	<key>PayloadType</key>
+	<string>Configuration</string>
+	<key>PayloadUUID</key>
+	<string>ABCD</string>
+	<key>PayloadVersion</key>
+	<integer>1</integer>`))
+
+	p := buildValidationReport(tr).Profiles[0]
+	if !p.OK || !hasCode(p.Warnings, "inner-payload-version") {
+		t.Fatalf("untyped inner payload row = %+v", p)
+	}
+	for _, w := range p.Warnings {
+		if w.Code == "inner-payload-version" && !strings.Contains(w.Message, "#1") {
+			t.Errorf("warning %q does not locate the payload by position", w.Message)
+		}
 	}
 }
 
@@ -495,13 +688,31 @@ func TestValidationReportMarshalsEmptyAsArrays(t *testing.T) {
 
 	// A profile carrying no inner payloads must still marshal payloadTypes as [].
 	thin, _ := newTestTree(t)
-	writeProfile(t, thin, "Thin.mobileconfig", profileXML("\t<key>PayloadContent</key>\n\t<array/>\n\t<key>PayloadType</key>\n\t<string>Configuration</string>\n\t<key>PayloadIdentifier</key>\n\t<string>com.example.thin</string>"))
+	writeProfile(t, thin, "Thin.mobileconfig", thinProfile())
 	b, err = json.MarshalIndent(buildValidationReport(thin), "", "  ")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if out = string(b); !strings.Contains(out, `"payloadTypes": []`) || strings.Contains(out, "null") {
 		t.Errorf("a payload-less profile must marshal payloadTypes as []:\n%s", out)
+	}
+
+	// A FAILING profile is the payload the GUI's pre-flight sheet actually renders:
+	// the populated `errors` must not cost it the empty `warnings` array.
+	bumped, _ := newTestTree(t)
+	writeProfile(t, bumped, "ManagedLoginItems-Policy.mobileconfig", versionedProfile("\t<key>PayloadVersion</key>\n\t<integer>2</integer>"))
+	b, err = json.MarshalIndent(buildValidationReport(bumped), "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	out = string(b)
+	for _, want := range []string{`"warnings": []`, `"code": "payload-version"`, `"ok": false`} {
+		if !strings.Contains(out, want) {
+			t.Errorf("failing report JSON missing %s:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "null") {
+		t.Errorf("failing report JSON contains null:\n%s", out)
 	}
 
 	// The empty workspace is the case a GUI meets FIRST (before `abctl seed`), and
@@ -559,7 +770,7 @@ func TestRunValidateJSONPrintsReportAndExits1(t *testing.T) {
 // prints the summary line scripts grep for and exits 0.
 func TestRunValidateHumanPathExitsCleanOnWarnings(t *testing.T) {
 	tr, dir := newTestTree(t)
-	writeProfile(t, tr, "Thin.mobileconfig", profileXML("\t<key>PayloadContent</key>\n\t<array/>\n\t<key>PayloadType</key>\n\t<string>Configuration</string>\n\t<key>PayloadIdentifier</key>\n\t<string>com.example.thin</string>"))
+	writeProfile(t, tr, "Thin.mobileconfig", thinProfile())
 	noCredentials(t, dir)
 	orig := flagOutput
 	t.Cleanup(func() { flagOutput = orig })

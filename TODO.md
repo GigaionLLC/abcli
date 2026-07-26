@@ -140,10 +140,11 @@ transfer Apps & Books licenses, download/manage content tokens, or assign apps.
 - [x] **Built-in structural pass** — each `lib/` profile parsed as an XML plist (hand-rolled `encoding/xml`
   walker, no new module deps). Errors: `unreadable`, `empty`, `binary-plist`, `signed-profile`, `xml-parse`,
   `not-plist`, `size-cap` (≥ 1 MiB), `missing-payload-content`, `missing-payload-type`, `not-configuration`,
-  `missing-payload-identifier`, `duplicate-identifier` (both files flagged, each naming the other). Warnings
+  `missing-payload-identifier`, `payload-version` (top-level `PayloadVersion` missing or ≠ `1` — see the
+  2026-07-25 section below), `duplicate-identifier` (both files flagged, each naming the other). Warnings
   (never fail a run): `missing-payload-uuid`, `missing-display-name`, `no-inner-payloads`,
-  `inner-payload-missing-type`, `approaching-size-cap` (≥ 512 KiB). Files come from `Tree.LoadDesired`, so
-  validate and sync can't disagree about which files are profiles.
+  `inner-payload-missing-type`, `inner-payload-version`, `approaching-size-cap` (≥ 512 KiB). Files come from
+  `Tree.LoadDesired`, so validate and sync can't disagree about which files are profiles.
 - [x] **Tree checks (the high-value pre-sync one)** — a blueprint `configurations:` entry with no file in `lib/`
   is an error (`missing-config`); plus `blueprint-parse`, `empty-lib`, and `ignored-file` for a stray
   non-`.mobileconfig`.
@@ -183,6 +184,63 @@ transfer Apps & Books licenses, download/manage content tokens, or assign apps.
 - [ ] Click through on macOS: watch the Apply preview rewrite itself as prune/limit/refresh/verify move, check the
   footer's command line doesn't crowd the connection dot, and paste a copied `sync`/`validate` snippet into a
   terminal against a real seeded tree (the tests cover argv and rendering, not layout).
+
+## Write confirmation + failure legibility — shipped 2026-07-25
+
+Apple can answer a configuration write `2xx` and then **silently not store the profile** (confirmed trigger: a
+top-level `PayloadVersion` ≠ `1`; Apple requires exactly `1` —
+[TopLevel](https://developer.apple.com/documentation/devicemanagement/toplevel)). The live bytes and
+`updatedDateTime` never move, so a hash-only comparison re-plans the identical change forever — observed on one
+profile of 39. Defence in depth: catch it before the write, at the write, and after the run.
+
+- [x] **Read-back-and-confirm replaces the optimistic baseline** — `Engine.push` no longer records
+  `Hash: hash.Raw(want)` from the bytes it sent. It **always** re-reads via the new
+  `Applier.FetchCustomSettingDetail(id)` and compares `stored.ContentHash()` to `hash.Raw(want)`; a frozen
+  echoed `updatedDateTime` (`unchangedTimestamp`, compared by instant) is corroboration on a mismatch and the
+  tiebreaker for an unreadable read-back — never a verdict alone, since a no-op write that already matches
+  live cannot bump it either. The baseline
+  is written **from the read-back** or not at all. A mismatch is an error carrying the `PayloadVersion`
+  diagnosis *and* the pre-overwrite archive path (`failWithArchive`); a read-back that fails or returns no XML
+  is `done … — NOT VERIFIED` with the baseline untouched. One extra GET per config actually written.
+- [x] **`--verify` verifies the writes, not just membership** — `writtenConfigs` (completed create/update
+  outcomes only) → `verifyApply`: `targeted` re-reads only the writes the apply could not confirm (normally
+  none, since `push` confirms as it writes) plus the blueprint refresh, `full` diffs them against the refresh
+  it already pays for, `none` reads nothing. An unreadable config counts as a mismatch. Both verdict lines
+  carry the uppercase marker `FAILED` — an observed difference says "still differs from desired on Apple
+  Business", an unmeasurable one says "could NOT be verified" — and exit `1`.
+- [x] **The receipt always prints** — `finishApply` renders the per-item table (or the `--json`/`-o` object,
+  shape unchanged) on **every** exit path after `eng.Apply`, including baseline-save and verification failures.
+  Past that point the tenant has already been written to; an operator must never get an error without the
+  record of what was written.
+- [x] **`validate` fails it offline** — new error `payload-version` (missing or ≠ `1`, message citing Apple's
+  TopLevel doc and the silent-drop consequence) and new warning `inner-payload-version` (present per-payload
+  value ≠ `1`; an omitted key is not flagged, and only the outer one is known to trigger the drop), plus
+  `describeScalar` / `innerPayloadLabel` so a message names what the key actually holds and which payload.
+- [x] **abgui decodes before it checks the exit code on `sync --apply` too** — `syncApplyRun` returns
+  `ApplyRun {result, code, stderr}`; a partially-failed apply is data to render, not `AbctlError.cli(stderr)`
+  (which was abctl's whole narration presented as "the error"), and a clean-rows/non-zero-exit run — the
+  post-apply verification verdict, which lives only on stderr — is no longer reported as a clean sync.
+- [x] **abgui says what failed** — `SyncFailure` (short `headline` + untruncated `details`, six kinds, a pure
+  stderr extractor with a verified narration allow-list), a verdict banner pinned above the scroll view
+  (*Applied N* / *Applied N, M failed* / **Sync FAILED**) with **Copy Error**, **Copy Results**, and Done on
+  any terminal outcome.
+- [x] **abgui logs are copyable and durable** — one `TranscriptView` (a single selectable string, Copy Log,
+  visible scrollers, expand toggle, measured un-animated auto-follow) across Apply / Diff / Validate;
+  `CommandLogView` off `List` (self-sizing wrapping rows at unbounded width hang the window); and
+  `RunLog` → `~/Library/Logs/abgui/<verb>-<UTC>-<6 hex>.log` with a redacted self-describing header, an
+  outcome footer, `0600`/`0700`, and 50-file / 14-day / 20 MiB (5 MiB per file) retention. Logging can never
+  fail a sync.
+- [ ] **Add Swift unit tests for `SyncFailure` and `RunLog`** — both are deliberately pure/static where it
+  matters (the stderr extractor, `headerText`/`footerText`, `fileName`/`isRunLogName`, the retention rule), so
+  they can be tested against real captured stderr with no process, tenant, filesystem or UI. Not written yet;
+  macOS CI is still only the compile gate.
+- [ ] **Click through on macOS:** force a failing apply (a profile with a top-level `PayloadVersion` of `2` is
+  the exact reproduction) and confirm the banner reads **Sync FAILED** with abctl's verdict line, Copy Error
+  pastes headline + rows + log path, the transcript expand toggle grows the sheet, and the log file exists at
+  the shown path with a footer.
+- [ ] **Live-verify the read-back against the tenant** — a `zz-*` throwaway config, once with a good profile
+  (expect `done` and a baseline holding the *stored* hash) and once with the out-of-spec one (expect the
+  `did not persist` error, an unmoved baseline, and exit `1`).
 
 ## Later — enterprise polish
 - [ ] **`--platform business|school`** (Apple School Manager uses `api-school` + `school.api`).

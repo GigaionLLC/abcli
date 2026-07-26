@@ -184,6 +184,84 @@ protocol implementation remains documented separately in [docs/vpp-design.md](do
   ApplySheet's preview INPUTS against the apply path across the toggle matrix, and `previewArgv` threading the
   context exactly as the run does. macOS CI remains the compile gate.
 
+**Write confirmation + failure legibility (2026-07-25, working tree — not committed):**
+- **The incident this fixes.** Apple answered a configuration `PATCH` with a `2xx` and then **silently did not
+  store the profile**: the live XML and `updatedDateTime` never moved, so the next plan recomputed the identical
+  change and archived another snapshot — forever. One profile of 39 behaved this way while the other eight edits
+  in the same run converged. Cause: a **top-level `PayloadVersion` of `2`**; Apple pins the outer
+  `PayloadVersion` to exactly `1` because it versions the profile *format*, not the operator's content
+  ([TopLevel](https://developer.apple.com/documentation/devicemanagement/toplevel)). A plain hash comparison
+  cannot see this — an unchanged live copy is indistinguishable from ordinary drift — which is why the fix is a
+  read-back, in three independent places (before the write, at the write, after the run).
+- **`internal/reconcile/apply.go` — the write contract is now read-back-and-confirm.** `Engine.push` no longer
+  records `state.Entry{Hash: hash.Raw(want)}` from the bytes it *sent* (that optimistic baseline booked a
+  dropped write as success and made the loop invisible). It now **always** re-reads the config through the new
+  `Applier.FetchCustomSettingDetail(id)` and compares `stored.ContentHash()` to `hash.Raw(want)`; a write
+  response echoing the pre-apply `updatedDateTime` (`unchangedTimestamp`, compared by instant so `Z` vs
+  `+00:00` isn't read as progress) is **corroboration** on a mismatch and the tiebreaker when the read-back
+  itself yields no answer — never a verdict on its own, because a no-op `PATCH` that already agrees with live
+  cannot bump the timestamp either. The read-back is (already
+  `*ab.Client`'s own method, so no adapter) and compares `stored.ContentHash()` to `hash.Raw(want)`; writes the
+  baseline **from the observed read-back** on a match; on a mismatch reports an error carrying the
+  `notPersisted` sentence (which names the `PayloadVersion` cause) *plus* the pre-overwrite archive path via
+  the new `failWithArchive` — that copy is the evidence the live bytes never moved. A read-back that fails or
+  returns no XML is `done … — NOT VERIFIED (…)` with the baseline left alone: an unhappened read says nothing
+  about the write, and a stale baseline costs one redundant archived re-write while an optimistic one hides
+  real drift. Cost: exactly **one extra GET per config actually written** (never per planned item, never
+  counted as a write).
+- **`internal/cli/phase1.go` — `--verify` actually verifies.** `writtenConfigs(res)` lists the completed
+  `Create`/`Update` outcomes; `verifyApply` then dispatches: `targeted` re-reads only the writes the apply
+  could **not** confirm (`verifyWrittenConfigs`, by the id on the outcome — normally zero GETs, since
+  `push` already confirmed each write; never a tenant-wide fan-out) on top of the
+  blueprint-membership refresh; `full` diffs them against the refresh it already pays for
+  (`verifyAgainstLive`); `none` reads nothing. `compareWritten` is the proof (`ContentHash()` vs
+  `hash.Raw(desired)`); an unreadable config is a **mismatch**, not a pass. `reportVerification` prints
+  `post-apply verification FAILED: <name> still differs from desired on Apple Business` (the wording CI greps
+  for) and a summary naming the `PayloadVersion` cause; any mismatch exits `1`. New `finishApply` guarantees
+  the receipt: **every** exit path after `eng.Apply` (baseline-save failure, a verification fetch error, a
+  mismatch) renders the per-item table or the machine object *before* returning the error, and keeps the
+  machine shape stable when the blueprint phase never ran.
+- **`internal/cli/validate.go` — catch it offline, before it is ever pushed.** New error code
+  `payload-version` (missing **or** ≠ `1` on the top-level dict, message citing Apple's TopLevel doc and
+  explaining the silent-drop consequence) and new warning `inner-payload-version` (a *present* per-payload
+  `PayloadVersion` ≠ `1`; only the outer one is known to trigger the drop, and an omitted key is not flagged).
+  Helpers `describeScalar` (renders `<true/>` or `<dict>` rather than an empty value) and `innerPayloadLabel`
+  (names an inner payload by its `PayloadType`, else its position). The inner-payload loop now binds
+  `pt := item.dict["PayloadType"].text` *before* the `switch` instead of in its statement, so the new warning
+  after it can name the payload by type (a nil map on a non-dict item still reads as `""`).
+- **abgui — the failure is now a sentence, not a log blob.** `AbctlClient.syncApplyRun` decodes stdout
+  **before** mapping the exit code (the rule `validateProfiles()` already followed) and returns
+  `ApplyRun {result, code, stderr}`, because abctl can mark every item `done` and still exit non-zero — the
+  post-apply verdict lives only on stderr. New `Models/SyncFailure.swift` ranks without discarding (`headline`
+  ≤ 180 chars + full `details`; kinds `.itemsFailed/.aborted/.timedOut/.cancelled/.unreadable/.exitedNonZero`;
+  a pure stderr extractor with a verified `narrationPrefixes` allow-list, since `main.go` exits *silently* for
+  a `cli.ExitError`). `ApplySheet` gained a verdict banner **above** the scroll view (*Applied N* / *Applied N,
+  M failed* / **Sync FAILED**), **Copy Error**, **Copy Results**, and a Done-on-any-terminal-outcome button.
+  New `Views/TranscriptView.swift` is now the one log pane (one selectable string instead of per-line `Text`s,
+  line count, Copy Log, visible scrollers, an expand toggle that grows the sheet, measured un-animated
+  auto-follow) used by Apply / Diff / Validate. `CommandLogView` moved off `List` (self-sizing wrapping rows at
+  unbounded width cycle and hang the window). `CommandCopyButton` takes an `@autoclosure` so Copy-All-as-Script
+  stops rebuilding on every render.
+- **abgui run log — `~/Library/Logs/abgui/<verb>-<UTC>-<6 hex>.log`.** New `Backend/RunLog.swift` (an actor)
+  writes a self-describing header (schema, verb, abgui/abctl versions, macOS, context, workspace, the
+  **redacted** command line, stdin as a byte count), the run's transcript, and an outcome/duration footer.
+  `0600` in a `0700` directory; retention 50 files / 14 days / 20 MiB, 5 MiB per file with a `[log truncated]`
+  marker; the pruner matches only abgui's own filename shape. It can never break a sync: `begin` returns `nil`
+  on any failure, `line(_:)` is fire-and-forget, a failed write retires the log. `AppModel` keeps one open at a
+  time; the seed → diff hand-off shares one file, and the post-apply refresh opens none so `lastRunLogURL`
+  keeps naming the sync being reported. Path is shown, copyable, and revealable in Finder.
+- **Tests:** `internal/reconcile/apply_test.go` — `TestApplyWriteConfirmation` (7-case matrix: persisted →
+  baseline takes the *observed* hash/timestamp; silently dropped → error + baseline unmoved; frozen echoed
+  timestamp → still read back, and the read-back's answer decides (mismatch → error; a no-op write that
+  already matches → confirmed); read-back error and read-back-without-XML → done-but-unverified),
+  `TestApplyCreateWriteConfirmation` (a mismatch leaves **no** baseline entry) and
+  `TestApplyLimitWritesConfirmation`. `internal/cli/phase1_test.go` — 8 new cases across `writtenConfigs`, all
+  three verify modes (including the dropped-write catch and the unverifiable-write cases) and `finishApply`'s
+  receipt/exit contract. `internal/cli/validate_test.go` — `TestValidateOuterPayloadVersion`,
+  `TestValidateInnerPayloadVersionWarns`, `TestValidateInnerPayloadVersionUntyped`. **No Swift tests were added
+  for `SyncFailure`/`RunLog` yet** — both were written pure/testable for exactly that, and macOS CI remains the
+  compile gate.
+
 **Built but NOT yet driven live / still gated out:**
 - **The all-six-collection `sync --apply` path** — config upsert and configuration-membership orchestration
   ran live on 2026-07-05, but app/package/device/user/group reconciliation has not. The full engine is
@@ -265,6 +343,13 @@ Full breakdown in **[TODO.md](TODO.md)**. Short version:
   (not base64); `GET` round-trips it **byte-identically** → drift = raw SHA-256.
 - The API validates uploads (malformed → `400 PARAMETER_ERROR.INVALID`; valid → `201`). Config CRUD:
   `POST 201` / `PATCH 200` / `DELETE 204`, `Content-Type: application/json`.
+- **A `2xx` is NOT proof of persistence (2026-07-25).** Apple's upload validation is not exhaustive, and what it
+  misses fails silently: the write is accepted and the profile is simply never stored — the live XML and
+  `updatedDateTime` stay unchanged, with no error anywhere. Confirmed trigger: a **top-level `PayloadVersion`
+  other than `1`** (Apple requires exactly `1`;
+  [TopLevel](https://developer.apple.com/documentation/devicemanagement/toplevel)); a `2` reproduces it
+  exactly. Always confirm a write by reading the configuration back — abctl does, in `Engine.push` and again in
+  `--verify`.
 - **Blueprint create requires ≥1 `orgDevices`/`users`/`userGroups` member** (configs alone →
   `409 …MISSING_MEMBERS`). ⇒ there is **no harmless empty test Blueprint**; blueprint/membership ops always
   target real devices/users. Config CRUD on **unattached** configs deploys to nobody and is the safe test path.

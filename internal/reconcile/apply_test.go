@@ -17,11 +17,19 @@ import (
 // relOps additionally records each membership call's relationship + member type,
 // so per-collection tests can assert the API relation without disturbing the
 // event-log format older tests pin.
+//
+// stored models Apple's side of a write: a successful POST/PATCH puts the bytes in
+// stored[id] and the read-back returns them. dropWrites reproduces the real defect
+// this engine now guards against — Apple answers 2xx but keeps the old bytes.
 type fakes struct {
 	events      []string
 	relOps      []string
 	files       map[string]string
-	updatedTS   string
+	stored      map[string]string // id → the profile XML Apple "persisted"
+	updatedTS   string            // updatedDateTime echoed by a write response
+	readBackTS  string            // updatedDateTime reported by a read-back
+	dropWrites  bool              // 2xx, but nothing is persisted (the silent drop)
+	readBackErr bool              // the confirming GET fails (network / rate limit)
 	createErr   bool
 	updateErr   bool
 	deleteErr   bool
@@ -33,22 +41,45 @@ type fakes struct {
 	bpRemoveErr bool
 }
 
-func newFakes() *fakes { return &fakes{files: map[string]string{}, updatedTS: "ts-server"} }
+func newFakes() *fakes {
+	return &fakes{
+		files:      map[string]string{},
+		stored:     map[string]string{},
+		updatedTS:  "ts-server",
+		readBackTS: "ts-server",
+	}
+}
 
-func (f *fakes) CreateConfiguration(name, _ string, _ []string) (string, string, error) {
+func (f *fakes) CreateConfiguration(name, xml string, _ []string) (string, string, error) {
 	if f.createErr {
 		return "", "", errors.New("create boom")
 	}
 	f.events = append(f.events, "create:"+name)
+	if !f.dropWrites {
+		f.stored["id-"+name] = xml
+	}
 	return "id-" + name, f.updatedTS, nil
 }
 
-func (f *fakes) UpdateConfiguration(id, _, _ string) (string, error) {
+func (f *fakes) UpdateConfiguration(id, _, xml string) (string, error) {
 	if f.updateErr {
 		return "", errors.New("update boom")
 	}
 	f.events = append(f.events, "update:"+id)
+	if !f.dropWrites {
+		f.stored[id] = xml
+	}
 	return f.updatedTS, nil
+}
+
+// FetchCustomSettingDetail is the post-write read-back: it reports what Apple
+// actually stored, which is *not* necessarily what the write sent.
+func (f *fakes) FetchCustomSettingDetail(id string) (ab.LiveConfig, error) {
+	f.events = append(f.events, "readback:"+id)
+	if f.readBackErr {
+		return ab.LiveConfig{}, errors.New("readback boom")
+	}
+	return ab.LiveConfig{ID: id, XML: f.stored[id], Updated: f.readBackTS}, nil
 }
 
 func (f *fakes) DeleteConfiguration(id string) error {
@@ -190,6 +221,250 @@ func TestApplyActions(t *testing.T) {
 	// Archive must precede the update it protects.
 	if got := indexOf(f.events, "archive:upd.mobileconfig:"+reasonReplaced); got < 0 || got > indexOf(f.events, "update:id-upd") {
 		t.Errorf("archive did not precede update: %v", f.events)
+	}
+}
+
+// TestApplyWriteConfirmation drives the post-write read-back matrix on the Update
+// path. Apple answers a POST/PATCH 2xx and then silently discards a profile that
+// violates its schema (an outer PayloadVersion of 2 does exactly that), so a
+// baseline recorded from the desired bytes books the dropped write as success and
+// every later run recomputes the identical change. The baseline may therefore only
+// come from OBSERVED state — or not be written at all.
+func TestApplyWriteConfirmation(t *testing.T) {
+	const oldXML, newXML = "OLD", "NEW"
+	oldHash, newHash := hash.Raw([]byte(oldXML)), hash.Raw([]byte(newXML))
+
+	cases := []struct {
+		name       string
+		setup      func(*fakes)
+		status     string
+		detailHas  []string
+		wantHash   string // baseline hash expected after the run
+		wantTS     string // baseline updatedDateTime expected after the run
+		wantReadBk bool   // a confirming GET was (not) worth issuing
+		wantVerify Verification
+	}{
+		{
+			name:       "persisted: baseline records the OBSERVED hash and timestamp",
+			setup:      func(f *fakes) { f.readBackTS = "ts-observed" },
+			status:     "done",
+			detailHas:  []string{"patched ABM"},
+			wantHash:   newHash,
+			wantTS:     "ts-observed", // read-back's timestamp, not the PATCH echo
+			wantReadBk: true,
+			wantVerify: VerifyConfirmed,
+		},
+		{
+			name:       "silently dropped: read-back still holds the pre-write bytes",
+			setup:      func(f *fakes) { f.dropWrites = true },
+			status:     "error",
+			detailHas:  []string{"did not persist", "PayloadVersion"},
+			wantHash:   oldHash, // baseline must NOT advance
+			wantTS:     "t0",
+			wantReadBk: true,
+			wantVerify: VerifyNotPersisted,
+		},
+		{
+			// The frozen timestamp is corroboration, not the verdict: the read-back is
+			// still issued and its answer is what fails the write.
+			name:       "unchanged echoed timestamp corroborates the read-back's mismatch",
+			setup:      func(f *fakes) { f.dropWrites, f.updatedTS, f.readBackTS = true, "t0", "t0" },
+			status:     "error",
+			detailHas:  []string{"did not persist", "echoed the unchanged updatedDateTime", "PayloadVersion"},
+			wantHash:   oldHash,
+			wantTS:     "t0",
+			wantReadBk: true,
+			wantVerify: VerifyNotPersisted,
+		},
+		{
+			// The regression the early return caused: a PATCH that stores nothing because
+			// the bytes are ALREADY what git wants cannot bump updatedDateTime either. The
+			// read-back overrules the hint, the baseline advances, and the run converges
+			// instead of failing forever with a false PayloadVersion accusation. (Compute
+			// reaches this via a Conflict resolved to Update over identical content.)
+			name:       "no-op write with a frozen timestamp is confirmed by the read-back",
+			setup:      func(f *fakes) { f.updatedTS, f.readBackTS = "t0", "t0" },
+			status:     "done",
+			detailHas:  []string{"patched ABM"},
+			wantHash:   newHash,
+			wantTS:     "t0",
+			wantReadBk: true,
+			wantVerify: VerifyConfirmed,
+		},
+		{
+			// Neither signal is conclusive alone; together they are. A frozen timestamp
+			// AND no readable profile is the dropped write, not a flaky GET.
+			name:       "frozen timestamp plus an unreadable read-back is the dropped write",
+			setup:      func(f *fakes) { f.updatedTS, f.readBackErr = "t0", true },
+			status:     "error",
+			detailHas:  []string{"did not persist", "echoed the unchanged updatedDateTime", "readback boom"},
+			wantHash:   oldHash,
+			wantTS:     "t0",
+			wantReadBk: true,
+			wantVerify: VerifyNotPersisted,
+		},
+		{
+			name:       "read-back error is done-but-unverified, never a failed write",
+			setup:      func(f *fakes) { f.readBackErr = true },
+			status:     "done",
+			detailHas:  []string{"NOT VERIFIED", "readback boom"},
+			wantHash:   oldHash, // no optimistic baseline that could mask real drift
+			wantTS:     "t0",
+			wantReadBk: true,
+			wantVerify: VerifyUnconfirmed,
+		},
+		{
+			name:       "read-back without profile XML is unverified, not an accusation",
+			setup:      func(f *fakes) { f.dropWrites = true; f.stored["id-u"] = "" },
+			status:     "done",
+			detailHas:  []string{"NOT VERIFIED", "no profile XML"},
+			wantHash:   oldHash,
+			wantTS:     "t0",
+			wantReadBk: true,
+			wantVerify: VerifyUnconfirmed,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newFakes()
+			f.stored["id-u"] = oldXML // what Apple holds before the write
+			tc.setup(f)
+			desired := map[string][]byte{"u.mobileconfig": []byte(newXML)}
+			live := []ab.LiveConfig{{Name: "u.mobileconfig", ID: "id-u", XML: oldXML, Updated: "t0"}}
+			base := &state.State{Configs: map[string]state.Entry{
+				"u.mobileconfig": {ABMID: "id-u", Hash: oldHash, UpdatedDateTime: "t0"},
+			}}
+			plan := &Plan{Items: []Item{{Name: "u.mobileconfig", Action: Update}}}
+
+			res := engineWith(f).Apply(plan, desired, live, base, Opts{})
+
+			var got Outcome
+			for _, o := range res.Outcomes {
+				if o.Name == "u.mobileconfig" {
+					got = o
+				}
+			}
+			if got.Status != tc.status {
+				t.Fatalf("status = %q (%q), want %q", got.Status, got.Detail, tc.status)
+			}
+			for _, want := range tc.detailHas {
+				if !strings.Contains(got.Detail, want) {
+					t.Errorf("detail %q must mention %q", got.Detail, want)
+				}
+			}
+			// The PATCH itself happened either way: it consumed the write budget and
+			// its pre-overwrite archive is still the operator's evidence.
+			if res.Writes != 1 {
+				t.Errorf("writes = %d, want 1 (the PATCH was issued)", res.Writes)
+			}
+			if got.Archive != "/arch/u.mobileconfig" {
+				t.Errorf("archive = %q, want the pre-overwrite copy path", got.Archive)
+			}
+			if e := base.Configs["u.mobileconfig"]; e.Hash != tc.wantHash || e.UpdatedDateTime != tc.wantTS {
+				t.Errorf("baseline = %+v, want hash %s / ts %s", e, tc.wantHash, tc.wantTS)
+			}
+			if didRead := indexOf(f.events, "readback:id-u") >= 0; didRead != tc.wantReadBk {
+				t.Errorf("read-back issued = %v, want %v: %v", didRead, tc.wantReadBk, f.events)
+			}
+			// The verdict rides on the outcome so a caller can report the write without
+			// asking Apple the same question a second time (AGENT.md: rate limits).
+			if got.Verified != tc.wantVerify {
+				t.Errorf("verified = %q, want %q", got.Verified, tc.wantVerify)
+			}
+			// So does the id — including on the outcomes whose baseline entry is
+			// deliberately not written, which is exactly when a caller has no other
+			// source for it (internal/cli re-reads unconfirmed writes by this id).
+			if got.ABMID != "id-u" {
+				t.Errorf("outcome ABMID = %q, want id-u on every create/update outcome", got.ABMID)
+			}
+			// Exactly one confirming GET per write, never more.
+			if n := countOf(f.events, "readback:id-u"); n > 1 {
+				t.Errorf("read-back issued %d times, want at most 1: %v", n, f.events)
+			}
+			// The confirming GET is a read: it must never be counted as a tenant write.
+			if idx := indexOf(f.events, "readback:id-u"); idx >= 0 && idx < indexOf(f.events, "update:id-u") {
+				t.Errorf("read-back must follow the write: %v", f.events)
+			}
+		})
+	}
+}
+
+// TestApplyCreateWriteConfirmation mirrors the matrix on the Create path, where a
+// mismatch must leave NO baseline entry at all — an optimistic one would claim a
+// config is synced that Apple never stored.
+func TestApplyCreateWriteConfirmation(t *testing.T) {
+	desired := map[string][]byte{"n.mobileconfig": []byte("NEW")}
+	plan := &Plan{Items: []Item{{Name: "n.mobileconfig", Action: Create}}}
+
+	// Apple accepted the POST but holds different bytes → error, no baseline entry.
+	f := newFakes()
+	f.dropWrites = true
+	f.stored["id-n.mobileconfig"] = "SOMETHING-ELSE"
+	base := &state.State{Configs: map[string]state.Entry{}}
+	res := engineWith(f).Apply(plan, desired, nil, base, Opts{})
+	if res.Errors != 1 || res.Writes != 1 {
+		t.Fatalf("dropped create → errors=%d writes=%d, want 1/1: %+v", res.Errors, res.Writes, res.Outcomes)
+	}
+	if _, ok := base.Configs["n.mobileconfig"]; ok {
+		t.Error("a create Apple did not persist must not leave a baseline entry")
+	}
+	if !strings.Contains(res.Outcomes[0].Detail, "PayloadVersion") {
+		t.Errorf("detail %q must name the likely cause", res.Outcomes[0].Detail)
+	}
+	// A create with no baseline entry is the ONLY place the new id exists — without it
+	// on the outcome, nothing downstream could re-read the configuration Apple made.
+	if res.Outcomes[0].ABMID != "id-n.mobileconfig" {
+		t.Errorf("dropped create ABMID = %q, want the id the POST returned", res.Outcomes[0].ABMID)
+	}
+
+	// Confirmed create → baseline from the read-back (id + observed hash + observed ts).
+	f = newFakes()
+	f.readBackTS = "ts-observed"
+	base = &state.State{Configs: map[string]state.Entry{}}
+	res = engineWith(f).Apply(plan, desired, nil, base, Opts{})
+	if res.Errors != 0 {
+		t.Fatalf("confirmed create → errors=%d: %+v", res.Errors, res.Outcomes)
+	}
+	e := base.Configs["n.mobileconfig"]
+	if e.ABMID != "id-n.mobileconfig" || e.Hash != hash.Raw([]byte("NEW")) || e.UpdatedDateTime != "ts-observed" {
+		t.Errorf("create baseline = %+v, want the observed read-back state", e)
+	}
+}
+
+// TestApplyLimitWritesConfirmation pins that the confirming GET rides along with the
+// write it confirms: it neither consumes the write budget nor fires for items the
+// budget skipped (Apple rate-limits hard — one extra GET per real write, no more).
+func TestApplyLimitWritesConfirmation(t *testing.T) {
+	f := newFakes()
+	desired := map[string][]byte{
+		"a.mobileconfig": []byte("A"),
+		"b.mobileconfig": []byte("B"),
+		"c.mobileconfig": []byte("C"),
+	}
+	base := &state.State{Configs: map[string]state.Entry{}}
+	plan := &Plan{Items: []Item{
+		{Name: "a.mobileconfig", Action: Create},
+		{Name: "b.mobileconfig", Action: Create},
+		{Name: "c.mobileconfig", Action: Create},
+	}}
+
+	res := engineWith(f).Apply(plan, desired, nil, base, Opts{LimitWrites: 2})
+
+	if res.Writes != 2 || res.Skipped != 1 {
+		t.Fatalf("writes=%d skipped=%d, want 2/1 (GETs are not writes)", res.Writes, res.Skipped)
+	}
+	reads := 0
+	for _, ev := range f.events {
+		if strings.HasPrefix(ev, "readback:") {
+			reads++
+		}
+	}
+	if reads != 2 {
+		t.Errorf("read-backs = %d, want 2 (one per config actually written)", reads)
+	}
+	if indexOf(f.events, "readback:id-c.mobileconfig") >= 0 {
+		t.Error("a config skipped by --limit-writes must not be read back")
 	}
 }
 
@@ -465,4 +740,16 @@ func indexOf(ss []string, want string) int {
 		}
 	}
 	return -1
+}
+
+// countOf reports how many times an event fired — the read-back budget is a COUNT,
+// not a boolean: issuing the confirming GET twice would silently double the traffic.
+func countOf(ss []string, want string) int {
+	n := 0
+	for _, s := range ss {
+		if s == want {
+			n++
+		}
+	}
+	return n
 }

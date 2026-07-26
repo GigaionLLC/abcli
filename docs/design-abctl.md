@@ -80,6 +80,7 @@ Apple Business's built-in MDM differs from a typical declarative MDM in ways tha
 | **C3** | There are **no config-level labels/scoping** | fine-grained targeting = Blueprint `orgDevices`, `users`, and `userGroups` relationships |
 | **C4** | The API has **no batch reconcile endpoint** — only per-resource POST/PATCH/DELETE | **`abctl` is the reconcile engine** (client-side plan + apply) |
 | **C5** | **Only `CUSTOM_SETTING` is writable**; the ~22 native config types are read-only | manage/prune scope = **only the `CUSTOM_SETTING` configs abctl owns**; never touch native/console-only configs |
+| **C6** | A write can be **accepted (`2xx`) and silently not persisted** — Apple answers the `POST`/`PATCH`, then discards a profile that violates its schema (top cause: a top-level `PayloadVersion` ≠ 1) | the executor **reads the config back** after every write and records the baseline from what Apple *stored*, never from what was sent; `validate` fails the profile before it is ever pushed |
 
 Plus: **`relationships` POST is additive (merges) — verified live 2026-07-05** → converge membership via
 explicit per-member POST (add) / DELETE-with-body (remove), never a wholesale `relationships` block.
@@ -159,6 +160,42 @@ remains future work (see [TODO.md](../TODO.md)).
 round-trips them, so a plain hash is an exact drift signal. `updatedDateTime` is the cheap "did the live
 side change / who's newer" signal.
 
+> **Qualification (learned the hard way, 2026-07-25).** That is true of a profile Apple *stored*. An
+> **out-of-spec profile is not stored at all**: Apple answers the `POST`/`PATCH` with a `2xx` and silently
+> discards it, so the live bytes and `updatedDateTime` never move (C6). A hash comparison then reads the
+> unchanged live copy as ordinary drift and the loop re-plans the identical change **forever** — observed on
+> one profile of 39, its live `updatedDateTime` frozen across every attempt while the other eight edits in the
+> same run converged. So: the hash is an exact *drift* signal, never a *proof that a write landed*. That proof
+> is the read-back below.
+
+**Write confirmation (read-back-and-confirm).** `Engine.push` (`internal/reconcile/apply.go`) no longer records
+the baseline optimistically from the desired bytes (`Hash: hash.Raw(want)`). An optimistic baseline books an
+accepted-and-dropped write as a success, so the next `Compute` sees the same drift and pushes again — the
+loop above, made invisible. The baseline must describe what Apple **stored**, so after the `POST`/`PATCH` the
+executor:
+1. **always** re-reads the one config with `Applier.FetchCustomSettingDetail(id)` (the real `*ab.Client` method,
+   so no adapter) and compares `stored.ContentHash()` against `hash.Raw(want)` — the same raw-hash signal the
+   planner uses, so "match" here means the next `Compute` really will see convergence;
+2. treats a write response echoing the pre-apply `updatedDateTime` (`unchangedTimestamp`, compared by instant,
+   not by string) as **corroboration, never a verdict on its own**: it is appended to a mismatch's detail, and
+   it is the tiebreaker that turns an *unreadable* read-back (fetch failed, no profile XML, no id) from
+   "NOT VERIFIED" into "not persisted". It must not short-circuit the read-back, because a no-op `PATCH` whose
+   bytes already match what Apple holds cannot bump the timestamp either — and that is reachable, since a
+   `Conflict` against a stale baseline resolves to an `Update` that may already agree with live. Failing on the
+   hint alone would blame the operator's `PayloadVersion` for a converged profile, forever;
+3. on a match, writes `state.Entry{ABMID, Hash: stored.ContentHash(), UpdatedDateTime: stored.Updated}` from the
+   **observed** read-back;
+4. on a mismatch, reports an **error** naming the top cause (top-level `PayloadVersion` must be exactly `1`) and
+   leaves the baseline untouched — with the pre-overwrite `archive/` path attached (`failWithArchive`), because
+   that copy is the evidence the live bytes never moved;
+5. when the read-back itself fails or returns no profile XML, records `done … — NOT VERIFIED (…)` and still
+   leaves the baseline alone. An unhappened read says nothing about the write, so failing the run would cry
+   wolf; a stale baseline costs at most one redundant, archived re-write next run, while an optimistic one
+   hides a genuinely dropped write.
+
+Rate-limit cost (AGENT.md): exactly **one extra `GET` per config actually written** — never per planned item,
+never for pulls, skips or budget-capped items, and never counted as a write.
+
 **Membership convergence:** always GET-current → compute add/remove → per-member POST/DELETE. The
 relationship POST is **additive (merges), verified live 2026-07-05** (POST B to `{A}` → `{A,B}`; DELETE A →
 `{B}`), so each relationship converges deterministically. Apple documents that multiple Blueprints can target
@@ -171,8 +208,29 @@ Apple ID + `updatedDateTime` still match, and profile XML detail fetches only wh
 pull/prune, or archive-before-overwrite safety needs the body. `--refresh=full` re-downloads every live
 profile XML; `--refresh=metadata-only` is fastest but depends on a complete baseline cache.
 
-After apply, `--verify=targeted` refreshes blueprint membership only, `--verify=full` performs a full live
-config + blueprint refresh, and `--verify=none` trusts successful write responses.
+After apply, every mode now answers the same question — *does the tenant match git?* — and only the reads
+differ (`verifyApply` in `internal/cli/phase1.go`; the candidate list is `writtenConfigs(res)`, i.e. completed
+`Create`/`Update` outcomes only, since pulls, skips and prunes have no desired bytes to read back):
+
+| mode | reads | checks |
+|---|---|---|
+| `targeted` (default) | blueprint-membership refresh **+ one detail `GET` for each write the apply could not confirm** (`verifyWrittenConfigs`, by the id on the outcome) — normally **zero**, since `reconcile.push` already confirmed each write as it made it | each unconfirmed write's `ContentHash()` vs `hash.Raw(desired)`; no fan-out over the whole tenant |
+| `full` | the full live config + blueprint refresh it already performs for id harvesting | the same comparison, against the bytes that refresh already carries (`verifyAgainstLive`) — no extra `GET`s |
+| `none` | nothing | nothing — the operator opted out, and no verdict is printed |
+
+A config that cannot be read back (fetch error, absent from the full refresh, no profile XML returned, no id
+recorded) counts as a **mismatch**, not as verified: an unverifiable write is not evidence of a good one.
+A difference Apple actually showed us prints `post-apply verification FAILED: <name> still differs from desired
+on Apple Business`, plus a summary naming the top-level `PayloadVersion` cause. A write that could not be
+measured prints `post-apply verification FAILED: <name> could NOT be verified — Apple was not asked, or did not
+answer, with a comparable profile`, and deliberately withholds the `PayloadVersion` hint: we have no evidence
+the profile is out of spec, only that we never saw it. **The stable marker to grep for is the uppercase word
+`FAILED`**, which both carry (`SyncFailure.verdictMarker` in abgui matches the same token). Both fail the run
+with exit
+`1` — after `finishApply` has rendered the receipt. That ordering is the contract: past `eng.Apply` the tenant
+has already been written to, so every failure exit (baseline-save failure, a verification fetch, a mismatch)
+still prints the per-item table (or the `--json`/`-o` object, whose shape stays stable) *before* returning the
+error. An operator must never learn a write failed without learning **what was written**.
 
 ## 6. Package architecture (Go)
 Module `github.com/GigaionLLC/abcli`; binary `abctl` (`cmd/abctl`). Requires Go 1.26+.
@@ -221,6 +279,14 @@ to the `AB_*` process variables when there is no `.env`).
   bytes in == 1690 bytes out) → drift detection is a raw-byte SHA-256.
 - **The API validates uploads** like the console: a malformed profile → `400 PARAMETER_ERROR.INVALID`; a valid
   one → `201`. Config CRUD: `POST 201` / `PATCH 200` / `DELETE 204`, `Content-Type: application/json`.
+- **…but that validation is not exhaustive, and what it misses fails SILENTLY (2026-07-25).** Apple can answer a
+  write `2xx` and then **not persist the profile**: the stored XML and `updatedDateTime` stay exactly as they
+  were, with no error anywhere in the response. The confirmed trigger is a **top-level `PayloadVersion` other
+  than `1`** — Apple's top-level profile keys pin it to exactly `1`, because it versions the profile *format*,
+  not the operator's content ([Apple: TopLevel](https://developer.apple.com/documentation/devicemanagement/toplevel)).
+  A value of `2` reproduces the failure exactly. Consequences, all now implemented: `validate` fails it locally
+  (`payload-version`) before anything is pushed; the executor reads every write back (§5); `--verify` re-reads
+  the written configs and exits `1`. **Never treat a `2xx` as proof of persistence.**
 - **Blueprint create requires BOTH a member AND content (verified live 2026-07-05):** ≥1 member from
   `orgDevices`/`users`/`userGroups` (else `409 …MISSING_MEMBERS`) **and** ≥1 content resource from
   `apps`/`packages`/`configurations` (else `409 …MISSING_RESOURCES`). ⇒ there is **no harmless empty test
