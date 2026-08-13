@@ -31,8 +31,12 @@ struct ConfigurationsView: View {
 
     var body: some View {
         // The membership sheet dismisses itself on success, so a warning it raised (a write that
-        // reached Apple but not gitops/) has to land on THIS screen or nowhere.
-        content.safeAreaInset(edge: .top) { NoticeBanner() }
+        // reached Apple but not gitops/) has to land on THIS screen or nowhere. Stacked, not
+        // inset — see RootView for what a data-sized `.safeAreaInset` does to its host.
+        VStack(spacing: 0) {
+            NoticeBanner()
+            content
+        }
     }
 
     @ViewBuilder private var content: some View {
