@@ -1128,7 +1128,11 @@ extension AbctlError: Equatable {
 private actor ArgvTap {
     var argv: [String] = []
     var cwd: URL?
-    func record(_ a: [String], _ c: URL?) { argv = a; cwd = c }
+    /// The command budget the client asked for. Recorded because a too-small one is a real
+    /// defect with a misleading symptom: `adopt` on the plain 60s read budget died mid-flight
+    /// on a live tenant and left the manifest unwritten, reported only as "abctl ran for 60s".
+    var timeout: Duration?
+    func record(_ a: [String], _ c: URL?, _ t: Duration? = nil) { argv = a; cwd = c; timeout = t }
 }
 
 
@@ -1188,6 +1192,29 @@ extension ContractTests {
         XCTAssertNil(clean.treeWarning)
     }
 
+    /// The membership verbs are multi-call (resolve blueprint, list configurations for name/id,
+    /// read current members, write) and must not run on the plain 60s read budget. `adopt` on
+    /// that budget timed out against a real tenant and wrote nothing, while the only symptom was
+    /// a generic "abctl ran for 60s" — a timeout that reads as a broken feature.
+    func testMembershipVerbsGetMoreThanTheReadBudget() async throws {
+        let json = #"{"action":"adopt","name":"WiFi.mobileconfig","status":"done","treeUpdated":true}"#
+        let calls: [(String, (AbctlClient) async throws -> Void)] = [
+            ("adopt",  { _ = try await $0.adoptMember(kind: "config", name: "WiFi.mobileconfig", blueprint: "Fleet") }),
+            ("attach", { _ = try await $0.attach(configID: "c1", blueprint: "Fleet") }),
+            ("detach", { _ = try await $0.detach(configID: "c1", blueprint: "Fleet") }),
+        ]
+        for (label, call) in calls {
+            let tap = ArgvTap()
+            var client = AbctlClient(runner: TappedRunner(tap: tap, json: json))
+            client.repoRoot = URL(fileURLWithPath: "/work/ws")
+            try await call(client)
+            let timeout = await tap.timeout
+            XCTAssertNotNil(timeout, "\(label) recorded no timeout")
+            XCTAssertGreaterThan(timeout ?? .seconds(0), .seconds(60),
+                                 "\(label) is a multi-call verb and must not run on the 60s read budget")
+        }
+    }
+
     /// Plan rows are classified by PREFIX across all six member collections. Spelling only the
     /// `-config` pair made every app/package/device/user/group row read as blocked.
     func testBlueprintRowClassificationCoversEveryCollection() async throws {
@@ -1225,7 +1252,7 @@ private struct TappedRunner: AbctlRunner {
     let tap: ArgvTap
     let json: String
     func run(_ args: [String], cwd: URL?, stdin: Data?, timeout: Duration) async throws -> AbctlResult {
-        await tap.record(args, cwd)
+        await tap.record(args, cwd, timeout)
         return MockAbctlRunner.ok(json)
     }
 }

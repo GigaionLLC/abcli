@@ -358,7 +358,12 @@ struct ApplySheet: View {
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
-        } else if let error = model.lastWriteError {
+        } else if let error = model.lastWriteError, !model.applyProgressLog.isEmpty {
+            // Same guard the `.failed` verdict above already carries, for the same reason:
+            // `lastWriteError` is SHARED by every gated write in the app. Without it, a write
+            // that failed somewhere else — a timed-out `adopt` on the Diff screen — was printed
+            // in full inside this sheet before Apply had run anything, which reads as "Apply
+            // timed out" and was reported as exactly that.
             Text(error).foregroundStyle(.red).font(.caption).textSelection(.enabled)
         }
     }

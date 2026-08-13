@@ -206,7 +206,9 @@ func applyBlueprintSpec(i *imp, s Spec) error {
 	if err != nil {
 		return err
 	}
-	live, err := i.c.FetchCustomSettings()
+	// Metadata only — this path resolves names to ids and rewrites the manifest from
+	// live ids; it never reads a profile. See liveConfigIndex.
+	live, err := liveConfigIndex(i.c)
 	if err != nil {
 		return err
 	}

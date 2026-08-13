@@ -65,6 +65,13 @@ struct AbctlClient {
     /// `validate` only reads local files, but a big lib/ plus a slow external
     /// `$ABCTL_VALIDATOR` still deserves more than the plain read budget.
     private static let validateTimeout: Duration = .seconds(120)
+    /// Membership verbs (attach / detach / adopt) are multi-call: resolve the blueprint, list
+    /// configurations for name↔id, read the blueprint's current members, then write. The plain
+    /// 60s read budget killed `adopt` mid-flight on a real tenant and left the manifest
+    /// unwritten while reporting only "abctl ran for 60s" — a timeout is indistinguishable from
+    /// a broken feature. The per-call cost is fixed on the abctl side (see `liveConfigIndex`);
+    /// this is the headroom for a slow network or a large tenant on top of that.
+    private static let membershipTimeout: Duration = .seconds(180)
 
     // MARK: reads
 
@@ -313,19 +320,22 @@ struct AbctlClient {
 
     /// Attach a config to a blueprint (additive membership).
     func attach(configID: String, blueprint: String) async throws -> WriteOutcome {
-        try await decodeJSON(WriteOutcome.self, ["attach", "config", configID, "--blueprint", blueprint, "--yes", "--json"])
+        try await decodeJSON(WriteOutcome.self, ["attach", "config", configID, "--blueprint", blueprint, "--yes", "--json"],
+                             timeout: Self.membershipTimeout)
     }
 
     /// Detach a config from a blueprint.
     func detach(configID: String, blueprint: String) async throws -> WriteOutcome {
-        try await decodeJSON(WriteOutcome.self, ["detach", "config", configID, "--blueprint", blueprint, "--yes", "--json"])
+        try await decodeJSON(WriteOutcome.self, ["detach", "config", configID, "--blueprint", blueprint, "--yes", "--json"],
+                             timeout: Self.membershipTimeout)
     }
 
     /// Record an already-attached member in the blueprint's git manifest. LOCAL ONLY — it writes
     /// `gitops/blueprints/<bp>.yml` and never the tenant, which is why it carries no `--yes`
     /// (there is nothing to gate) and why it must run in the workspace like every tree verb.
     func adoptMember(kind: String, name: String, blueprint: String) async throws -> WriteOutcome {
-        try await decodeJSON(WriteOutcome.self, Self.adoptArgs(kind: kind, name: name, blueprint: blueprint))
+        try await decodeJSON(WriteOutcome.self, Self.adoptArgs(kind: kind, name: name, blueprint: blueprint),
+                             timeout: Self.membershipTimeout)
     }
 
     /// Assign org devices to an MDM server. Apple processes assignment asynchronously —
