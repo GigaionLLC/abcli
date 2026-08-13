@@ -151,8 +151,11 @@ POST) → detach (per-member DELETE-with-body) → target membership (**last**, 
 Blueprint whose content/configs aren't attached yet) → prune (off by default; detach then DELETE; archive first;
 only configs abctl owns) → verify (GET round-trip hash + `CONFIG_SETTINGS_*` audit events) → persist (write
 pulled files + `archive/`, save `state/sync-state.json`). **Wired today:** config upsert / pull / delete-git
-/ prune / persist, Blueprint create/update/delete, and all six membership collections (git-authoritative;
-detach gated by `--prune`; content resolves before target membership). App/package/device/user/group
+/ prune / persist, Blueprint create/update/delete, and all six membership collections. Membership follows
+the run's mode, exactly as configs do: **additive by default** (a member attached only in Apple is ADOPTED
+into `blueprints/<bp>.yml` — a local file write, ungated, the membership counterpart of `pull-new-git`),
+**git-authoritative under `--git-source-of-truth`** (the same member is detached instead, gated by
+`--prune`). Content resolves before target membership. App/package/device/user/group
 relationship writes are unit-tested but still await their first live device test. Scheduled git-commit glue
 remains future work (see [TODO.md](../TODO.md)).
 

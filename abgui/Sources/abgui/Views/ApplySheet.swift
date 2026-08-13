@@ -494,16 +494,28 @@ struct ApplySheet: View {
         return "\(report.problemCount) problem(s) were found\(detail); Review… lists them." + tail
     }
 
+    /// Not every applicable row is a tenant write — a pull writes gitops/lib, and an adopt writes
+    /// gitops/blueprints. Saying "applied to Apple Business" over a plan that only touches local
+    /// files misdescribes what the button does, so the local rows are counted separately.
     private func applySummary(_ plan: Plan) -> String {
-        let writes = plan.actionableChangeCount
+        let local = plan.localChangeCount
+        let tenant = plan.actionableChangeCount - local
         let blocked = plan.blockedChangeCount
-        if blocked == 0 {
-            return "\(writes) pending change(s) can be applied to Apple Business."
+
+        var lead: String
+        switch (tenant, local) {
+        case (0, let l) where l > 0:
+            lead = "\(l) pending change(s) — all of them local: gitops/ is updated, Apple Business is not written."
+        case (let t, 0):
+            lead = "\(t) pending change(s) can be applied to Apple Business."
+        case (let t, let l):
+            lead = "\(t) pending change(s) can be applied to Apple Business, plus \(l) that update gitops/ locally."
         }
-        if writes == 0 {
+        if blocked == 0 { return lead }
+        if tenant + local == 0 {
             return "\(blocked) blocked pending item(s) need their configuration created in Apple before they can attach."
         }
-        return "\(writes) pending change(s) can be applied; \(blocked) dependent item(s) are blocked until their config has an Apple id."
+        return lead + " \(blocked) dependent item(s) are blocked until their config has an Apple id."
     }
 
     @ViewBuilder private func resultView(_ result: ApplyResult) -> some View {

@@ -187,8 +187,17 @@ abctl diff --git-source-of-truth
 abctl sync --apply --git-source-of-truth --prune
 ```
 
-`--git-source-of-truth` means live-only Apple configs are deleted instead of pulled into git; on apply it
-implies prune in the engine, and spelling `--prune` keeps the intent obvious. The default live-read behavior
+`--git-source-of-truth` governs **both halves** of the reconcile, and the two behave the same way. Without
+it, sync is additive: a config that exists only in Apple is pulled into `gitops/lib/`, and a blueprint member
+attached only in Apple is **adopted** into `gitops/blueprints/<bp>.yml`. With it, `gitops/` is the complete
+desired state: that same config is deleted and that same member is detached. On apply it implies prune in the
+engine, and spelling `--prune` keeps the intent obvious.
+
+Adopting is also available on its own, for a single member — the way to keep a change you made in the Apple
+Business console: `abctl adopt config <name> --blueprint <bp>` writes only the manifest and never the tenant.
+Run it from the workspace: like every tree command, it resolves `gitops/` against the working directory.
+
+The default live-read behavior
 is `--refresh=smart`: abctl performs a cheap Apple metadata list, reuses cached profile hashes when the Apple
 ID and `updatedDateTime` match the committed baseline, and fetches profile XML only when comparison,
 pulling, pruning, or archive-before-overwrite safety requires it.
@@ -293,6 +302,7 @@ abctl attach|detach config <name> --blueprint <bp>  # add/remove a config from a
 abctl attach|detach app <name|id> --blueprint <bp>  # built-in-MDM Apps & Books: assign an owned app to a blueprint
 abctl attach|detach device|user|group <target> --blueprint <bp> # manage blueprint targets
 abctl pull [config <name>]                          # adopt a console edit into git (scoped seed)
+abctl adopt <kind> <name> --blueprint <bp>           # adopt a console ATTACH into git (writes the blueprint manifest; no tenant write)
 
 # status (honest proxies — NOT on-device install verification)
 abctl status config <name>                          # which blueprints carry it + devices targeted

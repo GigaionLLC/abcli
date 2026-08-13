@@ -21,10 +21,13 @@ struct ArchiveView: View {
             .toolbar {
                 if model.repoRoot != nil {
                     Button { viewTarget = selected } label: { Label("View", systemImage: "eye") }
+                        .toolbarLabel("Show the archived profile exactly as it was before abctl overwrote or deleted it.")
                         .disabled(selection == nil)
                     Button { confirmRestore = true } label: { Label("Restore", systemImage: "arrow.uturn.backward") }
+                        .toolbarLabel("Put this archived version back on Apple Business, archiving the CURRENT live version first — a reversible undo.")
                         .disabled(selection == nil || model.isWriting)
                     Button { model.loadArchive() } label: { Label("Refresh", systemImage: "arrow.clockwise") }
+                        .toolbarLabel("Re-scan gitops/archive/ on disk. Reads local files only.")
                 }
             }
             .confirmationDialog("Restore this archived version?", isPresented: $confirmRestore, titleVisibility: .visible) {

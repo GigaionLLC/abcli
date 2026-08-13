@@ -1131,6 +1131,94 @@ private actor ArgvTap {
     func record(_ a: [String], _ c: URL?) { argv = a; cwd = c }
 }
 
+
+// MARK: - the workspace cwd + adopt contract (the "detach-config forever" bug)
+
+extension ContractTests {
+    /// EVERY tree-mutating verb must run in the workspace. abctl roots gitops/ at its process
+    /// working directory, so an attach launched from the app bundle's cwd wrote its manifest
+    /// somewhere else (or nowhere) while `diff` read the real tree — leaving a `detach-config`
+    /// row that came back on every refresh. This is the regression guard: the write verbs are
+    /// asserted one by one, because the failure was silent and per-verb.
+    func testTreeMutatingVerbsRunInTheWorkspace() async throws {
+        let cases: [(String, (AbctlClient) async throws -> Void)] = [
+            ("attach", { _ = try await $0.attach(configID: "c1", blueprint: "Fleet") }),
+            ("detach", { _ = try await $0.detach(configID: "c1", blueprint: "Fleet") }),
+            ("adopt",  { _ = try await $0.adoptMember(kind: "config", name: "WiFi.mobileconfig", blueprint: "Fleet") }),
+            ("create", { _ = try await $0.createConfiguration(name: "WiFi.mobileconfig", xml: Data("<x/>".utf8)) }),
+            ("replace", { _ = try await $0.replaceConfiguration(id: "c1", xml: Data("<x/>".utf8)) }),
+            ("delete", { _ = try await $0.deleteConfiguration(id: "c1") }),
+        ]
+        let json = #"{"action":"attach","name":"WiFi.mobileconfig","id":"c1","status":"done","treeUpdated":true}"#
+        for (label, call) in cases {
+            let tap = ArgvTap()
+            var client = AbctlClient(runner: TappedRunner(tap: tap, json: json))
+            client.repoRoot = URL(fileURLWithPath: "/work/ws")
+            try await call(client)
+            let cwd = await tap.cwd
+            XCTAssertEqual(cwd?.path, "/work/ws", "\(label) did not run in the workspace — its gitops/ write lands in the wrong tree")
+        }
+    }
+
+    /// `adopt` writes local files only, so it must NOT carry --yes (there is no tenant change to
+    /// gate) and must name the member collection abctl expects as its first argument.
+    func testAdoptArgvIsLocalOnly() async throws {
+        let tap = ArgvTap()
+        var client = AbctlClient(runner: TappedRunner(tap: tap, json: #"{"action":"adopt","name":"WiFi.mobileconfig","status":"done","treeUpdated":true}"#))
+        client.repoRoot = URL(fileURLWithPath: "/work/ws")
+        _ = try await client.adoptMember(kind: "config", name: "WiFi.mobileconfig", blueprint: "Fleet")
+        let argv = await tap.argv
+        XCTAssertEqual(argv.prefix(5).map { $0 }, ["adopt", "config", "WiFi.mobileconfig", "--blueprint", "Fleet"])
+        XCTAssertFalse(argv.contains("--yes"), "adopt touches no tenant state and must not be gated: \(argv)")
+    }
+
+    /// A tenant write whose local tree update failed exits 0 and reports treeUpdated:false. It
+    /// used to report true unconditionally, which is how a green attach left git untouched.
+    func testTreeErrorSurfacesAsAWarningNotASuccess() throws {
+        let failed = try JSONDecoder().decode(WriteOutcome.self, from: Data(#"""
+        {"action":"attach","name":"WiFi.mobileconfig","id":"c1","status":"done","blueprint":"Fleet",
+         "treeUpdated":false,"treeError":"mkdir /gitops/blueprints: read-only file system"}
+        """#.utf8))
+        XCTAssertNotNil(failed.treeWarning)
+        XCTAssertTrue(failed.treeWarning?.contains("read-only file system") == true)
+
+        // A clean write says nothing, and neither does an older abctl that omits the field.
+        let clean = try JSONDecoder().decode(WriteOutcome.self, from: Data(
+            #"{"action":"attach","name":"WiFi.mobileconfig","status":"done","treeUpdated":true}"#.utf8))
+        XCTAssertNil(clean.treeWarning)
+    }
+
+    /// Plan rows are classified by PREFIX across all six member collections. Spelling only the
+    /// `-config` pair made every app/package/device/user/group row read as blocked.
+    func testBlueprintRowClassificationCoversEveryCollection() async throws {
+        let json = """
+        {"configs":[],
+         "blueprints":[{"blueprint":"Fleet","action":"detach-app","config":"Pages","config_id":"a1","detail":"d"},
+                       {"blueprint":"Fleet","action":"adopt-config","config":"WiFi.mobileconfig","config_id":"c1","detail":"d"},
+                       {"blueprint":"Fleet","action":"attach-user","config":"a@b.com","detail":"blocked"},
+                       {"blueprint":"Fleet","action":"blueprint-adopt","detail":"reported"}]}
+        """
+        let client = AbctlClient(runner: MockAbctlRunner(responses: ["diff": MockAbctlRunner.ok(json)]))
+        let rows = try await client.plan().blueprints
+
+        XCTAssertTrue(rows[0].isDetach)
+        XCTAssertTrue(rows[0].isActionable)
+        XCTAssertEqual(rows[0].memberKind, "app")
+
+        XCTAssertTrue(rows[1].isAdopt)
+        XCTAssertTrue(rows[1].isActionable)
+        XCTAssertEqual(rows[1].memberKind, "config")
+
+        XCTAssertTrue(rows[2].isAttach)
+        XCTAssertFalse(rows[2].isActionable, "an attach with no member id is still blocked")
+
+        // The blueprint-level adopt is a REPORTED row about the blueprint, not a member verb.
+        XCTAssertFalse(rows[3].isAdopt)
+        XCTAssertNil(rows[3].memberKind)
+        XCTAssertFalse(rows[3].isActionable)
+    }
+}
+
 /// An `AbctlRunner` that taps the invocation and answers with one canned payload — enough for
 /// the client to decode and return, so the parity tests exercise the real call path.
 private struct TappedRunner: AbctlRunner {

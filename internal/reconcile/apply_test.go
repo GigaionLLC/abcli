@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/GigaionLLC/abcli/internal/ab"
+	"github.com/GigaionLLC/abcli/internal/gitops"
 	"github.com/GigaionLLC/abcli/internal/hash"
 	"github.com/GigaionLLC/abcli/internal/state"
 )
@@ -39,12 +40,19 @@ type fakes struct {
 	bpCreateErr bool
 	bpAddErr    bool
 	bpRemoveErr bool
+	// bpSpecs is the fake gitops/blueprints/ tree — the manifests an adopt row
+	// rewrites. Adopt is a LOCAL write, so it lands here and never in events'
+	// tenant calls.
+	bpSpecs     map[string]gitops.BlueprintSpec
+	bpSpecErr   bool // LoadBlueprints fails (unreadable/malformed manifest)
+	bpSpecWrErr bool // WriteBlueprintSpec fails (read-only tree)
 }
 
 func newFakes() *fakes {
 	return &fakes{
 		files:      map[string]string{},
 		stored:     map[string]string{},
+		bpSpecs:    map[string]gitops.BlueprintSpec{},
 		updatedTS:  "ts-server",
 		readBackTS: "ts-server",
 	}
@@ -150,6 +158,26 @@ func (f *fakes) RemoveBlueprintMembers(bpID, rel, memberType string, ids []strin
 	}
 	f.events = append(f.events, "detach:"+bpID+":"+strings.Join(ids, ","))
 	f.relOps = append(f.relOps, "DELETE:"+rel+":"+memberType)
+	return nil
+}
+
+func (f *fakes) LoadBlueprints() (map[string]gitops.BlueprintSpec, error) {
+	if f.bpSpecErr {
+		return nil, errors.New("load blueprints boom")
+	}
+	out := make(map[string]gitops.BlueprintSpec, len(f.bpSpecs))
+	for k, v := range f.bpSpecs {
+		out[k] = v
+	}
+	return out, nil
+}
+
+func (f *fakes) WriteBlueprintSpec(s gitops.BlueprintSpec) error {
+	if f.bpSpecWrErr {
+		return errors.New("write blueprint boom")
+	}
+	f.events = append(f.events, "writespec:"+s.Name)
+	f.bpSpecs[s.Name] = s
 	return nil
 }
 

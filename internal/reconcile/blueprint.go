@@ -1,6 +1,7 @@
 package reconcile
 
 import (
+	"fmt"
 	"sort"
 	"strings"
 
@@ -8,9 +9,16 @@ import (
 	"github.com/GigaionLLC/abcli/internal/gitops"
 )
 
-// Blueprint reconcile is git-authoritative for a blueprint's member collections:
-// members listed in the git manifest are attached; members attached in ABM but
-// absent from git are detached (gated behind --prune). Configurations are always
+// Blueprint reconcile follows the run's MembershipMode, which mirrors what
+// --git-source-of-truth means for configs. Under GitAuthoritative, git is the
+// complete desired state: members listed in the manifest are attached, and
+// members attached in ABM but absent from git are detached (gated behind
+// --prune). Under Bidirectional (the default), sync is additive: an ABM-only
+// member is ADOPTED into the manifest instead — the membership counterpart of
+// pulling a console-created config into git. Without that, the switch governed
+// configs only, and a config attached through the console (or by `abctl attach`
+// against a different tree) re-proposed the same detach on every run with no
+// in-product way to say "this belongs in git". Configurations are always
 // managed and only ever touch CUSTOM_SETTING configs abctl owns — a
 // native/console-only config attached in ABM is never detached. The other five
 // collections (apps/packages/devices/users/groups) are managed only when their
@@ -39,15 +47,39 @@ const (
 	DetachUser    BlueprintAction = "detach-user"
 	AttachGroup   BlueprintAction = "attach-group"
 	DetachGroup   BlueprintAction = "detach-group"
+	AdoptConfig   BlueprintAction = "adopt-config" // member in ABM, not in git → write it INTO the manifest (local, no tenant write)
+	AdoptApp      BlueprintAction = "adopt-app"
+	AdoptPackage  BlueprintAction = "adopt-package"
+	AdoptDevice   BlueprintAction = "adopt-device"
+	AdoptUser     BlueprintAction = "adopt-user"
+	AdoptGroup    BlueprintAction = "adopt-group"
 	BlueprintNew  BlueprintAction = "blueprint-new"   // blueprint in git, not in ABM → POST blueprints, then attach members
 	BlueprintGone BlueprintAction = "blueprint-adopt" // blueprint in ABM, not in git → run seed to adopt (reported)
 )
 
-// IsAttach / IsDetach classify a membership verb regardless of collection.
+// IsAttach / IsDetach / IsAdopt classify a membership verb regardless of collection.
 func (a BlueprintAction) IsAttach() bool { return strings.HasPrefix(string(a), "attach-") }
 
 // IsDetach reports whether the action is a membership detach (any collection).
 func (a BlueprintAction) IsDetach() bool { return strings.HasPrefix(string(a), "detach-") }
+
+// IsAdopt reports whether the action writes a live member into the git manifest.
+// The "adopt-" prefix is deliberately distinct from the blueprint-level
+// "blueprint-adopt" (a reported-only row), so this never matches that.
+func (a BlueprintAction) IsAdopt() bool { return strings.HasPrefix(string(a), "adopt-") }
+
+// MembershipMode selects what a member attached in ABM but absent from the git
+// manifest means for this run — the membership half of --git-source-of-truth.
+type MembershipMode int
+
+const (
+	// Bidirectional is the default: sync is additive/newest-wins, so an ABM-only
+	// member is adopted INTO the manifest (mirrors pull-new-git for configs).
+	Bidirectional MembershipMode = iota
+	// GitAuthoritative is --git-source-of-truth: the manifest is the complete
+	// desired state, so an ABM-only member is detached (gated behind --prune).
+	GitAuthoritative
+)
 
 // attachActionByCollection / detachActionByCollection pick the verb for a
 // manifest collection key (ab.Collection*).
@@ -67,6 +99,15 @@ var detachActionByCollection = map[string]BlueprintAction{
 	ab.CollectionDevices:        DetachDevice,
 	ab.CollectionUsers:          DetachUser,
 	ab.CollectionGroups:         DetachGroup,
+}
+
+var adoptActionByCollection = map[string]BlueprintAction{
+	ab.CollectionConfigurations: AdoptConfig,
+	ab.CollectionApps:           AdoptApp,
+	ab.CollectionPackages:       AdoptPackage,
+	ab.CollectionDevices:        AdoptDevice,
+	ab.CollectionUsers:          AdoptUser,
+	ab.CollectionGroups:         AdoptGroup,
 }
 
 // bpNouns is the per-collection wording: short is used in plan details
@@ -131,9 +172,12 @@ func (p *BlueprintPlan) HasChanges() bool { return len(p.Items) > 0 }
 // IsActionable reports whether sync can perform this item in the current run.
 // blueprint-new is a real CREATE (API v2.0). An attach needs a resolved member
 // id — an empty id means the row is blocked until the member exists in ABM (a
-// config not yet created/adopted, or a member name the tenant doesn't know).
+// config not yet created/adopted, or a member name the tenant doesn't know). An
+// adopt is a LOCAL manifest write and is only ever planned for a member that
+// already resolved, so it is always performable.
 func (it BlueprintItem) IsActionable() bool {
-	return it.Action == BlueprintNew || it.Action.IsDetach() || (it.Action.IsAttach() && it.ConfigID != "")
+	return it.Action == BlueprintNew || it.Action.IsDetach() || it.Action.IsAdopt() ||
+		(it.Action.IsAttach() && it.ConfigID != "")
 }
 
 // HasReconcilableChanges reports whether the plan has drift that sync can act on.
@@ -166,7 +210,9 @@ func (p *BlueprintPlan) ReconcilableCount() int {
 // ownership gate, not a full-tenant list. A blueprint is matched by name across
 // git and ABM; a git-only blueprint plans a CREATE followed by its member
 // attaches, and an ABM-only blueprint is reported for adoption (never deleted).
-func ComputeBlueprints(desired map[string]gitops.BlueprintSpec, live []ab.LiveBlueprint, idByName map[string]map[string]string) *BlueprintPlan {
+// mode decides what an ABM-only MEMBER means: detach (GitAuthoritative) or
+// adopt into the manifest (Bidirectional).
+func ComputeBlueprints(desired map[string]gitops.BlueprintSpec, live []ab.LiveBlueprint, idByName map[string]map[string]string, mode MembershipMode) *BlueprintPlan {
 	liveByName := make(map[string]ab.LiveBlueprint, len(live))
 	for _, l := range live {
 		liveByName[l.Name] = l
@@ -190,11 +236,11 @@ func ComputeBlueprints(desired map[string]gitops.BlueprintSpec, live []ab.LiveBl
 		l, hasL := liveByName[n]
 		switch {
 		case hasD && hasL:
-			p.diffMembership(n, l.ID, d, &l, idByName)
+			p.diffMembership(n, l.ID, d, &l, idByName, mode)
 		case hasD && !hasL:
 			p.Items = append(p.Items, BlueprintItem{Blueprint: n, Action: BlueprintNew, Description: d.Description,
 				Detail: "in git, not in ABM → create blueprint (resolvable members ride inside the create; Apple rejects a member-less create)"})
-			p.diffMembership(n, "", d, nil, idByName) // no live side → attach-only, against the id the create yields
+			p.diffMembership(n, "", d, nil, idByName, mode) // no live side → attach-only, against the id the create yields
 		case !hasD && hasL:
 			p.Items = append(p.Items, BlueprintItem{Blueprint: n, BPID: l.ID, Action: BlueprintGone,
 				Detail: "in ABM, not in git — run `abctl seed` to adopt it (or add a manifest)"})
@@ -207,7 +253,7 @@ func ComputeBlueprints(desired map[string]gitops.BlueprintSpec, live []ab.LiveBl
 // collection the manifest manages (an unmanaged collection is never touched —
 // its live membership is not even fetched). live == nil means the blueprint
 // doesn't exist in ABM yet (blueprint-new), so only attaches are planned.
-func (p *BlueprintPlan) diffMembership(bp, bpID string, d gitops.BlueprintSpec, live *ab.LiveBlueprint, idByName map[string]map[string]string) {
+func (p *BlueprintPlan) diffMembership(bp, bpID string, d gitops.BlueprintSpec, live *ab.LiveBlueprint, idByName map[string]map[string]string, mode MembershipMode) {
 	for _, col := range ab.BlueprintCollections {
 		gitNames, managed := d.Members(col)
 		if !managed {
@@ -237,7 +283,7 @@ func (p *BlueprintPlan) diffMembership(bp, bpID string, d gitops.BlueprintSpec, 
 			}
 			p.Items = append(p.Items, it)
 		}
-		for _, m := range sortedKeys(liveSet) { // detach: in ABM, not in git
+		for _, m := range sortedKeys(liveSet) { // in ABM, not in git → detach or adopt, per mode
 			if _, in := gitSet[m]; in {
 				continue
 			}
@@ -247,12 +293,19 @@ func (p *BlueprintPlan) diffMembership(bp, bpID string, d gitops.BlueprintSpec, 
 				// baseline-managed CUSTOM_SETTING, e.g. native/console-only; others: an
 				// id that didn't resolve to a tenant resource, or a name shared by >1
 				// resource — detaching by that name could remove the wrong duplicate)
-				// — never touch it.
+				// — never touch it. This gates ADOPT too: a manifest entry that can't
+				// resolve back to an id would just become a blocked attach next run.
 				continue
 			}
-			p.Items = append(p.Items, BlueprintItem{Blueprint: bp, BPID: bpID, Action: detachActionByCollection[col],
-				Collection: col, Config: m, ConfigID: id,
-				Detail: noun + " attached in ABM, not in git → detach (gated --prune)"})
+			it := BlueprintItem{Blueprint: bp, BPID: bpID, Collection: col, Config: m, ConfigID: id}
+			if mode == Bidirectional {
+				it.Action = adoptActionByCollection[col]
+				it.Detail = noun + " attached in ABM, not in git → adopt into the blueprint manifest (local write; turn on git source of truth to detach instead)"
+			} else {
+				it.Action = detachActionByCollection[col]
+				it.Detail = noun + " attached in ABM, not in git → detach (gated --prune)"
+			}
+			p.Items = append(p.Items, it)
 		}
 	}
 }
@@ -275,17 +328,20 @@ type BlueprintResult struct {
 }
 
 // bpRank orders execution: creates first (attaches need the fresh blueprint id),
-// then attach before detach; reported items last.
+// then attach, then the ABM-only verbs (adopt/detach — mutually exclusive within
+// a run, since the mode picks one), reported items last.
 func bpRank(a BlueprintAction) int {
 	switch {
 	case a == BlueprintNew:
 		return 0
 	case a.IsAttach():
 		return 1
-	case a.IsDetach():
+	case a.IsAdopt():
 		return 2
-	default: // BlueprintGone — reported, not applied
+	case a.IsDetach():
 		return 3
+	default: // BlueprintGone — reported, not applied
+		return 4
 	}
 }
 
@@ -402,6 +458,17 @@ func (e *Engine) ApplyBlueprints(p *BlueprintPlan, opts Opts, priorWrites int) *
 			}
 			res.Writes++
 			e.bpDone(res, it, "attached "+it.Config)
+		case it.Action.IsAdopt():
+			// A LOCAL write: it changes gitops/blueprints/<bp>.yml, never the tenant.
+			// So it spends no rate limit, is not counted in res.Writes, and is not
+			// gated by --limit-writes or --prune — none of which are about local
+			// files. (--prune in particular gates REMOVING things; adopt only adds.)
+			progress(opts, "adopting "+noun.long+" into the blueprint manifest: "+target)
+			if err := e.adoptMember(it); err != nil {
+				e.bpFail(res, it, "adopt into the blueprint manifest failed: "+err.Error())
+				continue
+			}
+			e.bpDone(res, it, "recorded "+it.Config+" in the git manifest for "+it.Blueprint+" (local file; commit gitops/ to keep it)")
 		case it.Action.IsDetach():
 			if !opts.Prune {
 				e.bpSkip(res, it, "skipped: prune off (pass --prune to detach from ABM)")
@@ -432,6 +499,42 @@ func (e *Engine) ApplyBlueprints(p *BlueprintPlan, opts Opts, priorWrites int) *
 		}
 	}
 	return res
+}
+
+// adoptMember records one live member in its blueprint manifest. The existing
+// manifest is loaded and only this collection's list GAINS the name — see
+// gitops.BlueprintSpec.WithMember for why the write is additive rather than a
+// rewrite from live, and why an unmanaged collection is refused.
+//
+// A blueprint with no manifest yet is not adopted here: writing one would
+// declare `configurations:` (always-managed) from a single member, making every
+// other live config on it a --prune detach candidate the moment git source of
+// truth is switched on. That case already has its own reported row
+// (blueprint-adopt → run `abctl seed`).
+func (e *Engine) adoptMember(it BlueprintItem) error {
+	if e.Files == nil {
+		return fmt.Errorf("no gitops tree available to write")
+	}
+	all, err := e.Files.LoadBlueprints()
+	if err != nil {
+		return fmt.Errorf("reading existing blueprint manifests: %w", err)
+	}
+	spec, ok := all[it.Blueprint]
+	if !ok {
+		return fmt.Errorf("blueprint %q has no manifest in gitops/blueprints — run `abctl seed` to adopt the blueprint itself first", it.Blueprint)
+	}
+	col := it.Collection
+	if col == "" { // legacy items predate the Collection field (= configurations)
+		col = ab.CollectionConfigurations
+	}
+	next, added := spec.WithMember(col, it.Config)
+	if !added {
+		return fmt.Errorf("blueprint %q's manifest does not manage %s membership (add the key with `abctl seed --blueprint-membership`)", it.Blueprint, col)
+	}
+	if next.ID == "" {
+		next.ID = it.BPID
+	}
+	return e.Files.WriteBlueprintSpec(next)
 }
 
 // blockedRemedy is the apply-time remedy for an attach with no member id (the

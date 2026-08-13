@@ -73,7 +73,7 @@ func TestComputeBlueprints(t *testing.T) {
 		// "new.mobileconfig" intentionally absent — not yet created in ABM
 	}
 
-	p := ComputeBlueprints(desired, live, cfgOnly(cfgIDByName))
+	p := ComputeBlueprints(desired, live, cfgOnly(cfgIDByName), GitAuthoritative)
 
 	// Sales: attach vpn (known id), attach new (unknown id → empty), detach old.
 	if it, ok := bpItem(p, "Sales", "vpn.mobileconfig"); !ok || it.Action != Attach || it.ConfigID != "c-vpn" || it.BPID != "bp-sales" {
@@ -251,7 +251,7 @@ func TestComputeBlueprintsAllCollections(t *testing.T) {
 		ab.CollectionGroups:         {"Eng": "g-eng", "Design": "g-des", "Legacy": "g-leg"},
 	}
 
-	p := ComputeBlueprints(desired, live, idByName)
+	p := ComputeBlueprints(desired, live, idByName, GitAuthoritative)
 
 	want := []struct {
 		member     string
@@ -313,7 +313,7 @@ func TestComputeBlueprintsAmbiguousNames(t *testing.T) {
 		ab.CollectionUsers: {"dup@x.co": ""},
 	}
 
-	p := ComputeBlueprints(desired, live, idByName)
+	p := ComputeBlueprints(desired, live, idByName, GitAuthoritative)
 
 	it, ok := bpItem(p, "Sales", "Keynote")
 	if !ok || it.Action != AttachApp || it.ConfigID != "" || it.IsActionable() {
@@ -356,7 +356,7 @@ func TestComputeBlueprintsUnmanagedVsEmpty(t *testing.T) {
 		ab.CollectionUsers:          {"bob@x.co": "u-bob"},
 	}
 
-	p := ComputeBlueprints(desired, live, idByName)
+	p := ComputeBlueprints(desired, live, idByName, GitAuthoritative)
 
 	if it, ok := bpItem(p, "Sales", "Numbers"); ok {
 		t.Errorf("unmanaged apps key must never plan a detach, got %+v", it)
@@ -392,7 +392,7 @@ func TestComputeBlueprintsCreatePath(t *testing.T) {
 		ab.CollectionApps:           {},
 	}
 
-	p := ComputeBlueprints(desired, nil, idByName)
+	p := ComputeBlueprints(desired, nil, idByName, GitAuthoritative)
 
 	create, ok := bpItem(p, "NewBP", "")
 	if !ok || create.Action != BlueprintNew || create.Description != "fresh from git" || create.BPID != "" {
@@ -531,5 +531,133 @@ func TestApplyBlueprintsLegacyItemDefaultsToConfigurations(t *testing.T) {
 	}
 	if indexOf(f.relOps, "POST:configurations:configurations") != 0 {
 		t.Errorf("legacy item must default to the configurations relationship: %v", f.relOps)
+	}
+}
+
+// TestComputeBlueprintsBidirectionalAdopts pins the membership half of
+// --git-source-of-truth. The SAME drift — a config attached in ABM that the
+// manifest doesn't list — must plan a detach under GitAuthoritative and an
+// adopt under Bidirectional. Before this, membership was git-authoritative in
+// both modes, so turning the switch off left the detach row on screen with no
+// way to say "this belongs in git".
+func TestComputeBlueprintsBidirectionalAdopts(t *testing.T) {
+	desired := map[string]gitops.BlueprintSpec{
+		"Sales": {Name: "Sales", Configurations: []string{"wifi.mobileconfig"}},
+	}
+	live := []ab.LiveBlueprint{
+		// old is attached in ABM and absent from git; native-id-999 is unowned.
+		{Name: "Sales", ID: "bp-sales", Configs: []string{"wifi.mobileconfig", "old.mobileconfig", "native-id-999"}},
+	}
+	ids := cfgOnly(map[string]string{"wifi.mobileconfig": "c-wifi", "old.mobileconfig": "c-old"})
+
+	p := ComputeBlueprints(desired, live, ids, Bidirectional)
+	it, ok := bpItem(p, "Sales", "old.mobileconfig")
+	if !ok || it.Action != AdoptConfig {
+		t.Fatalf("bidirectional Sales/old = %+v (ok=%v), want %s", it, ok, AdoptConfig)
+	}
+	if it.ConfigID != "c-old" || it.Collection != ab.CollectionConfigurations || it.BPID != "bp-sales" {
+		t.Errorf("adopt row lost its identity: %+v", it)
+	}
+	if !it.IsActionable() {
+		t.Error("an adopt row is a local write sync can always perform — it must be actionable")
+	}
+	// The ownership gate still applies: a config abctl doesn't own is neither
+	// detached NOR adopted (adopting it would write a name that can't resolve
+	// back to an id, i.e. a blocked attach next run).
+	if _, ok := bpItem(p, "Sales", "native-id-999"); ok {
+		t.Error("an unowned live config must never be adopted into the manifest")
+	}
+
+	if p := ComputeBlueprints(desired, live, ids, GitAuthoritative); true {
+		if it, ok := bpItem(p, "Sales", "old.mobileconfig"); !ok || it.Action != Detach {
+			t.Errorf("git-authoritative Sales/old = %+v (ok=%v), want %s", it, ok, Detach)
+		}
+	}
+	// The mode governs the ABM-only side ONLY — a git-only member still attaches.
+	for _, mode := range []MembershipMode{Bidirectional, GitAuthoritative} {
+		desired2 := map[string]gitops.BlueprintSpec{
+			"Sales": {Name: "Sales", Configurations: []string{"wifi.mobileconfig", "vpn.mobileconfig"}},
+		}
+		p := ComputeBlueprints(desired2, live, cfgOnly(map[string]string{
+			"wifi.mobileconfig": "c-wifi", "old.mobileconfig": "c-old", "vpn.mobileconfig": "c-vpn"}), mode)
+		if it, ok := bpItem(p, "Sales", "vpn.mobileconfig"); !ok || it.Action != Attach {
+			t.Errorf("mode %v changed the attach side: %+v (ok=%v)", mode, it, ok)
+		}
+	}
+}
+
+// TestApplyBlueprintsAdoptWritesManifest: an adopt row rewrites the LOCAL
+// manifest additively and spends no tenant write — it is not gated by --prune
+// (which gates removals) nor counted against --limit-writes.
+func TestApplyBlueprintsAdoptWritesManifest(t *testing.T) {
+	f := newFakes()
+	// The manifest already declares one config that is NOT attached in ABM (a
+	// pending attach). Adopt must not drop it — that intent is the operator's.
+	f.bpSpecs["Sales"] = gitops.BlueprintSpec{Name: "Sales", ID: "bp-sales",
+		Configurations: []string{"pending.mobileconfig"}}
+	plan := &BlueprintPlan{Items: []BlueprintItem{
+		{Blueprint: "Sales", BPID: "bp-sales", Action: AdoptConfig, Collection: ab.CollectionConfigurations,
+			Config: "old.mobileconfig", ConfigID: "c-old"},
+	}}
+
+	res := engineWith(f).ApplyBlueprints(plan, Opts{}, 0) // prune OFF, no limit
+	if res.Errors != 0 || res.Skipped != 0 {
+		t.Fatalf("adopt with prune off → errors=%d skipped=%d, want 0/0: %+v", res.Errors, res.Skipped, res.Outcomes)
+	}
+	if res.Writes != 0 {
+		t.Errorf("adopt is a LOCAL write and must not count as a tenant write, got %d", res.Writes)
+	}
+	got := f.bpSpecs["Sales"].Configurations
+	want := []string{"old.mobileconfig", "pending.mobileconfig"} // sorted, additive
+	if len(got) != len(want) {
+		t.Fatalf("manifest configurations = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("manifest configurations = %v, want %v", got, want)
+		}
+	}
+	for _, e := range f.events {
+		if strings.HasPrefix(e, "attach:") || strings.HasPrefix(e, "detach:") {
+			t.Errorf("adopt reached the tenant: %v", f.events)
+		}
+	}
+}
+
+// TestApplyBlueprintsAdoptWithoutManifest: adopting into a blueprint that has no
+// manifest is an ERROR, not a silent create — writing one would declare the
+// always-managed `configurations:` key from a single member, making every other
+// live config on that blueprint a --prune detach candidate.
+func TestApplyBlueprintsAdoptWithoutManifest(t *testing.T) {
+	f := newFakes() // no bpSpecs entry for Sales
+	plan := &BlueprintPlan{Items: []BlueprintItem{
+		{Blueprint: "Sales", BPID: "bp-sales", Action: AdoptConfig, Collection: ab.CollectionConfigurations,
+			Config: "old.mobileconfig", ConfigID: "c-old"},
+	}}
+	res := engineWith(f).ApplyBlueprints(plan, Opts{}, 0)
+	if res.Errors != 1 {
+		t.Fatalf("adopt with no manifest → errors=%d, want 1: %+v", res.Errors, res.Outcomes)
+	}
+	if len(f.bpSpecs) != 0 {
+		t.Errorf("no manifest may be created by an adopt: %v", f.bpSpecs)
+	}
+}
+
+// TestApplyBlueprintsAdoptUnmanagedCollection: an adopt whose collection key is
+// absent from the manifest fails rather than adding the key — becoming managed
+// would put every OTHER live member of that collection at risk of a prune.
+func TestApplyBlueprintsAdoptUnmanagedCollection(t *testing.T) {
+	f := newFakes()
+	f.bpSpecs["Sales"] = gitops.BlueprintSpec{Name: "Sales", ID: "bp-sales"} // apps: unmanaged
+	plan := &BlueprintPlan{Items: []BlueprintItem{
+		{Blueprint: "Sales", BPID: "bp-sales", Action: AdoptApp, Collection: ab.CollectionApps,
+			Config: "Pages", ConfigID: "a-1"},
+	}}
+	res := engineWith(f).ApplyBlueprints(plan, Opts{}, 0)
+	if res.Errors != 1 {
+		t.Fatalf("adopt into an unmanaged collection → errors=%d, want 1: %+v", res.Errors, res.Outcomes)
+	}
+	if f.bpSpecs["Sales"].Apps != nil {
+		t.Errorf("an unmanaged collection must stay unmanaged, got %v", *f.bpSpecs["Sales"].Apps)
 	}
 }

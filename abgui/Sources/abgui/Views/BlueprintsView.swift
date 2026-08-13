@@ -27,8 +27,11 @@ struct BlueprintsView: View {
         .navigationTitle("Blueprints")
         .toolbar {
             Button { openDetail(selection) } label: { Label("Details", systemImage: "eye") }
+                .toolbarLabel("Open the selected blueprint and its six name-resolved member collections.")
                 .disabled(selection == nil)
-            RefreshButton { await model.loadBlueprints() }
+            RefreshButton(help: "Re-fetch the blueprint list from Apple Business.") {
+                await model.loadBlueprints()
+            }
         }
         .sheet(item: $detail) { BlueprintDetailSheet(resource: $0) }
         .task {

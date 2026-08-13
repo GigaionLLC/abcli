@@ -16,7 +16,8 @@ A mature device-management CLI typically offers two ways to change state: a **de
 (apply a file of desired state / GitOps) and an **imperative** path (act on one resource now). abctl
 does the same:
 
-- **GitOps plane (built):** `seed` → `diff` → `sync --apply` — whole-tree, git-authoritative.
+- **GitOps plane (built):** `seed` → `diff` → `sync --apply` — whole-tree; additive by default,
+  git-authoritative under `--git-source-of-truth`.
 - **Imperative plane:** `get` / `create` / `edit` / `delete` / `attach` / `apply -f` — one resource
   at a time, JSON output. Both planes call the same `ab.Client` + archive engine + baseline.
 
@@ -46,8 +47,8 @@ the `CONFIG_SETTINGS_*` audit changelog — labeled *desired-state / assignment 
 |---|---|---|---|
 | `get <res>` as JSON/YAML | `get {configurations,blueprints,devices,audit,users,usergroups,apps,mdmservers}` | ✅ full | global `-o table\|json\|yaml`, `--filter key=substr` |
 | declarative incremental upsert | **`abctl apply -f`** — Configuration/Blueprint docs, upsert-only (no drift-delete) | ✅ | versioned `apiVersion: abctl/v1` spec, round-trippable with the tree |
-| full declarative sync (deletes drift) | **`abctl sync --apply`** (built) | ✅ | git-authoritative; `--prune` deletes drift |
-| export / sync-back | **`abctl seed`** + scoped **`abctl pull [config <name>]`** | ✅ | seed = whole tenant; pull = one resource (console-edit adoption) |
+| full declarative sync (deletes drift) | **`abctl sync --apply --git-source-of-truth`** (built) | ✅ | without the flag sync is additive (pull/adopt into git); `--prune` deletes drift |
+| export / sync-back | **`abctl seed`** + scoped **`abctl pull [config <name>]`** / **`abctl adopt <kind> <name> --blueprint <bp>`** | ✅ | seed = whole tenant; pull = one config; adopt = one blueprint MEMBER (console-attach adoption, local write, no `--yes`) |
 | raw request passthrough | **`abctl api <path> -X … -F … --input …`** | ✅ | non-GET is write-gated |
 | imperative create/edit/delete | **`abctl create\|replace\|edit\|delete config`** | ✅ (CUSTOM_SETTING only) | reuses client + archive-before-overwrite |
 | attach to deploy target | **`abctl attach\|detach config <name> --blueprint <bp>`** | ✅ | relationship POST/DELETE (additive/merge) |

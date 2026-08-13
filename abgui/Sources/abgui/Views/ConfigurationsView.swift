@@ -30,6 +30,12 @@ struct ConfigurationsView: View {
     }
 
     var body: some View {
+        // The membership sheet dismisses itself on success, so a warning it raised (a write that
+        // reached Apple but not gitops/) has to land on THIS screen or nowhere.
+        content.safeAreaInset(edge: .top) { NoticeBanner() }
+    }
+
+    @ViewBuilder private var content: some View {
         Table(model.configurations, selection: $selection) {
             TableColumn("Name") { Text($0.attr("name") ?? $0.id) }
             TableColumn("Type") { Text($0.attr("type") ?? "—") }
@@ -49,17 +55,23 @@ struct ConfigurationsView: View {
         .navigationTitle("Configurations")
         .toolbar {
             Button { editorTarget = .create } label: { Label("New", systemImage: "plus") }
+                .toolbarLabel("Write a new .mobileconfig and create it in Apple Business.")
             Button {
                 if let config = selectedResource { editorTarget = .edit(config) }
             } label: { Label("Edit", systemImage: "pencil") }
+                .toolbarLabel("Edit the selected profile and replace it in Apple Business (the live version is archived first).")
                 .disabled(selection == nil)
             Button {
                 membershipTarget = selectedResource
             } label: { Label("Membership", systemImage: "square.stack.3d.up") }
+                .toolbarLabel("Attach or detach the selected configuration to a blueprint. Writes Apple Business and updates gitops/blueprints/.")
                 .disabled(selection == nil)
             Button(role: .destructive) { confirmDelete = true } label: { Label("Delete", systemImage: "trash") }
+                .toolbarLabel("Delete the selected configuration from Apple Business (archived first).")
                 .disabled(selection == nil)
-            RefreshButton { await model.loadConfigurations() }
+            RefreshButton(help: "Re-fetch the configuration list from Apple Business.") {
+                await model.loadConfigurations()
+            }
         }
         .sheet(item: $profileTarget) { ProfileView(config: $0) }
         .sheet(item: $editorTarget) { target in

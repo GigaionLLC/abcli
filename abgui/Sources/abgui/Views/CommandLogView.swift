@@ -91,6 +91,7 @@ struct CommandLogView: View {
                                   help: "Copy every recorded command, oldest first, as one paste-able shell snippet.")
                     .disabled(model.commands.isEmpty)
                 Button { model.clearCommands() } label: { Label("Clear", systemImage: "trash") }
+                    .toolbarLabel("Clear this session's command list from the screen. Nothing on Apple Business or on disk is deleted.")
                     .disabled(model.commands.isEmpty)
                     .help("Forget the recorded commands. This empties abgui's list only — nothing on the tenant or on disk changes.")
             }
