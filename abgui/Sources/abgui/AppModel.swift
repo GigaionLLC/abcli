@@ -141,23 +141,110 @@ final class AppModel {
     /// whichever run is currently open.
     private var runLog: RunLog?
 
-    /// Append a progress line (called from abctl's stderr stream), capped so it can't grow unbounded.
+    // MARK: progress narration — COALESCED
+    //
+    // abctl narrates per configuration, so a plan against a real tenant arrives as a BURST of
+    // stderr lines, not a trickle. Appending each one straight into an `@Observable` array cost
+    // a full main-actor turn EVERY line: DiffView's body re-evaluates, and `TranscriptView`
+    // rebuilds its text by joining the whole (up to 200-line) log inside its initializer, then
+    // animates a scroll. Hundreds of lines therefore meant hundreds of whole-transcript
+    // rebuilds, which starves the main actor — and a starved main actor does not draw a partial
+    // UI, it draws nothing. The window (sidebar included) goes blank and the run looks hung
+    // precisely while it is working hardest, and it gets worse the more configurations the
+    // tenant has.
+    //
+    // So the stream is buffered and flushed on a tick: one view update per window instead of one
+    // per line. Nothing is dropped or reordered — the on-disk run log still receives every line,
+    // in order, and `appendProgress` (the ordering-critical direct path for `$ abctl …` /
+    // `→ exit 0`) flushes the buffer before adding its own line so it can never overtake output
+    // that arrived first.
+    private static let progressFlushInterval: Duration = .milliseconds(100)
+    private var pendingProgress: [String] = []
+    private var pendingApplyProgress: [String] = []
+    private var progressFlushTask: Task<Void, Never>?
+
+    /// Buffer one streamed stderr line for the next flush. Called (via a main-actor hop) once per
+    /// line, so it must stay O(1) and must NOT touch `progressLog`.
+    func enqueueProgress(_ line: String) {
+        pendingProgress.append(line)
+        scheduleProgressFlush()
+    }
+
+    func enqueueApplyProgress(_ line: String) {
+        pendingApplyProgress.append(line)
+        scheduleProgressFlush()
+    }
+
+    private func scheduleProgressFlush() {
+        guard progressFlushTask == nil else { return } // one timer in flight, not one per line
+        // `Task {}` inside a @MainActor method inherits main-actor isolation, so the flush lands
+        // where the state lives without spelling the attribute (and without the capture-list
+        // ordering that attribute would require).
+        progressFlushTask = Task { [weak self] in
+            try? await Task.sleep(for: Self.progressFlushInterval)
+            guard let self else { return }
+            self.progressFlushTask = nil
+            self.flushProgress()
+        }
+    }
+
+    /// Publish everything buffered. Safe to call at any time; a no-op when nothing is pending.
+    /// Called on the tick, and directly at the end of a run so the last lines are never stranded
+    /// in the buffer.
+    func flushProgress() {
+        if !pendingProgress.isEmpty {
+            let batch = pendingProgress
+            pendingProgress.removeAll(keepingCapacity: true)
+            for line in batch { runLog?.line(line) }
+            progressLog.append(contentsOf: batch)
+            if progressLog.count > 200 { progressLog.removeFirst(progressLog.count - 200) }
+        }
+        if !pendingApplyProgress.isEmpty {
+            let batch = pendingApplyProgress
+            pendingApplyProgress.removeAll(keepingCapacity: true)
+            for line in batch { runLog?.line(line) }
+            applyProgressLog.append(contentsOf: batch)
+            if applyProgressLog.count > 300 { applyProgressLog.removeFirst(applyProgressLog.count - 300) }
+        }
+    }
+
+    /// Drop buffered output along with the log it belonged to. Used where a new run resets the
+    /// transcript: without it, the previous run's tail would flush INTO the new run's log.
+    ///
+    /// A cancelled tick can still resume and clear `progressFlushTask` after a newer one was
+    /// scheduled, which at worst leaves two timers running. That is deliberately not guarded
+    /// against: an extra tick only calls `flushProgress`, which is a no-op on an empty buffer,
+    /// and the property that matters — every line published exactly once, in order — comes from
+    /// the drain being atomic on the main actor, not from there being exactly one timer.
+    private func resetProgressBuffers() {
+        progressFlushTask?.cancel()
+        progressFlushTask = nil
+        pendingProgress.removeAll(keepingCapacity: true)
+        pendingApplyProgress.removeAll(keepingCapacity: true)
+    }
+
+    /// Append a progress line, capped so it can't grow unbounded. This is the DIRECT path, used
+    /// where ordering against a state change matters (see `narrate`); it flushes any buffered
+    /// stream output first so this line cannot jump ahead of output that arrived before it.
     /// The on-disk log is written FIRST and is deliberately uncapped-by-count: the cap here exists
     /// so a long run can't grow a SwiftUI list without bound, and truncating the evidence for the
     /// same reason would defeat the point of having a log at all.
     func appendProgress(_ line: String) {
+        flushProgress()
         runLog?.line(line)
         progressLog.append(line)
         if progressLog.count > 200 { progressLog.removeFirst(progressLog.count - 200) }
     }
 
     func appendApplyProgress(_ line: String) {
+        flushProgress()
         runLog?.line(line)
         applyProgressLog.append(line)
         if applyProgressLog.count > 300 { applyProgressLog.removeFirst(applyProgressLog.count - 300) }
     }
 
     func clearApplyOutput() {
+        resetProgressBuffers()
         applyProgressLog = []
         applyResult = nil
         lastWriteError = nil
@@ -326,13 +413,15 @@ final class AppModel {
         return client
     }
 
-    /// A progress sink that streams abctl's stderr into `progressLog` on the main actor.
+    /// A progress sink that streams abctl's stderr into `progressLog` on the main actor. It
+    /// ENQUEUES rather than appends: this fires once per stderr line, and one transcript rebuild
+    /// per line is what wedges the UI on a real tenant (see the coalescing note above).
     private var progressSink: (@Sendable (String) -> Void) {
-        { [weak self] line in Task { @MainActor in self?.appendProgress(line) } }
+        { [weak self] line in Task { @MainActor in self?.enqueueProgress(line) } }
     }
 
     private var applyProgressSink: (@Sendable (String) -> Void) {
-        { [weak self] line in Task { @MainActor in self?.appendApplyProgress(line) } }
+        { [weak self] line in Task { @MainActor in self?.enqueueApplyProgress(line) } }
     }
 
     private static let workspaceKey = "abgui.workspacePath"
@@ -415,6 +504,7 @@ final class AppModel {
         // --apply …` and `→ exit 0 in 12.3s` lines the recorder emits from inside syncApply(...)
         // land after it — and, because the finish line is appended on the recorder's own
         // main-actor turn, before the outcome rows below rather than trailing them.
+        resetProgressBuffers() // the previous run's tail must not flush into this run's log
         applyProgressLog = []
         // Open the on-disk log BEFORE the first narrated line, so the file is the complete
         // transcript and not the tail of one. The argv comes from the same pure builder the
@@ -666,7 +756,10 @@ final class AppModel {
         // Clearing the log MUST stay above the await: both transcript lines are emitted from
         // inside client.plan(...) on later main-actor hops, so this reset can only ever run
         // before them, never wipe them.
-        if resetLog { progressLog = [] }
+        if resetLog {
+            resetProgressBuffers() // buffered tail belongs to the run being replaced, not this one
+            progressLog = []
+        }
         defer { isLoading = false }
         if newRunLog {
             await beginRunLog(.diff, argv: previewArgv(AbctlClient.planArgs(gitSourceOfTruth: gitSourceOfTruth,
@@ -683,10 +776,15 @@ final class AppModel {
             if Task.isCancelled {
                 outcome = "cancelled" // a race: cancelled just after the process returned
             } else {
+                // Publish the tail BEFORE diagnosing: the last lines abctl printed are exactly
+                // what `SyncFailure` reads, and leaving them in the buffer would diagnose the
+                // failure from a transcript missing its most relevant part.
+                flushProgress()
                 loadError = error.localizedDescription
                 outcome = "failed — \(SyncFailure.from(error: error, transcript: progressLog).headline)"
             }
         }
+        flushProgress() // idempotent — covers the success and cancelled paths
         // Only the call that OPENED a log closes it: the seed hand-off's diff writes into the
         // seed's file and lets `seedWorkspace` stamp the single outcome both phases share.
         if newRunLog { await finishRunLog(outcome) }
@@ -708,21 +806,25 @@ final class AppModel {
         }
         isSeeding = true
         loadError = nil
+        resetProgressBuffers()
         progressLog = [] // before the await, so the seed's own transcript survives it (see loadPlan)
         await beginRunLog(.seed, argv: previewArgv(AbctlClient.seedArgs()))
         do {
             _ = try await client.seed()
         } catch is CancellationError {
             isSeeding = false
+            flushProgress()
             await finishRunLog("cancelled")
             return false
         } catch {
             isSeeding = false
+            flushProgress() // the tail is what SyncFailure diagnoses from — publish it first
             loadError = "Couldn't initialize the workspace from the tenant: \(error.localizedDescription)"
             await finishRunLog("failed — \(SyncFailure.from(error: error, transcript: progressLog).headline)")
             return false
         }
         isSeeding = false
+        flushProgress()
         needsSeed = false
         // tree exists now → drift (a fresh seed should read back in sync). The log is NOT reset:
         // the seed's `$ abctl seed` / `→ exit 0` lines and the diff's belong to one transcript,
