@@ -142,6 +142,21 @@ struct DiffView: View {
     @ViewBuilder private func workingView(_ title: String) -> some View {
         VStack(spacing: 12) {
             ProgressView(title)
+                .controlSize(.large)
+            // Turning git source of truth ON makes the FIRST plan after the flip materially
+            // slower, and silence there reads as a hung window: every live config absent from
+            // git now needs its profile fetched from Apple, because that mode may delete or
+            // detach it and abctl archives before it does (internal/cli/phase1.go,
+            // fetchLiveConfigsSmart). Saying so is the difference between "it's working" and
+            // "it's broken".
+            if model.gitSourceOfTruth {
+                Text("Git source of truth is ON, so Apple-only configurations are being fetched in full — the first plan after the switch is the slow one.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: 460)
+            }
             if !model.progressLog.isEmpty {
                 // The same transcript component the Apply sheet uses: one selectable string,
                 // a Copy button, a visible scroller and a way to grow it. The per-line Text
@@ -156,6 +171,10 @@ struct DiffView: View {
                 .buttonStyle(.bordered)
         }
         .padding()
+        // Claim the whole pane. Without an explicit frame this stack sizes to its content and
+        // the detail column is free to lay it out somewhere the eye doesn't go — the state was
+        // reported as "blank with no obvious loading indication".
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
     @ViewBuilder private var seedPrompt: some View {

@@ -34,6 +34,26 @@ func runEditor(path string) error {
 	return cmd.Run()
 }
 
+// liveConfigIndex lists live CUSTOM_SETTING configs for NAME↔ID RESOLUTION ONLY —
+// no profile XML.
+//
+// `FetchCustomSettings` asks Apple for `customSettingsValues` on every config in
+// the tenant (and falls back to a per-config GET whenever the list comes back
+// sparse), which is the right call when the XML is the point — pull, seed,
+// archive-before-overwrite. Membership and adopt only ever need the name and the
+// id, and paying tenant-wide profile bytes for that made `abctl adopt` outrun
+// abgui's command budget and fail without writing the manifest at all.
+//
+// Use this ONLY where the XML is genuinely unused; a caller that later reads
+// `.XML` off these records would silently see empty strings.
+func liveConfigIndex(c *ab.Client) ([]ab.LiveConfig, error) {
+	return c.FetchCustomSettingsMetadata(func(line string) {
+		// abgui streams stderr into its progress log, so a slow tenant list narrates
+		// itself instead of looking hung.
+		fmt.Fprintln(os.Stderr, line)
+	})
+}
+
 // --- attach / detach a config to/from a blueprint ---
 
 func newAttachCmd() *cobra.Command { return membershipCmd("attach") }
@@ -80,7 +100,10 @@ func runMembership(verb, configArg, blueprintArg string, yes, noWriteTree, jsonO
 	if err != nil {
 		return err
 	}
-	live, err := i.c.FetchCustomSettings()
+	// METADATA ONLY. Membership needs name↔id and nothing else: to resolve the
+	// argument, and to rewrite the manifest from live ids. See liveConfigIndex —
+	// asking for the profile XML here costs the whole tenant's bytes for nothing.
+	live, err := liveConfigIndex(i.c)
 	if err != nil {
 		return err
 	}
@@ -282,7 +305,7 @@ func runAdopt(noun, arg, blueprintArg string, jsonOut bool) error {
 	var memberID, memberName, relKey, collection string
 	switch noun {
 	case "config", "configuration":
-		live, ferr := i.c.FetchCustomSettings()
+		live, ferr := liveConfigIndex(i.c) // name↔id only — adopt never reads a profile
 		if ferr != nil {
 			return ferr
 		}

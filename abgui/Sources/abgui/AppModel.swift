@@ -658,6 +658,11 @@ final class AppModel {
         }
         isLoading = true
         loadError = nil
+        // A new plan compute is a new context, so a write error from before it goes with it.
+        // DiffView renders `lastWriteError` (a refused adopt is otherwise a dead click), and
+        // without this a stale one outlives the drift it described — including across a
+        // source-of-truth flip, which recomputes everything.
+        lastWriteError = nil
         // Clearing the log MUST stay above the await: both transcript lines are emitted from
         // inside client.plan(...) on later main-actor hops, so this reset can only ever run
         // before them, never wipe them.
