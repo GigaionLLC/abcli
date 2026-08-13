@@ -27,8 +27,18 @@ struct DiffView: View {
     }
 
     var body: some View {
-        content
-            .safeAreaInset(edge: .top) { NoticeBanner() } // a confirmed mode flip is announced, not silent
+        // The notice sits IN the layout, not in a `.safeAreaInset`. As an inset it reserved space
+        // by measuring wrapping, `fixedSize` text against an as-yet-unresolved width, and while a
+        // notice was up that bad measurement inset `planContent`'s ScrollView clean out of view:
+        // the plan finished in ~1.4s and the pane stayed empty until the banner's 10-second
+        // auto-dismiss collapsed the inset. That reads as "it hangs after the sync screen, then
+        // eventually loads" — on a timer, with nothing to click. It only ever happened after a
+        // source-of-truth flip because that is the only thing that posts a notice here.
+        // ApplySheet has always stacked the banner this way and has never shown the fault.
+        VStack(spacing: 0) {
+            NoticeBanner() // a confirmed mode flip is announced, not silent
+            content
+        }
             .navigationTitle("Diff / Drift")
             .toolbar {
                 if model.repoRoot != nil {

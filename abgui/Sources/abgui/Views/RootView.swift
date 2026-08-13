@@ -78,6 +78,33 @@ struct RootView: View {
 
     var body: some View {
         NavigationSplitView {
+            // Sidebar list ABOVE the footer in a plain stack, not behind a `.safeAreaInset`.
+            // The footer's height is data-driven — it grows and shrinks with the last abctl
+            // command line — and as an inset that re-measurement blanked the entire sidebar the
+            // moment a run started, which is exactly when the command line appears. The detail
+            // pane had the same fault from its own inset (see DiffView), so the two columns went
+            // blank together and it read as the whole window dying while "Computing plan…" ran.
+            VStack(spacing: 0) {
+                sidebarList
+                Divider()
+                // The footer's last-command line is a way IN to the full transcript, so it
+                // moves the selection the same way a dashboard tile does.
+                ConnectionFooter(showCommandLog: { selection = .commandLog })
+            }
+            .navigationTitle("abgui")
+            .navigationSplitViewColumnWidth(min: 190, ideal: 214)
+        } detail: {
+            NavigationStack {
+                detail
+            }
+        }
+        .task {
+            model.restoreWorkspace() // reopen the last-used GitOps folder
+            await model.check()
+        }
+    }
+
+    @ViewBuilder private var sidebarList: some View {
             List(selection: $selection) {
                 Section("Overview") {
                     Label(SidebarItem.dashboard.title, systemImage: SidebarItem.dashboard.symbol)
@@ -100,22 +127,6 @@ struct RootView: View {
                     }
                 }
             }
-            .navigationTitle("abgui")
-            .navigationSplitViewColumnWidth(min: 190, ideal: 214)
-            .safeAreaInset(edge: .bottom) {
-                // The footer's last-command line is a way IN to the full transcript, so it
-                // moves the selection the same way a dashboard tile does.
-                ConnectionFooter(showCommandLog: { selection = .commandLog })
-            }
-        } detail: {
-            NavigationStack {
-                detail
-            }
-        }
-        .task {
-            model.restoreWorkspace() // reopen the last-used GitOps folder
-            await model.check()
-        }
     }
 
     @ViewBuilder private var detail: some View {
