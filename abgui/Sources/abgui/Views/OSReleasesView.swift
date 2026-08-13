@@ -45,6 +45,7 @@ struct OSReleasesView: View {
                 Text("Public").tag("public"); Text("Security Responses").tag("rsr")
             }.pickerStyle(.segmented).frame(width: 330)
             Button { Task { await model.loadOSReleases() } } label: { Label("Refresh", systemImage: "arrow.clockwise") }
+                .toolbarLabel("Re-fetch the Apple software-release feed (GDMF).")
         }
         .task { await model.loadOSReleases() }
     }

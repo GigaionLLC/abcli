@@ -289,7 +289,7 @@ struct AbctlClient {
     /// The raw `.mobileconfig` XML for a config (stdout is XML, not JSON).
     func configurationProfile(_ id: String) async throws -> String {
         let result = try await runner.run(argv(["get", "configuration", id, "--profile"]),
-                                          cwd: nil, stdin: nil, timeout: .seconds(60))
+                                          cwd: repoRoot, stdin: nil, timeout: .seconds(60))
         try Self.checkExit(result)
         return String(decoding: result.stdout, as: UTF8.self)
     }
@@ -319,6 +319,13 @@ struct AbctlClient {
     /// Detach a config from a blueprint.
     func detach(configID: String, blueprint: String) async throws -> WriteOutcome {
         try await decodeJSON(WriteOutcome.self, ["detach", "config", configID, "--blueprint", blueprint, "--yes", "--json"])
+    }
+
+    /// Record an already-attached member in the blueprint's git manifest. LOCAL ONLY — it writes
+    /// `gitops/blueprints/<bp>.yml` and never the tenant, which is why it carries no `--yes`
+    /// (there is nothing to gate) and why it must run in the workspace like every tree verb.
+    func adoptMember(kind: String, name: String, blueprint: String) async throws -> WriteOutcome {
+        try await decodeJSON(WriteOutcome.self, Self.adoptArgs(kind: kind, name: name, blueprint: blueprint))
     }
 
     /// Assign org devices to an MDM server. Apple processes assignment asynchronously —
@@ -414,6 +421,12 @@ struct AbctlClient {
     /// `seed` — initialize the workspace tree from the tenant (reads live, writes local files).
     static func seedArgs() -> [String] { ["seed"] }
 
+    /// `adopt` — record a live blueprint member in the git manifest. No `--yes`: this writes
+    /// local files only, so there is no tenant change to confirm.
+    static func adoptArgs(kind: String, name: String, blueprint: String) -> [String] {
+        ["adopt", kind, name, "--blueprint", blueprint, "--json"]
+    }
+
     /// The `--context` tail every run appends. `static` so a PREVIEW can build the same tail from
     /// the model's context without a client (`AppModel.previewArgv`) instead of re-spelling the
     /// flag: the empty-means-omit rule then exists once, and a preview cannot name a different
@@ -444,9 +457,23 @@ struct AbctlClient {
         }
     }
 
+    /// Runs in the WORKSPACE unless a caller overrides `cwd`.
+    ///
+    /// abctl resolves the `gitops/` tree against its process working directory (a context is a
+    /// connection, not a repo location — internal/config/context.go), so a tree-mutating verb run
+    /// from anywhere else updates a different tree, or none. `attach`/`create`/`replace`/`delete`
+    /// all write the tree inline; run from the app bundle's cwd (`/`) they silently failed to,
+    /// while `diff` — which DID pass the workspace — read the real one. The tenant changed, git
+    /// did not, and the resulting `detach-config` row came back on every refresh with nothing in
+    /// the GUI able to clear it.
+    ///
+    /// Defaulting the whole surface to the workspace (rather than adding `cwd:` at each write
+    /// callsite) is deliberate: the next verb someone adds cannot forget it. Read verbs are
+    /// unaffected by cwd except that a workspace-local `.env` now resolves the same way it
+    /// already did for diff/sync/seed — one tenant per workspace, not one per verb.
     private func decodeJSON<T: Decodable>(_ type: T.Type, _ base: [String], stdin: Data? = nil,
                                           cwd: URL? = nil, timeout: Duration = .seconds(60)) async throws -> T {
-        let result = try await runner.run(argv(base), cwd: cwd, stdin: stdin, timeout: timeout)
+        let result = try await runner.run(argv(base), cwd: cwd ?? repoRoot, stdin: stdin, timeout: timeout)
         try Self.checkExit(result)
         do {
             return try Self.decoder.decode(T.self, from: result.stdout)

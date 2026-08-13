@@ -912,11 +912,45 @@ final class AppModel {
     }
 
     func attach(configID: String, blueprint: String) async -> Bool {
-        await runWrite { _ = try await $0.attach(configID: configID, blueprint: blueprint) }
+        await runWrite { _ = self.announceTreeGap(try await $0.attach(configID: configID, blueprint: blueprint)) }
     }
 
     func detach(configID: String, blueprint: String) async -> Bool {
-        await runWrite { _ = try await $0.detach(configID: configID, blueprint: blueprint) }
+        await runWrite { _ = self.announceTreeGap(try await $0.detach(configID: configID, blueprint: blueprint)) }
+    }
+
+    /// Surface a write that reached Apple Business but not gitops/. abctl exits 0 for this (the
+    /// tenant write DID succeed), so without this the GUI reports an unqualified success and the
+    /// operator only learns about it as a drift row later — the exact shape of the bug where a
+    /// GUI attach never reached the manifest. Returns the outcome so it can wrap a call inline.
+    @discardableResult
+    private func announceTreeGap(_ outcome: WriteOutcome) -> WriteOutcome {
+        if let warning = outcome.treeWarning {
+            post(Notice(kind: .warning, title: "Written to Apple, not to git", message: warning))
+        }
+        return outcome
+    }
+
+    /// Record a drift row's member in the blueprint's git manifest, so the reconcile stops
+    /// proposing to remove it. This is the answer to "this config belongs here — stop telling me
+    /// to detach it": it writes `gitops/blueprints/<bp>.yml` and never the tenant, which is why
+    /// there is no confirmation gate. The plan is recomputed after, so the row it acted on
+    /// disappears (or, if abctl refused, stays put with the reason in `lastWriteError`).
+    func adoptMember(_ change: BlueprintChange) async -> Bool {
+        guard let kind = change.memberKind, let name = change.config, !name.isEmpty else {
+            lastWriteError = "This row doesn't name a blueprint member to adopt."
+            return false
+        }
+        let ok = await runWrite {
+            _ = try await $0.adoptMember(kind: kind, name: name, blueprint: change.blueprint)
+        }
+        if ok {
+            post(Notice(kind: .success, title: "Recorded in git",
+                        message: "\(name) is now declared on \(change.blueprint) in gitops/blueprints/. "
+                               + "Commit gitops/ to keep it — an uncommitted manifest is only true on this machine."))
+            refreshPlan()
+        }
+        return ok
     }
 
     /// Shared write wrapper: toggles isWriting, clears/sets lastWriteError, returns success.

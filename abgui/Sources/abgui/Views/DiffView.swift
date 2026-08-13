@@ -38,14 +38,25 @@ struct DiffView: View {
                     GitSourceOfTruthControl(layout: .toolbar,
                                             isOn: model.gitSourceOfTruth,
                                             pending: $pendingGitSourceOfTruth)
+                    // These four SHOW THEIR TITLES. A macOS toolbar renders a bare `Label` as
+                    // its icon alone, and with no `.help` there is not even a tooltip to fall
+                    // back on — the row read as four anonymous glyphs, two of which
+                    // (checkmark.shield / checkmark.circle) are near-identical at toolbar size
+                    // while doing very different things: one only reads local files, the other
+                    // writes the live tenant. The word is the affordance, exactly as it is on
+                    // the Git-source-of-truth control sitting beside them.
                     Button { sheet = .validate } label: { Label("Verify Configs", systemImage: "checkmark.shield") }
+                        .toolbarLabel("Check the profiles in gitops/lib against Apple's schema. Reads local files only — no tenant change.")
                         .disabled(model.isSeeding)
-                    Button { sheet = .apply } label: { Label("Apply...", systemImage: "checkmark.circle") }
+                    Button { sheet = .apply } label: { Label("Apply…", systemImage: "checkmark.circle") }
+                        .toolbarLabel("Reconcile Apple Business with this plan. Opens a sheet that previews the exact abctl command and asks you to confirm before anything is written.")
                         .disabled((model.plan?.actionableChangeCount ?? 0) == 0)
                     Button { model.refreshPlan() } label: { Label("Refresh", systemImage: "arrow.clockwise") }
+                        .toolbarLabel("Recompute the plan: re-read gitops/ and re-fetch the live tenant.")
                         .disabled(model.isLoading || model.isSeeding)
                 }
                 Button { showWorkspacePicker = true } label: { Label("Workspace", systemImage: "folder") }
+                    .toolbarLabel("Choose the folder that contains your gitops/ tree. Every command on this screen runs there.")
             }
             .fileImporter(isPresented: $showWorkspacePicker, allowedContentTypes: [.folder]) { result in
                 if case .success(let url) = result { model.setWorkspace(url) }
@@ -184,6 +195,20 @@ struct DiffView: View {
                 }
                 .padding([.horizontal, .top])
 
+                // A refused adopt has to say so HERE. It is the only write this screen can
+                // start, and `runWrite` reports failure by setting lastWriteError — with
+                // nothing rendering it, a row-button click that abctl rejected (unmanaged
+                // collection, no manifest for the blueprint, member not actually attached)
+                // looked like a click that did nothing at all.
+                if let error = model.lastWriteError {
+                    Label(error, systemImage: "exclamationmark.triangle")
+                        .font(.caption)
+                        .foregroundStyle(.red)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .textSelection(.enabled)
+                        .padding([.horizontal, .top])
+                }
+
                 if !plan.configs.isEmpty {
                     Text("Configurations").font(.headline).padding([.horizontal, .top])
                     VStack(spacing: 0) {
@@ -203,7 +228,8 @@ struct DiffView: View {
                                           target: item.blueprint,
                                           secondary: item.config,
                                           detail: item.detail,
-                                          blocked: !item.isActionable)
+                                          blocked: !item.isActionable,
+                                          adopt: adoptAction(for: item))
                             Divider()
                         }
                     }
@@ -214,6 +240,24 @@ struct DiffView: View {
         // macOS hides the overlay scroller until you scroll, which makes a long plan look like it
         // ends at the fold — the same defect the sync sheet was reported for.
         .scrollIndicators(.visible)
+    }
+
+    /// The per-row escape hatch for "this member belongs in git — stop proposing to remove it".
+    ///
+    /// Offered on the two rows where a member is live in Apple Business but missing from the
+    /// manifest: `detach-*` (git source of truth ON — the plan wants it gone) and `adopt-*`
+    /// (OFF — the plan already wants to record it, and this does it now without a full Apply).
+    /// Everything else returns nil: an attach row's member is already declared in git, and a
+    /// blueprint-level row names no member to adopt.
+    private func adoptAction(for item: BlueprintChange) -> PlanDetailRow.AdoptAction? {
+        guard item.isDetach || item.isAdopt, item.memberKind != nil,
+              let name = item.config, !name.isEmpty else { return nil }
+        return PlanDetailRow.AdoptAction(
+            title: item.isDetach ? "Keep in Git" : "Record in Git",
+            help: item.isDetach
+                ? "Add \(name) to \(item.blueprint)'s manifest in gitops/blueprints/, so this stops being proposed for detach. Writes a local file — Apple Business is not touched."
+                : "Write \(name) into \(item.blueprint)'s manifest now, without waiting for a full Apply. Local file only.",
+            change: item)
     }
 
     private func planSummary(_ plan: Plan) -> String {
@@ -228,11 +272,22 @@ struct DiffView: View {
 }
 
 private struct PlanDetailRow: View {
+    /// An optional trailing button on the row. Rows are otherwise pure display, so WHETHER a row
+    /// offers this is the host's decision (see DiffView.adoptAction) — the row only renders it.
+    struct AdoptAction {
+        let title: String
+        let help: String
+        let change: BlueprintChange
+    }
+
     let action: String
     let target: String
     var secondary: String?
     let detail: String
     var blocked = false
+    var adopt: AdoptAction?
+
+    @Environment(AppModel.self) private var model
 
     var body: some View {
         HStack(alignment: .top, spacing: 10) {
@@ -261,6 +316,13 @@ private struct PlanDetailRow: View {
                     .textSelection(.enabled)
             }
             Spacer(minLength: 0)
+            if let adopt {
+                Button(adopt.title) { Task { _ = await model.adoptMember(adopt.change) } }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                    .help(adopt.help)
+                    .disabled(model.isWriting || model.isLoading)
+            }
         }
         .padding(.vertical, 8)
         .frame(maxWidth: .infinity, alignment: .leading)

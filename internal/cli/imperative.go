@@ -114,6 +114,12 @@ type writeOutcome struct {
 	Archive         string `json:"archive,omitempty"`         // archived pre-overwrite copy (replace/delete)
 	Blueprint       string `json:"blueprint,omitempty"`       // target blueprint (attach/detach)
 	TreeUpdated     bool   `json:"treeUpdated"`
+	// TreeError names why the local tree update failed when TreeUpdated is false
+	// DESPITE the tree write having been requested. The tenant write succeeded (this
+	// document is only emitted on success), so this is not an error exit — but a
+	// caller that reports the write as fully done would be lying, and the drift it
+	// leaves behind resurfaces on every later diff.
+	TreeError string `json:"treeError,omitempty"`
 }
 
 // wantsMachine reports whether a machine format (the --json shorthand or a global

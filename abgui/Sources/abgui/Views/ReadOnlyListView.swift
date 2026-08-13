@@ -78,14 +78,18 @@ struct ReadOnlyListView: View {
                 .frame(width: 86)
             }
             Button { openDetail(selection.first) } label: { Label("Details", systemImage: "eye") }
+                .toolbarLabel("Open the selected row's full detail.")
                 .disabled(selection.count != 1)
             if kind == .devices {
                 Button { showAssign = true } label: { Label("Assign to MDM…", systemImage: "server.rack") }
+                    .toolbarLabel("Assign the selected devices to an MDM server. This WRITES Apple Business, behind its own confirmation.")
                     .disabled(selection.isEmpty)
             }
             Button { showExporter = true } label: { Label("Export CSV", systemImage: "square.and.arrow.up") }
+                .toolbarLabel("Save the rows currently shown (after search and sort) as a CSV file.")
                 .disabled(displayedRows.isEmpty)
             Button { Task { await model.loadReadOnly(kind) } } label: { Label("Refresh", systemImage: "arrow.clockwise") }
+                .toolbarLabel("Re-fetch this inventory from Apple Business.")
         }
         .fileExporter(isPresented: $showExporter, document: csvDocument,
                       contentType: .commaSeparatedText,

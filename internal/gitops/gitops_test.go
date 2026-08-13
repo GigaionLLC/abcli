@@ -237,3 +237,54 @@ func TestLoadBlueprintsAcceptsYaml(t *testing.T) {
 		t.Errorf("a .yaml manifest must be loaded, got %v", got)
 	}
 }
+
+// TestWithMemberIsAdditiveAndRespectsManagedKeys pins the adopt write: it ADDS
+// (sorted, de-duplicated) without disturbing the rest of the manifest, and it
+// refuses an unmanaged optional collection rather than flipping it to managed —
+// which would put every other live member of that collection at risk of a prune.
+func TestWithMemberIsAdditiveAndRespectsManagedKeys(t *testing.T) {
+	apps := []string{"Pages"}
+	base := BlueprintSpec{
+		Name:           "Sales",
+		ID:             "bp-1",
+		Description:    "the sales fleet",
+		Configurations: []string{"wifi.mobileconfig"},
+		Apps:           &apps,
+		// Packages/Devices/Users/Groups stay nil == unmanaged
+	}
+
+	got, ok := base.WithMember("configurations", "old.mobileconfig")
+	if !ok {
+		t.Fatal("configurations is always managed — the add must succeed")
+	}
+	if len(got.Configurations) != 2 || got.Configurations[0] != "old.mobileconfig" || got.Configurations[1] != "wifi.mobileconfig" {
+		t.Errorf("configurations = %v, want the sorted union", got.Configurations)
+	}
+	if got.Description != "the sales fleet" || got.ID != "bp-1" {
+		t.Error("the rest of the manifest must survive an adopt")
+	}
+	if got.Apps == nil || len(*got.Apps) != 1 {
+		t.Errorf("a managed collection the adopt did not target must be untouched: %v", got.Apps)
+	}
+
+	// Idempotent: adopting a member the manifest already declares is a no-op success.
+	again, ok := got.WithMember("configurations", "old.mobileconfig")
+	if !ok || len(again.Configurations) != 2 {
+		t.Errorf("re-adopting must be a no-op success, got ok=%v %v", ok, again.Configurations)
+	}
+
+	// A managed-but-empty key still accepts members (present == managed).
+	empty := []string{}
+	withEmpty := BlueprintSpec{Name: "Kiosk", Packages: &empty}
+	if got, ok := withEmpty.WithMember("packages", "Suite.pkg"); !ok || len(*got.Packages) != 1 {
+		t.Errorf("packages: [] is MANAGED and must accept an adopt, got ok=%v", ok)
+	}
+
+	// Unmanaged (absent key) is refused, and stays absent.
+	if got, ok := base.WithMember("devices", "C02XYZ"); ok || got.Devices != nil {
+		t.Errorf("an unmanaged collection must be refused, got ok=%v devices=%v", ok, got.Devices)
+	}
+	if got, ok := base.WithMember("nonsense", "x"); ok {
+		t.Errorf("an unknown collection key must be refused, got %+v", got)
+	}
+}

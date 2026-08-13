@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/GigaionLLC/abcli/internal/ab"
+	"github.com/GigaionLLC/abcli/internal/gitops"
 	"github.com/GigaionLLC/abcli/internal/hash"
 	"github.com/GigaionLLC/abcli/internal/state"
 )
@@ -50,11 +51,15 @@ type Archiver interface {
 	Archive(name, reason string, xml []byte, meta map[string]string) (path string, err error)
 }
 
-// FileStore is the git-side profile tree (see internal/gitops). Pull writes a
-// file; an ABM-side delete removes one.
+// FileStore is the git-side desired-state tree (see internal/gitops). Pull writes
+// a profile; an ABM-side delete removes one; an adopt row records a live
+// blueprint member in its manifest. Every method here writes LOCAL files only —
+// nothing in this interface reaches the tenant.
 type FileStore interface {
 	WriteConfig(name string, content []byte) error
 	RemoveConfig(name string) error
+	LoadBlueprints() (map[string]gitops.BlueprintSpec, error)
+	WriteBlueprintSpec(gitops.BlueprintSpec) error
 }
 
 // Opts tunes one apply run.

@@ -76,7 +76,8 @@ func newDiffCmd() *cobra.Command {
 	}
 	c.Flags().BoolVar(&asJSON, "json", false, "JSON output")
 	c.Flags().BoolVar(&exitOnDiff, "exit-on-diff", false, "exit 3 if changes are pending")
-	c.Flags().BoolVar(&gitSourceOfTruth, "git-source-of-truth", false, "treat gitops/ as authoritative; do not pull live-only Apple configs into git")
+	c.Flags().BoolVar(&gitSourceOfTruth, "git-source-of-truth", false,
+		"treat gitops/ as authoritative: plan DELETE/detach for Apple-only configs and blueprint members instead of pulling/adopting them into git")
 	c.Flags().StringVar(&refresh, "refresh", refreshSmart, "live refresh mode: smart, full, metadata-only")
 	return c
 }
@@ -102,7 +103,11 @@ func newSyncCmd() *cobra.Command {
 		Use:   "sync",
 		Short: "Reconcile configs + blueprint membership: dry-run plan by default, gated --apply to execute",
 		Long: "sync reconciles the git desired state with the live tenant: CUSTOM_SETTING configs\n" +
-			"(3-way, newest-wins) and each blueprint's member collections (git-authoritative).\n" +
+			"(3-way, newest-wins) and each blueprint's member collections. Both halves follow the\n" +
+			"same rule: by default sync is ADDITIVE, so a config that exists only in Apple is pulled\n" +
+			"into git and a member attached only in Apple is adopted into its blueprint manifest;\n" +
+			"with --git-source-of-truth gitops/ is the complete desired state, so the same two are\n" +
+			"deleted and detached instead (both gated behind --prune).\n" +
 			"Configurations are always managed; apps/packages/devices/users/groups are managed\n" +
 			"only when the manifest carries that key (seed --blueprint-membership writes all six;\n" +
 			"an absent key is never touched). A blueprint that exists only in git is created;\n" +
@@ -127,7 +132,8 @@ func newSyncCmd() *cobra.Command {
 	c.Flags().BoolVar(&fl.yes, "yes", false, "skip the interactive confirmation (also honored: $ABCTL_APPROVE=1)")
 	c.Flags().IntVar(&fl.limitWrites, "limit-writes", 0, "circuit breaker: max tenant writes this run (0 = unlimited)")
 	c.Flags().StringVar(&fl.platforms, "platforms", "", "comma-separated configuredForPlatforms for created configs (default PLATFORM_MACOS)")
-	c.Flags().BoolVar(&fl.gitSourceOfTruth, "git-source-of-truth", false, "treat gitops/ as authoritative; apply implies --prune so Apple matches git")
+	c.Flags().BoolVar(&fl.gitSourceOfTruth, "git-source-of-truth", false,
+		"treat gitops/ as authoritative for configs AND blueprint membership; apply implies --prune so Apple matches git")
 	c.Flags().StringVar(&fl.refresh, "refresh", refreshSmart, "live refresh mode: smart, full, metadata-only")
 	c.Flags().StringVar(&fl.verify, "verify", verifyTargeted,
 		"post-apply verification: targeted (re-read just the configs written), full (re-read every config), none")
@@ -176,7 +182,7 @@ func runSync(fl syncFlags) error {
 		_ = printFullPlan(pc, "")
 	}
 	if !fl.yes && !envApproved() {
-		ok, err := confirmApply(len(pc.plan.Items) + pc.bpPlan.ReconcilableCount())
+		ok, err := confirmApply(pc)
 		if err != nil {
 			return err
 		}
@@ -275,7 +281,7 @@ func runSync(fl syncFlags) error {
 	})
 	reportVerification(os.Stderr, fl.verify, written, mismatches)
 
-	bpPlan := reconcile.ComputeBlueprints(pc.bpDesired, liveBPs, idByName)
+	bpPlan := reconcile.ComputeBlueprints(pc.bpDesired, liveBPs, idByName, membershipMode(fl.gitSourceOfTruth))
 	bpRes := eng.ApplyBlueprints(bpPlan, opts, res.Writes)
 
 	var cause error
@@ -612,14 +618,51 @@ func envApproved() bool {
 	return false
 }
 
-// confirmApply prompts on stdin; only a literal "yes" proceeds.
-func confirmApply(n int) (bool, error) {
-	fmt.Fprintf(os.Stderr, "\nApply %d change(s) to the LIVE Apple Business tenant? Type 'yes' to proceed: ", n)
+// confirmApply prompts on stdin; only a literal "yes" proceeds. It splits the
+// count by WHERE each change lands: not every planned row is a tenant write —
+// pulls write git, and so does an adopt — and a gate that calls a local file
+// write "a change to the LIVE tenant" trains people to stop reading it.
+func confirmApply(pc *planCtx) (bool, error) {
+	tenant, local := pc.applyCounts()
+	switch {
+	case tenant == 0:
+		fmt.Fprintf(os.Stderr, "\nApply %d change(s) to LOCAL files in gitops/ only (nothing is written to Apple Business)? Type 'yes' to proceed: ", local)
+	case local == 0:
+		fmt.Fprintf(os.Stderr, "\nApply %d change(s) to the LIVE Apple Business tenant? Type 'yes' to proceed: ", tenant)
+	default:
+		fmt.Fprintf(os.Stderr, "\nApply %d change(s) — %d to the LIVE Apple Business tenant, %d to local files in gitops/? Type 'yes' to proceed: ",
+			tenant+local, tenant, local)
+	}
 	sc := bufio.NewScanner(os.Stdin)
 	if !sc.Scan() {
 		return false, sc.Err()
 	}
 	return strings.EqualFold(strings.TrimSpace(sc.Text()), "yes"), nil
+}
+
+// applyCounts splits the actionable plan into tenant writes and local (gitops/)
+// writes. The local side is the pull family — a config that only exists in ABM,
+// or one deleted there — plus every blueprint adopt row.
+func (pc *planCtx) applyCounts() (tenant, local int) {
+	for _, it := range pc.plan.Items {
+		switch it.Action {
+		case reconcile.Pull, reconcile.PullNew, reconcile.DeleteGit:
+			local++
+		default:
+			tenant++
+		}
+	}
+	for _, it := range pc.bpPlan.Items {
+		if !it.IsActionable() {
+			continue
+		}
+		if it.Action.IsAdopt() {
+			local++
+		} else {
+			tenant++
+		}
+	}
+	return tenant, local
 }
 
 func printApplyResult(res *reconcile.Result) {
@@ -1028,7 +1071,7 @@ func loadPlan(gitSourceOfTruth bool, refresh string) (*planCtx, error) {
 	}
 	fmt.Fprintf(os.Stderr, "building plan: computed %d configuration change(s).\n", len(cfgPlan.Items))
 	fmt.Fprintln(os.Stderr, "building plan: computing blueprint membership drift...")
-	bpPlan := reconcile.ComputeBlueprints(bpDesired, liveBPs, memberIDByName)
+	bpPlan := reconcile.ComputeBlueprints(bpDesired, liveBPs, memberIDByName, membershipMode(gitSourceOfTruth))
 	fmt.Fprintf(os.Stderr, "building plan: computed %d blueprint membership change(s).\n", len(bpPlan.Items))
 	return &planCtx{
 		c: c, cfg: cfg, tree: t, desired: desired, base: base, live: live,
@@ -1041,6 +1084,18 @@ func loadPlan(gitSourceOfTruth bool, refresh string) (*planCtx, error) {
 		memberIDByName: memberIDByName,
 		bpPlan:         bpPlan,
 	}, nil
+}
+
+// membershipMode maps --git-source-of-truth onto the blueprint half of the
+// reconcile, so ONE flag means the same thing on both sides: with it, git is the
+// complete desired state (an ABM-only config is deleted, an ABM-only member is
+// detached); without it, sync is additive (an ABM-only config is pulled into
+// git, an ABM-only member is adopted into its manifest).
+func membershipMode(gitSourceOfTruth bool) reconcile.MembershipMode {
+	if gitSourceOfTruth {
+		return reconcile.GitAuthoritative
+	}
+	return reconcile.Bidirectional
 }
 
 // managedBlueprintCollections returns the member collections the plan must

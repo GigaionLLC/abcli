@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -132,6 +133,49 @@ func optMembers(p *[]string) ([]string, bool) {
 		return nil, false
 	}
 	return *p, true
+}
+
+// WithMember returns the spec with name ADDED to one collection's member list
+// (sorted, de-duplicated), and whether the addition was possible. It is additive
+// on purpose: adopting a live member must never drop a member the operator
+// declared in git but hasn't attached yet — that entry is a pending attach, and
+// rewriting the list from live (what the imperative attach path does, where the
+// tenant was just written) would silently discard the intent.
+//
+// An UNMANAGED optional collection (nil key) is left untouched and ok=false is
+// returned: writing the key would flip the collection to managed, which makes
+// every OTHER live member of it a --prune detach candidate. Growing a manifest's
+// managed surface is `seed --blueprint-membership`'s job, never a side effect of
+// adopting one member.
+func (s BlueprintSpec) WithMember(collection, name string) (BlueprintSpec, bool) {
+	cur, managed := s.Members(collection)
+	if !managed {
+		return s, false
+	}
+	for _, m := range cur {
+		if m == name {
+			return s, true // already declared — nothing to write, but not a failure
+		}
+	}
+	next := append(append([]string(nil), cur...), name)
+	sort.Strings(next)
+	switch collection {
+	case "configurations":
+		s.Configurations = next
+	case "apps":
+		s.Apps = &next
+	case "packages":
+		s.Packages = &next
+	case "devices":
+		s.Devices = &next
+	case "users":
+		s.Users = &next
+	case "groups":
+		s.Groups = &next
+	default:
+		return s, false
+	}
+	return s, true
 }
 
 // LoadBlueprints reads blueprints/*.yml → blueprint name → spec. A malformed file

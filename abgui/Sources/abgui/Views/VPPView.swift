@@ -70,7 +70,9 @@ struct VPPView: View {
             ReadOnlyBadge()
             if model.vppConnected {
                 Button { Task { await model.vppConnect() } } label: { Label("Refresh", systemImage: "arrow.clockwise") }
+                    .toolbarLabel("Re-query Apps & Books with the loaded token.")
                 Button { model.vppDisconnect() } label: { Label("Disconnect", systemImage: "xmark.circle") }
+                    .toolbarLabel("Forget the loaded Apps & Books (VPP) token for this session.")
             }
         }
     }

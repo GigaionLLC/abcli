@@ -109,15 +109,27 @@ func runMembership(verb, configArg, blueprintArg string, yes, noWriteTree, jsonO
 	if err != nil {
 		return err
 	}
+	// The tenant write has landed; the manifest update is a SEPARATE, local step that
+	// can fail on its own (most often because the gitops tree resolves against the
+	// process's working directory — see internal/config — so a caller running from
+	// outside the workspace updates a different tree, or none). That failure used to
+	// be a stderr warning while the machine outcome still reported treeUpdated:true,
+	// which is exactly how a GUI ends up showing a green attach whose manifest never
+	// changed — and then a `detach-config` drift row on every subsequent diff. So the
+	// outcome now carries what actually happened.
+	treeUpdated, treeErr := !noWriteTree, ""
 	if !noWriteTree {
 		// Rewrite the manifest to the FULL post-write live membership (not a delta),
 		// so the tree can never omit members that `sync --prune` would then detach.
 		if err := i.syncBlueprintManifest(bpName, bp.ID, live); err != nil {
+			treeUpdated, treeErr = false, err.Error()
 			fmt.Fprintf(os.Stderr, "warning: membership changed on ABM but the local manifest update failed: %v\n", err)
+			fmt.Fprintf(os.Stderr, "warning: gitops/blueprints/ still disagrees with ABM — run `abctl adopt config %q --blueprint %q` from the workspace to record it.\n", lc.Name, bpName)
 		}
 	}
 	if wantsMachine(jsonOut) {
-		return emitWrite(writeOutcome{Action: verb, Name: lc.Name, ID: lc.ID, Blueprint: bpName, TreeUpdated: !noWriteTree}, jsonOut)
+		return emitWrite(writeOutcome{Action: verb, Name: lc.Name, ID: lc.ID, Blueprint: bpName,
+			TreeUpdated: treeUpdated, TreeError: treeErr}, jsonOut)
 	}
 	fmt.Fprintf(os.Stderr, "%sed %q %s blueprint %q\n", verb, lc.Name,
 		map[string]string{"attach": "to", "detach": "from"}[verb], bpName)
@@ -221,6 +233,123 @@ func runResourceMembership(verb string, k memberKind, arg, blueprintArg string, 
 	} else {
 		fmt.Fprintf(os.Stderr, "%sed %s %q %s blueprint %q (%s membership isn't GitOps-tracked)\n", verb, k.noun, name, prep, bpName, k.noun)
 	}
+	return nil
+}
+
+// --- adopt: record a LIVE blueprint member in the git manifest (no tenant write) ---
+
+func newAdoptCmd() *cobra.Command {
+	var blueprint string
+	var jsonOut bool
+	c := &cobra.Command{
+		Use:   "adopt <config|app|package|device|user|group> <name|serial|email> --blueprint <name|id>",
+		Short: "Record an already-attached blueprint member in the git manifest (local only, no tenant write)",
+		Long: "adopt is the membership counterpart of `pull`: it writes a member that is ALREADY attached\n" +
+			"in Apple Business into gitops/blueprints/<blueprint>.yml, so the reconcile stops proposing to\n" +
+			"detach it. Use it after attaching in the Apple Business console, or when `abctl attach` ran\n" +
+			"outside the workspace and only reached the tenant.\n\n" +
+			"This writes LOCAL FILES ONLY — it never touches the tenant, so there is no --yes gate. The\n" +
+			"write is additive: the collection's other members are left alone, so a member you declared in\n" +
+			"git but haven't attached yet is never dropped. A member that is NOT attached in Apple Business\n" +
+			"is refused — adopting one would queue a real tenant write on the next apply, which is `attach`'s\n" +
+			"job, not this command's.",
+		Args: cobra.ExactArgs(2),
+		RunE: func(_ *cobra.Command, a []string) error { return runAdopt(a[0], a[1], blueprint, jsonOut) },
+	}
+	c.Flags().StringVar(&blueprint, "blueprint", "", "blueprint whose manifest gains the member (name or id)")
+	c.Flags().BoolVar(&jsonOut, "json", false, "JSON output (machine-readable outcome)")
+	_ = c.MarkFlagRequired("blueprint")
+	return c
+}
+
+// runAdopt resolves the member and the blueprint against the live tenant (so the
+// manifest records the CANONICAL name the reconcile will match, not an alias),
+// confirms the member really is attached, then adds it to the manifest.
+func runAdopt(noun, arg, blueprintArg string, jsonOut bool) error {
+	i, err := newImp()
+	if err != nil {
+		return err
+	}
+	bp, err := i.c.ResolveBlueprint(blueprintArg)
+	if err != nil {
+		return err
+	}
+	bpName := bp.AttrStr("name")
+
+	// Resolve the member to its ABM id + canonical display name. Configs resolve from
+	// the CUSTOM_SETTING list (the name is the lib/ filename and the manifest entry);
+	// the other five go through the same resolvers `attach` uses.
+	var memberID, memberName, relKey, collection string
+	switch noun {
+	case "config", "configuration":
+		live, ferr := i.c.FetchCustomSettings()
+		if ferr != nil {
+			return ferr
+		}
+		lc, ok := findLiveConfig(live, arg)
+		if !ok {
+			return fmt.Errorf("CUSTOM_SETTING config %q not found (by name or id)", arg)
+		}
+		memberID, memberName = lc.ID, lc.Name
+		relKey, collection = "configurations", ab.CollectionConfigurations
+	default:
+		k, ok := memberKindFor(noun)
+		if !ok {
+			return fmt.Errorf("usage: abctl adopt <config|app|package|device|user|group> <name|serial|email> --blueprint <bp>")
+		}
+		res, rerr := k.resolve(i.c, arg)
+		if rerr != nil {
+			return rerr
+		}
+		memberID, memberName = res.ID, k.display(res)
+		if memberName == "" {
+			memberName = res.ID
+		}
+		relKey, collection = k.rel, k.collection
+	}
+
+	// Refuse to record something the tenant does not actually have attached: the point
+	// of adopt is to make git agree with ABM, and a manifest entry with no live member
+	// behind it is a pending ATTACH (a tenant write) dressed up as a local one.
+	links, err := i.c.BlueprintRelationship(bp.ID, relKey)
+	if err != nil {
+		return fmt.Errorf("reading %s membership of blueprint %q: %w", collection, bpName, err)
+	}
+	attached := false
+	for _, l := range links {
+		if l.ID == memberID {
+			attached = true
+			break
+		}
+	}
+	if !attached {
+		return fmt.Errorf("%q is not attached to blueprint %q in Apple Business — adopt only records what is already live; use `abctl attach %s %s --blueprint %s` to attach it",
+			memberName, bpName, noun, arg, blueprintArg)
+	}
+
+	all, err := i.tree.LoadBlueprints()
+	if err != nil {
+		return fmt.Errorf("reading existing blueprint manifests: %w", err)
+	}
+	spec, ok := all[bpName]
+	if !ok {
+		return fmt.Errorf("blueprint %q has no manifest in %s — run `abctl seed` to adopt the blueprint itself first", bpName, rel(i.tree.BlueprintsDir))
+	}
+	next, added := spec.WithMember(collection, memberName)
+	if !added {
+		return fmt.Errorf("blueprint %q's manifest does not manage %s membership — add the key with `abctl seed --blueprint-membership` (an absent key means the collection is deliberately untracked)", bpName, collection)
+	}
+	if next.ID == "" {
+		next.ID = bp.ID
+	}
+	if err := i.tree.WriteBlueprintSpec(next); err != nil {
+		return err
+	}
+	if wantsMachine(jsonOut) {
+		return emitWrite(writeOutcome{Action: "adopt", Name: memberName, ID: memberID, Blueprint: bpName, TreeUpdated: true}, jsonOut)
+	}
+	fmt.Fprintf(os.Stderr, "recorded %q in blueprint %q's manifest → %s (review, then `git add gitops/`)\n",
+		memberName, bpName, rel(i.tree.BlueprintsDir))
 	return nil
 }
 
