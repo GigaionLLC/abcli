@@ -395,4 +395,10 @@ enum CommandClipboard {
         board.clearContents()
         _ = board.setString(text, forType: .string)
     }
+
+    /// Select a file in Finder. Here rather than at the callsites so the Logs screen and the
+    /// transcript panes reveal identically.
+    static func reveal(_ url: URL) {
+        NSWorkspace.shared.activateFileViewerSelecting([url])
+    }
 }
