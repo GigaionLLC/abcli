@@ -117,6 +117,9 @@ struct CommandLogView: View {
                     .textSelection(.enabled)
                     .padding([.horizontal, .top])
                     .padding(.bottom, 6)
+                CommandTimingPanel(records: model.commands)
+                    .padding(.horizontal)
+                    .padding(.bottom, 6)
                 // ScrollView + VStack, NOT List. These rows wrap: monospaced command text with
                 // .fixedSize(vertical:) inside a .frame(maxWidth: .infinity). A macOS List asks a
                 // self-sizing row for its height at an unbounded width, and that combination
@@ -167,6 +170,84 @@ struct CommandLogView: View {
             return (["cd \(CommandFormatter.quote(shared.path))"] + commands).joined(separator: "\n\n")
         }
         return records.map(\.script).joined(separator: "\n\n")
+    }
+}
+
+/// Where the time goes, per verb — the view that turns a chronological log into an answer.
+///
+/// The chronological rows below tell you what a run did. This tells you which operation is slow,
+/// whether it is slow every time or once, and whether one is STILL RUNNING — the three questions
+/// you actually ask when the app feels stuck. Nothing here is newly measured: every invocation is
+/// already timed at the single `AbctlRunner.run` seam; this only adds them up.
+private struct CommandTimingPanel: View {
+    let records: [CommandRecord]
+    @State private var expanded = false
+
+    private var rows: [CommandTiming] { CommandTiming.rollUp(records) }
+    private var running: [CommandRecord] { records.filter { $0.status == .running } }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            DisclosureGroup(isExpanded: $expanded) {
+                VStack(alignment: .leading, spacing: 0) {
+                    ForEach(rows) { row in
+                        HStack(alignment: .firstTextBaseline, spacing: 8) {
+                            Text(row.verb)
+                                .font(.system(.caption, design: .monospaced))
+                                .frame(minWidth: 150, alignment: .leading)
+                            Text(detail(for: row))
+                                .font(.caption2)
+                                .foregroundStyle(row.slowest >= CommandRecord.slowThreshold ? Color.orange : .secondary)
+                            Spacer(minLength: 0)
+                        }
+                        .padding(.vertical, 3)
+                        .textSelection(.enabled)
+                    }
+                }
+                .padding(.top, 4)
+            } label: {
+                Text(headline).font(.caption)
+            }
+
+            // In-flight commands tick, because "how long has this been going?" is the whole
+            // question when the app looks hung — and a static "running" cannot answer it. The
+            // timeline drives ONLY this strip, so nothing else re-renders on the tick.
+            if !running.isEmpty {
+                TimelineView(.periodic(from: .now, by: 0.5)) { context in
+                    VStack(alignment: .leading, spacing: 2) {
+                        ForEach(running) { record in
+                            let seconds = record.elapsed(asOf: context.date)
+                            HStack(spacing: 6) {
+                                ProgressView().controlSize(.small)
+                                Text("\(CommandTiming.verbKey(record.argv)) — running \(DurationText.short(seconds))")
+                                    .font(.caption2)
+                                    .foregroundStyle(seconds >= CommandRecord.slowThreshold ? Color.orange : .secondary)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private var headline: String {
+        let finished = rows.reduce(0) { $0 + $1.runs }
+        guard let slowest = rows.first, slowest.slowest > 0 else {
+            return "Timing — no completed commands yet"
+        }
+        return "Timing — \(finished) command(s), slowest: \(slowest.verb) at \(DurationText.short(slowest.slowest))"
+    }
+
+    private func detail(for row: CommandTiming) -> String {
+        var parts: [String] = []
+        if row.runs > 0 {
+            parts.append("\(row.runs)×")
+            parts.append("slowest \(DurationText.short(row.slowest))")
+            if row.runs > 1 { parts.append("avg \(DurationText.short(row.average))") }
+        }
+        if row.running > 0 { parts.append("\(row.running) running") }
+        if row.failures > 0 { parts.append("\(row.failures) failed") }
+        return parts.joined(separator: " · ")
     }
 }
 

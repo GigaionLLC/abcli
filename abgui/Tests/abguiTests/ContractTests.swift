@@ -1269,3 +1269,85 @@ private final class ParityCommandSink: @unchecked Sendable {
     func start(_ record: CommandRecord) { lock.withLock { _started.append(record) } }
     func finish(_ id: UUID, _ status: CommandRecord.Status) { lock.withLock { _finished.append((id, status)) } }
 }
+
+// MARK: - command timing (the "which verb is slow / is it still running" roll-up)
+
+final class CommandTimingTests: XCTestCase {
+    private func record(_ argv: [String], seconds: TimeInterval?, failed: Bool = false) -> CommandRecord {
+        let started = Date(timeIntervalSince1970: 1_000)
+        var r = CommandRecord(argv: argv, cwd: nil, status: .running, startedAt: started)
+        if let seconds {
+            r.finishedAt = started.addingTimeInterval(seconds)
+            r.status = failed ? .failed(1) : .succeeded
+        }
+        return r
+    }
+
+    /// A verb is named by its leading NON-flag tokens, so repeated runs of one operation land in
+    /// one row. Splitting on flags would scatter `adopt config X --blueprint A` and
+    /// `adopt config Y --blueprint B` into separate rows and hide that the verb itself is slow.
+    func testVerbKeyStopsAtTheFirstFlag() {
+        XCTAssertEqual(CommandTiming.verbKey(["diff", "--json", "--refresh", "smart"]), "diff")
+        XCTAssertEqual(CommandTiming.verbKey(["get", "configurations", "-o", "json"]), "get configurations")
+        XCTAssertEqual(CommandTiming.verbKey(["adopt", "config", "WiFi.mobileconfig", "--blueprint", "Fleet"]),
+                       "adopt config")
+        XCTAssertEqual(CommandTiming.verbKey(["sync", "--apply", "--yes"]), "sync")
+        XCTAssertEqual(CommandTiming.verbKey([]), "abctl")
+    }
+
+    /// Slowest verb first — that is the whole point of the panel, and it must not be perturbed by
+    /// an in-flight command (which has no duration to contribute yet).
+    func testRollUpAggregatesAndOrdersBySlowest() {
+        let rolled = CommandTiming.rollUp([
+            record(["diff", "--json"], seconds: 1.4),
+            record(["diff", "--json"], seconds: 9.0),
+            record(["get", "configurations"], seconds: 0.5),
+            record(["adopt", "config", "X"], seconds: 61, failed: true),
+            record(["sync", "--apply"], seconds: nil), // still running
+        ])
+
+        XCTAssertEqual(rolled.map(\.verb), ["adopt config", "diff", "get configurations", "sync"])
+
+        guard let diff = rolled.first(where: { $0.verb == "diff" }) else {
+            return XCTFail("diff row missing from \(rolled.map(\.verb))")
+        }
+        XCTAssertEqual(diff.runs, 2)
+        XCTAssertEqual(diff.slowest, 9.0, accuracy: 0.001)
+        XCTAssertEqual(diff.average, 5.2, accuracy: 0.001)
+
+        // An unfinished command counts as RUNNING and contributes no duration — otherwise a
+        // command that never returns would read as instant.
+        let sync = rolled.first { $0.verb == "sync" }
+        XCTAssertEqual(sync?.running, 1)
+        XCTAssertEqual(sync?.runs, 0)
+        XCTAssertEqual(sync?.slowest, 0)
+
+        XCTAssertEqual(rolled.first { $0.verb == "adopt config" }?.failures, 1)
+    }
+
+    /// `elapsed` is what makes "still running" legible: a finished record reports its real
+    /// duration, an unfinished one reports how long it has been going as of now.
+    func testElapsedTicksWhileRunningAndFreezesWhenDone() {
+        let started = Date(timeIntervalSince1970: 1_000)
+        let running = CommandRecord(argv: ["diff"], cwd: nil, status: .running, startedAt: started)
+        XCTAssertEqual(running.elapsed(asOf: started.addingTimeInterval(30)), 30, accuracy: 0.001)
+        XCTAssertTrue(running.isSlow(asOf: started.addingTimeInterval(30)))
+        XCTAssertFalse(running.isSlow(asOf: started.addingTimeInterval(1)))
+
+        let done = record(["diff"], seconds: 2)
+        XCTAssertEqual(done.elapsed(asOf: started.addingTimeInterval(999)), 2, accuracy: 0.001)
+    }
+
+    func testDurationTextSwitchesToMinutes() {
+        XCTAssertEqual(DurationText.short(1.44), "1.4s")
+        XCTAssertEqual(DurationText.short(95), "1m 35s")
+    }
+
+    /// The run log stamps every line with elapsed time, so the file shows WHICH STEP was slow —
+    /// a total duration only ever says that something was.
+    func testRunLogStampsElapsedTime() {
+        XCTAssertEqual(RunLog.stamped("building plan: fetching", elapsed: 1.25),
+                       "[  1.250s] building plan: fetching")
+        XCTAssertTrue(RunLog.stamped("x", elapsed: -1).hasPrefix("[  0.000s]"), "a negative skew must not print")
+    }
+}
