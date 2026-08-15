@@ -11,7 +11,7 @@ struct RootView: View {
     /// A sidebar entry. (Named SidebarItem, not Section, to avoid shadowing SwiftUI.Section.)
     enum SidebarItem: String, CaseIterable, Identifiable, Hashable {
         // Overview — the stat-tile dashboard (the landing screen)
-        case dashboard, systemHealth, commandLog, whatsNew
+        case dashboard, systemHealth, commandLog, runLogs, whatsNew
         // GitOps — write-capable
         case configurations, blueprints, diff, archive
         // Read-only — live views abgui never mutates
@@ -41,6 +41,7 @@ struct RootView: View {
             case .dashboard: return "Dashboard"
             case .systemHealth: return "System Health"
             case .commandLog: return "Command Log"
+            case .runLogs: return "Logs"
             case .whatsNew: return "What’s New"
             case .configurations: return "Configurations"
             case .blueprints: return "Blueprints"
@@ -58,6 +59,7 @@ struct RootView: View {
             case .dashboard: return "square.grid.2x2"
             case .systemHealth: return "stethoscope"
             case .commandLog: return "terminal"
+            case .runLogs: return "doc.text.magnifyingglass"
             case .whatsNew: return "sparkles"
             case .configurations: return "doc.text"
             case .blueprints: return "square.stack.3d.up"
@@ -113,6 +115,8 @@ struct RootView: View {
                         .tag(SidebarItem.systemHealth)
                     Label(SidebarItem.commandLog.title, systemImage: SidebarItem.commandLog.symbol)
                         .tag(SidebarItem.commandLog)
+                    Label(SidebarItem.runLogs.title, systemImage: SidebarItem.runLogs.symbol)
+                        .tag(SidebarItem.runLogs)
                     Label(SidebarItem.whatsNew.title, systemImage: SidebarItem.whatsNew.symbol)
                         .tag(SidebarItem.whatsNew)
                 }
@@ -137,6 +141,7 @@ struct RootView: View {
             case .dashboard: DashboardView(select: { selection = $0 })
             case .systemHealth: SystemHealthView()
             case .commandLog: CommandLogView()
+            case .runLogs: RunLogsView()
             case .whatsNew: WhatsNewView()
             case .configurations: ConfigurationsView()
             case .blueprints: BlueprintsView()

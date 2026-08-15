@@ -1351,3 +1351,99 @@ final class CommandTimingTests: XCTestCase {
         XCTAssertTrue(RunLog.stamped("x", elapsed: -1).hasPrefix("[  0.000s]"), "a negative skew must not print")
     }
 }
+
+// MARK: - the run-log index behind the Logs screen
+
+final class RunLogIndexTests: XCTestCase {
+    private var dir: URL!
+
+    override func setUpWithError() throws {
+        dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("abgui-logs-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+    }
+
+    override func tearDownWithError() throws {
+        try? FileManager.default.removeItem(at: dir)
+    }
+
+    @discardableResult
+    private func write(_ name: String, _ body: String) throws -> URL {
+        let url = dir.appendingPathComponent(name)
+        try Data(body.utf8).write(to: url)
+        return url
+    }
+
+    /// The list is built from FILENAMES, so a full read is never needed to populate it.
+    func testParsesVerbAndUTCStartFromTheFilename() throws {
+        XCTAssertEqual(RunLogIndex.verb(fromName: "diff-20260813T204445Z-b37749.log"), "diff")
+        XCTAssertEqual(RunLogIndex.verb(fromName: "sync-20260813T204445Z-b37749.log"), "sync")
+
+        let parsed = RunLogIndex.startDate(fromName: "diff-20260813T204445Z-b37749.log")
+        var utc = Calendar(identifier: .gregorian)
+        utc.timeZone = TimeZone(identifier: "UTC")!
+        let parts = utc.dateComponents([.year, .month, .day, .hour, .minute, .second],
+                                       from: try XCTUnwrap(parsed))
+        XCTAssertEqual(parts.year, 2026)
+        XCTAssertEqual(parts.month, 8)
+        XCTAssertEqual(parts.day, 13)
+        XCTAssertEqual(parts.hour, 20)
+        XCTAssertEqual(parts.minute, 44)
+        XCTAssertEqual(parts.second, 45)
+
+        XCTAssertNil(RunLogIndex.startDate(fromName: "not-a-log.log"))
+    }
+
+    /// The verdict comes from a bounded TAIL read, so listing fifty logs never loads fifty
+    /// transcripts. This is the property that keeps the screen cheap to open.
+    func testReadsOutcomeFromTheFooterWithoutReadingTheWholeFile() throws {
+        let filler = String(repeating: "building plan: reusing cached profile hash: x\n", count: 5_000)
+        let url = try write("diff-20260813T204445Z-b37749.log", """
+        # abgui run log
+        ---
+        \(filler)
+        ---
+        finished: 2026-08-13T20:44:46Z
+        duration: 1.5s
+        outcome: plan computed
+        lines: 106
+        """)
+        let footer = RunLogIndex.readFooter(url)
+        XCTAssertEqual(footer.outcome, "plan computed")
+        XCTAssertEqual(footer.duration, "1.5s")
+        XCTAssertGreaterThan(try Data(contentsOf: url).count, RunLogIndex.footerProbeBytes)
+    }
+
+    /// A run that died before `finish` has no footer. That is a real state worth showing, not an
+    /// error to swallow — it is what an app killed mid-sync leaves behind.
+    func testFooterlessLogReadsAsUnfinished() throws {
+        try write("sync-20260813T204445Z-aaaaaa.log", "# abgui run log\n---\nbuilding plan: ...\n")
+        let scanned = RunLogIndex.scan(directory: dir)
+        XCTAssertEqual(scanned.count, 1)
+        XCTAssertTrue(scanned[0].isUnfinished)
+        XCTAssertNil(scanned[0].outcome)
+    }
+
+    /// Newest first, and only abgui's own files. The directory is a shared macOS location, so a
+    /// stray file must not appear as a run — the same rule the pruner follows before DELETING.
+    func testScanIsNewestFirstAndIgnoresForeignFiles() throws {
+        try write("diff-20260813T204400Z-aaaaaa.log", "outcome: older\n")
+        Thread.sleep(forTimeInterval: 0.05)
+        try write("sync-20260813T204500Z-bbbbbb.log", "outcome: newer\n")
+        try write("some-other-tool.log", "not ours\n")
+        try write("notes.txt", "not ours either\n")
+
+        let scanned = RunLogIndex.scan(directory: dir)
+        XCTAssertEqual(scanned.map(\.verb), ["sync", "diff"], "newest first, foreign files excluded")
+    }
+
+    /// A failed run has to be identifiable at a glance in the list, from the footer prose that
+    /// `loadPlan`/`seedWorkspace` actually write.
+    func testFailureClassification() throws {
+        try write("diff-20260813T204400Z-aaaaaa.log", "outcome: failed — abctl timed out\n")
+        try write("sync-20260813T204500Z-bbbbbb.log", "outcome: plan computed\n")
+        let byVerb = Dictionary(uniqueKeysWithValues: RunLogIndex.scan(directory: dir).map { ($0.verb, $0) })
+        XCTAssertEqual(byVerb["diff"]?.isFailure, true)
+        XCTAssertEqual(byVerb["sync"]?.isFailure, false)
+    }
+}
