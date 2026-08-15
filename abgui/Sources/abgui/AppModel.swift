@@ -1060,6 +1060,78 @@ final class AppModel {
         return ok
     }
 
+    // MARK: the console — type an abctl command, credentials already threaded
+    //
+    // abgui is a facade over a CLI, and the facade will always be narrower than the tool. The
+    // console is the escape hatch: anything abctl can do, without leaving the app and without
+    // re-deriving the connection by hand. It runs through the ordinary client, so a typed
+    // command carries the same `--context` and the same workspace cwd as the buttons — which is
+    // precisely the thing that was wrong when GUI writes went to the wrong tree.
+
+    /// One console invocation and everything it produced.
+    struct ConsoleEntry: Identifiable, Equatable {
+        let id = UUID()
+        /// The argv actually run, REDACTED — this is `CommandRecord`'s form, so an entry can be
+        /// rendered, copied or logged without a secret riding along.
+        let argv: [String]
+        var stdout = ""
+        var stderr = ""
+        var exitCode: Int32 = 0
+        var duration: TimeInterval = 0
+        var failedToStart: String?
+
+        var commandLine: String { CommandFormatter.line(argv) }
+        /// Exit 3 is abctl's "changes pending" — a normal answer from `diff --exit-on-diff`, not
+        /// a failure, and colouring it red would teach people to ignore red.
+        var isFailure: Bool {
+            if failedToStart != nil { return true }
+            return exitCode != 0 && exitCode != 3
+        }
+    }
+
+    var consoleEntries: [ConsoleEntry] = []
+    var isRunningConsole = false
+
+    /// Commands typed this session, newest last — for up/down recall in the input field.
+    var consoleHistory: [String] = []
+
+    /// Run a typed command line. Returns false when there was nothing to run.
+    @discardableResult
+    func runConsole(_ line: String) async -> Bool {
+        let argv = CommandLineParser.tokenize(line)
+        guard !argv.isEmpty else { return false }
+        guard let client = makeClient() else {
+            lastWriteError = "abctl was not found in the app bundle."
+            return false
+        }
+        let trimmed = line.trimmingCharacters(in: .whitespaces)
+        if consoleHistory.last != trimmed { consoleHistory.append(trimmed) }
+
+        isRunningConsole = true
+        defer { isRunningConsole = false }
+
+        var entry = ConsoleEntry(argv: CommandFormatter.redact(argv))
+        let started = Date()
+        do {
+            let result = try await client.runConsole(argv)
+            entry.stdout = String(decoding: result.stdout, as: UTF8.self)
+            entry.stderr = result.stderr
+            entry.exitCode = result.code
+        } catch is CancellationError {
+            entry.failedToStart = "Cancelled."
+        } catch {
+            // A spawn failure or abgui's own watchdog — abctl never ran, or never finished, so
+            // there is no exit code to report and saying "exit 0" would be a lie.
+            entry.failedToStart = error.localizedDescription
+        }
+        entry.duration = Date().timeIntervalSince(started)
+        consoleEntries.append(entry)
+        if consoleEntries.count > 100 { consoleEntries.removeFirst(consoleEntries.count - 100) }
+        return true
+    }
+
+    func clearConsole() { consoleEntries = [] }
+
     /// Shared write wrapper: toggles isWriting, clears/sets lastWriteError, returns success.
     private func runWrite(_ body: (AbctlClient) async throws -> Void) async -> Bool {
         guard let client = makeClient() else {
