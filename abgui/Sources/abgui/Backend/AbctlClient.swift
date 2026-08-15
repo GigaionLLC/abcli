@@ -293,6 +293,21 @@ struct AbctlClient {
         }
     }
 
+    /// Run an operator-typed command and hand back all three streams verbatim.
+    ///
+    /// It goes through the SAME seam as every button: `argv(_:)` appends `--context`, the run
+    /// happens in the workspace, and `RecordingRunner` records and redacts it — so a typed
+    /// command reaches the same tenant, resolves the same `gitops/` tree, and appears in the
+    /// Command Log exactly like one abgui issued itself. Threading credentials by hand is the
+    /// thing this replaces; that is the whole point of the console.
+    ///
+    /// Unlike every other method here it does NOT map the exit code to an error: a non-zero exit
+    /// is a RESULT to display, not a failure to swallow. `abctl diff --exit-on-diff` returning 3
+    /// is the plainest example — that is drift, not breakage.
+    func runConsole(_ base: [String], timeout: Duration = .seconds(600)) async throws -> AbctlResult {
+        try await runner.run(argv(base), cwd: repoRoot, stdin: nil, timeout: timeout)
+    }
+
     /// The raw `.mobileconfig` XML for a config (stdout is XML, not JSON).
     func configurationProfile(_ id: String) async throws -> String {
         let result = try await runner.run(argv(["get", "configuration", id, "--profile"]),

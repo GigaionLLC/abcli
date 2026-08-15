@@ -1447,3 +1447,62 @@ final class RunLogIndexTests: XCTestCase {
         XCTAssertEqual(byVerb["sync"]?.isFailure, false)
     }
 }
+
+// MARK: - the console's command-line parsing
+
+final class CommandLineParserTests: XCTestCase {
+    /// Quoting has to be honoured here because no shell is involved: a config named
+    /// "Corp WiFi.mobileconfig" must arrive as ONE argument, or the command fails for a reason
+    /// that looks nothing like the cause.
+    func testQuotingAndEscapes() {
+        XCTAssertEqual(CommandLineParser.tokenize("get blueprints"), ["get", "blueprints"])
+        XCTAssertEqual(CommandLineParser.tokenize("  get   blueprints  "), ["get", "blueprints"])
+        XCTAssertEqual(
+            CommandLineParser.tokenize(#"adopt config "Corp WiFi.mobileconfig" --blueprint 'Default MacOS Group'"#),
+            ["adopt", "config", "Corp WiFi.mobileconfig", "--blueprint", "Default MacOS Group"])
+        XCTAssertEqual(CommandLineParser.tokenize(#"get config Corp\ WiFi"#), ["get", "config", "Corp WiFi"])
+        XCTAssertEqual(CommandLineParser.tokenize(""), [])
+        XCTAssertEqual(CommandLineParser.tokenize("   "), [])
+    }
+
+    /// People paste whole command lines out of the README and the Command Log; the binary is
+    /// implied, so a leading `abctl` must not become a bogus first argument.
+    func testLeadingBinaryIsDropped() {
+        XCTAssertEqual(CommandLineParser.tokenize("abctl get devices"), ["get", "devices"])
+        XCTAssertEqual(CommandLineParser.tokenize("ABCTL get devices"), ["get", "devices"])
+        // ...but only as the FIRST token — an argument that happens to be "abctl" survives.
+        XCTAssertEqual(CommandLineParser.tokenize("get config abctl"), ["get", "config", "abctl"])
+    }
+
+    /// An explicitly quoted empty string is a real argument and must survive; whitespace alone
+    /// must not manufacture one.
+    func testExplicitEmptyArgumentSurvives() {
+        XCTAssertEqual(CommandLineParser.tokenize(#"context set name --api-base """#),
+                       ["context", "set", "name", "--api-base", ""])
+    }
+
+    /// Drives abgui's own confirmation. It exists to catch a typed `--yes`, which is the only
+    /// route in the app to a tenant write that no button asked about.
+    func testApprovedTenantWriteDetection() {
+        XCTAssertTrue(CommandLineParser.isApprovedTenantWrite(["delete", "config", "X", "--yes"]))
+        XCTAssertTrue(CommandLineParser.isApprovedTenantWrite(["sync", "--apply", "--yes"]))
+        XCTAssertTrue(CommandLineParser.isApprovedTenantWrite(["assign", "--server", "S", "C02", "--yes"]))
+
+        // A bare sync is a DRY RUN — confirming it would train people to click through.
+        XCTAssertFalse(CommandLineParser.isApprovedTenantWrite(["sync", "--yes"]))
+        XCTAssertFalse(CommandLineParser.isApprovedTenantWrite(["diff", "--json"]))
+        XCTAssertFalse(CommandLineParser.isApprovedTenantWrite(["get", "devices"]))
+        // adopt writes local files only.
+        XCTAssertFalse(CommandLineParser.isApprovedTenantWrite(["adopt", "config", "X", "--blueprint", "B"]))
+    }
+
+    /// The other half: a write typed WITHOUT --yes aborts, because abctl asks on stdin and the
+    /// console gives it none. Safe, but the user should be told before pressing Run.
+    func testUnapprovedWriteIsFlagged() {
+        XCTAssertTrue(CommandLineParser.isUnapprovedWrite(["delete", "config", "X"]))
+        XCTAssertTrue(CommandLineParser.isUnapprovedWrite(["sync", "--apply"]))
+        XCTAssertFalse(CommandLineParser.isUnapprovedWrite(["delete", "config", "X", "--yes"]))
+        XCTAssertFalse(CommandLineParser.isUnapprovedWrite(["get", "blueprints"]))
+        XCTAssertFalse(CommandLineParser.isUnapprovedWrite([]))
+    }
+}
