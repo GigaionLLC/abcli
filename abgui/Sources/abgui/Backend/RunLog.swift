@@ -82,7 +82,9 @@ actor RunLog {
     /// The hand-off buffer. `nonisolated` is the whole point: `line(_:)` must not await.
     private nonisolated let buffer = LineBuffer()
 
-    private let startedAt: Date
+    /// `nonisolated` so `line(_:)` can stamp elapsed time without awaiting the actor. Safe by
+    /// construction: an immutable `let` of a `Sendable` type.
+    private nonisolated let startedAt: Date
     private var handle: FileHandle?
     private var bytesWritten = 0
     private var linesWritten = 0
@@ -111,8 +113,21 @@ actor RunLog {
     /// is preserved by the buffer, not by task scheduling (unstructured tasks reach an actor in
     /// no defined order, which would scramble a transcript).
     nonisolated func line(_ text: String) {
-        guard buffer.enqueue(text) else { return } // a drain is already scheduled
+        guard buffer.enqueue(Self.stamped(text, elapsed: Date().timeIntervalSince(startedAt))) else {
+            return // a drain is already scheduled
+        }
         Task { await self.flush() }
+    }
+
+    /// Prefix a transcript line with seconds since the run started, so the file answers "where
+    /// did the time go INSIDE this command?" and not merely "how long did the whole thing take".
+    /// A total duration tells you a run was slow; these tell you which step was.
+    ///
+    /// The stamp is taken when the line reaches this log, which is up to one progress-flush tick
+    /// (see `AppModel.progressFlushInterval`) after abctl printed it. That is a bounded, uniform
+    /// skew — fine for finding the slow step, not a claim of sub-100ms precision.
+    nonisolated static func stamped(_ text: String, elapsed: TimeInterval) -> String {
+        String(format: "[%7.3fs] ", max(0, elapsed)) + text
     }
 
     /// Write the outcome footer and close. Safe to call twice; safe to never call (the file

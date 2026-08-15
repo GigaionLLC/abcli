@@ -87,11 +87,7 @@ struct CommandRecord: Identifiable, Hashable, Sendable {
 
     var durationText: String? {
         guard let duration else { return nil }
-        if duration >= 60 {
-            let whole = Int(duration.rounded())
-            return "\(whole / 60)m \(whole % 60)s"
-        }
-        return String(format: "%.1fs", duration)
+        return DurationText.short(duration) // one formatter, shared with the timing panel
     }
 
     var isFailure: Bool {

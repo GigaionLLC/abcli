@@ -85,16 +85,34 @@ struct ConnectionFooter: View {
     /// the Command Log is where a command gets read and copied.
     private func lastCommandLine(_ record: CommandRecord) -> some View {
         Button(action: showCommandLog) {
-            Text(record.commandLine)
-                .font(.system(.caption2, design: .monospaced))
-                .foregroundStyle(record.isFailure ? Color.red : Color.secondary)
-                .lineLimit(1)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .contentShape(Rectangle())
+            // While a command is in flight the line carries a ticking elapsed time. "Is it still
+            // working, or is it wedged?" is the question a spinner cannot answer, and this is the
+            // one surface visible from every screen. The timeline drives ONLY this line, and only
+            // while something is running — a finished command re-renders nothing.
+            Group {
+                if record.status == .running {
+                    TimelineView(.periodic(from: .now, by: 0.5)) { context in
+                        commandText(record, suffix: " — \(DurationText.short(record.elapsed(asOf: context.date)))",
+                                    slow: record.isSlow(asOf: context.date))
+                    }
+                } else {
+                    commandText(record, suffix: record.durationText.map { " — \($0)" } ?? "", slow: false)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .padding(.leading, 14) // the 8pt dot + the row's 6pt spacing
         .help("\(record.commandLine) — open the Command Log")
+    }
+
+    private func commandText(_ record: CommandRecord, suffix: String, slow: Bool) -> some View {
+        Text(record.commandLine + suffix)
+            .font(.system(.caption2, design: .monospaced))
+            .foregroundStyle(record.isFailure ? Color.red : (slow ? Color.orange : Color.secondary))
+            .lineLimit(1)
+            .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     /// True when abctl runs but no tenant is authenticated — the state that needs Settings.
