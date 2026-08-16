@@ -7,10 +7,12 @@
 
 The `abcli` suite mark, used by **abctl** and **abgui** alike.
 
-A terminal window running `> AB`, with two branches leaving the window and merging into one
+A terminal window running `> ab`, with two branches leaving the window and merging into one
 arrow. It says what the product is — a CLI, and a GUI that drives one — and what it does:
-reconciles two states into one. `AB` is Apple Business, and it is also the two things being
-merged, declared and live.
+reconciles two states into one. `ab` is Apple Business, and it is also the two things being
+merged, declared and live. The letterforms and the indigo-violet ground are carried over from
+the original abgui mark — measured off it, not approximated — because that is what people
+already recognise the product by.
 
 ## Regenerating
 
@@ -50,9 +52,14 @@ asymmetry is the first thing to check.
   dependency and the mark cannot silently rasterise in a fallback typeface.
 - **Keep the merge V open.** Branch origins too close together fuse into a solid wedge below
   ~32 px and stop reading as a merge. The long diagonal run is load-bearing, not styling.
-- **The lower bowl of the `B` is wider than the upper.** Without it the letter looks top-heavy
-  in a way people notice but cannot name.
+- **The letterforms are measured, not drawn by eye.** From the original mark: x-height 270,
+  stroke 66 (0.24 of the x-height — much bolder than a normal geometric sans, and the reason it
+  reads as friendly rather than technical), b-ascender 1.37x, letter gap 0.20x. Keep those ratios
+  if the size changes.
 
-Rejected directions, recorded so they are not retried: an `ab` lowercase wordmark (read as
-"alo"), and an apple silhouette (a leaf plus a top notch reads as an animal head — and fruit on
-a product that manages Apple Business Manager is the highest-risk place to put it).
+Rejected directions, recorded so they are not retried: a bare `ab` wordmark filling the tile
+(the two letters read as "alo" with nothing around them to anchor the reading — inside the
+terminal, with a `>` in front, they read as a command and the ambiguity disappears); an apple
+silhouette (a leaf plus a top notch reads as an animal head, and fruit on a product that manages
+Apple Business Manager is the highest-risk place to put it); and letters standing beside an
+arrow, which reads as clip-art because the branches have to LEAVE something.
