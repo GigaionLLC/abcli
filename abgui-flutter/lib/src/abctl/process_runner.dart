@@ -416,16 +416,40 @@ class ProcessRunner implements AbctlRunner {
   /// for input that is never coming, which is a hang rather than an error — and a hang is
   /// what the timeout would then report, for a bug that has nothing to do with the network.
   ///
-  /// A failure to CLOSE after a successful flush is deliberately not reported: the bytes are
-  /// already in the pipe at that point, and the usual cause is a child that has exited and
-  /// closed its end, which is not truncation.
+  /// A close failure is reported too, but ONLY when there were bytes to deliver.
+  ///
+  /// *** THIS DETECTS TRUNCATION ON WINDOWS ONLY. Do not mistake it for the guarantee. ***
+  ///
+  /// Measured, not assumed (a probe writing 8 MiB to a child whose exit code had already been
+  /// reaped, run in the Linux dev container):
+  ///
+  ///   Windows — the write fails at `flush`, and this function names it.
+  ///   POSIX   — NOTHING is reported. `add`, `flush`, `close` and `done` all complete clean and
+  ///             the bytes are discarded. Dart gives this layer no signal at all.
+  ///
+  /// So on macOS — where most operators are — a truncated stdin write is undetectable here, and
+  /// always was: the Swift original had the same shape and the same blind spot, on the same
+  /// platform, which is why it never showed up.
+  ///
+  /// What actually protects a `create config -f -` is the CHILD: abctl parses the profile it
+  /// received, refuses one it could not read, and exits non-zero — which this runner does
+  /// surface. That is the real guarantee, and it is pinned by
+  /// `test/process_runner_test.dart` › "a child that rejects what it was sent fails the run".
+  /// The platform split is pinned there too, so nobody "fixes" this believing it covers POSIX.
+  ///
+  /// The close check is still worth keeping: it is free, it is correct where it fires, and it
+  /// errs toward a false positive. "abctl may have received only part of it" costs an operator
+  /// one retry; the silent version sends half a configuration profile to Apple and calls it
+  /// success. When there was NO data, a close error is ignored — the close existed only to give
+  /// the child EOF, and nothing was in flight to truncate.
   static Future<Object?> _writeStdin(IOSink sink, List<int>? data) async {
+    final bool hadData = data != null && data.isNotEmpty;
     Object? failure;
     try {
-      if (data != null && data.isNotEmpty) {
+      if (hadData) {
         sink.add(data);
         // `add` is fire-and-forget on an IOSink: errors (a broken pipe, a child that died
-        // mid-profile) surface here or on `done`, so the flush is what makes the write
+        // mid-profile) surface here or on close, so the flush is what makes the write
         // checkable at all.
         await sink.flush();
       }
@@ -434,8 +458,8 @@ class ProcessRunner implements AbctlRunner {
     }
     try {
       await sink.close();
-    } catch (_) {
-      // Already covered above when it matters.
+    } catch (error) {
+      if (hadData) failure ??= error;
     }
     return failure;
   }

@@ -242,27 +242,69 @@ void main() {
   });
 
   test(
-    'a failed stdin write fails the run rather than reporting a clean exit',
+    'a stdin write the child never read is detected on Windows, and is invisible on POSIX',
     () async {
-      // The child exits immediately without reading stdin, so the write breaks part-way. That is
+      // The child exits without reading stdin, so 8 MiB goes into a pipe with no reader. That is
       // a TRUNCATED profile: abctl may already have sent half a configuration to Apple, and the
-      // exit code alone cannot tell that from success. Reporting it is the whole point.
+      // exit code alone cannot tell that from success.
+      //
+      // This test asserts the PLATFORM DIFFERENCE rather than a single behaviour, because the
+      // difference is real and was measured (a probe writing the same payload to a child whose
+      // exit code had already been reaped, run in the Linux dev container):
+      //
+      //   Windows — the write fails at `flush`, so ProcessRunner names the truncation itself.
+      //   POSIX   — NOTHING is reported. add, flush, close and `done` all complete clean and the
+      //             bytes are silently discarded. This layer gets no signal at all.
+      //
+      // So on macOS this check is dead, and always was — the Swift original had the same shape
+      // and the same blind spot on the same platform. The guarantee that actually holds is the
+      // next test: abctl rejects what it could not read and exits non-zero.
+      //
+      // Asserting the throw unconditionally is what made this red on Linux. Weakening it to
+      // "either outcome is fine" would have hidden the difference instead of recording it.
       final payload = List<int>.filled(8 * 1024 * 1024, 0x41);
-
-      await expectLater(
-        runHelper(
-          ['exit-now'],
-          stdin: payload,
-          timeout: const Duration(seconds: 30),
-        ),
-        throwsA(
-          isA<AbctlCliError>().having(
-            (e) => e.message,
-            'message',
-            contains('it may have received only part of it'),
-          ),
-        ),
+      final run = runHelper(
+        ['exit-now'],
+        stdin: payload,
+        timeout: const Duration(seconds: 30),
       );
+
+      if (Platform.isWindows) {
+        await expectLater(
+          run,
+          throwsA(
+            isA<AbctlCliError>().having(
+              (e) => e.message,
+              'message',
+              contains('it may have received only part of it'),
+            ),
+          ),
+        );
+      } else {
+        // Nothing to detect — but the runner must not INVENT anything either. It reports the
+        // child's real exit code and no more; a fabricated failure here would be its own bug.
+        final result = await run;
+        expect(result.code, 0);
+        expect(result.stderr, isEmpty);
+      }
+    },
+  );
+
+  test(
+    'a child that rejects what it was sent fails the run — the real truncation guarantee',
+    () async {
+      // THIS is what protects `create config -f -` on every platform: abctl parses the profile
+      // it received, refuses a truncated one, and exits non-zero. Platform-independent, and the
+      // only half of the story that holds on macOS — so if this ever goes red, a corrupted
+      // profile can reach Apple reported as success.
+      final result = await runHelper([
+        'reject-stdin',
+      ], stdin: utf8.encode('<plist>truncat'));
+
+      expect(result.code, 1);
+      expect(result.isSuccess, isFalse);
+      expect(result.stderr, contains('could not read the profile'));
+      expect(result.checkExit, throwsA(isA<AbctlCliError>()));
     },
   );
 
@@ -409,6 +451,13 @@ Future<void> main(List<String> args) async {
       exit(0);
     case 'exit-now':
       exit(0);
+    case 'reject-stdin':
+      // Models abctl refusing a profile it could not parse: read everything, then fail. This is
+      // the platform-independent half of the truncation guarantee — on POSIX it is the ONLY half.
+      await stdin.fold<int>(0, (sum, chunk) => sum + chunk.length);
+      stderr.write('abctl: could not read the profile from stdin');
+      await stderr.flush();
+      exit(1);
     default:
       stderr.write('unknown mode: $mode');
       await stderr.flush();
