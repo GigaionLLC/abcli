@@ -171,12 +171,18 @@ Get-AuthenticodeSignature .\abgui-setup-x64.exe | Format-List Status, SignerCert
 
 Then unzip the portable zip and repeat for `abgui.exe` and `abctl.exe`.
 
-> **Known gap to close at the same time.** `build-gui-flutter.sh windows` builds the portable zip
-> in the same step as the Flutter build, so the zip is packed *before* the signing step runs and
-> its binaries stay unsigned even once signing is on. The installer and the MSIX are unaffected.
-> Fixing it means splitting the zip out of `windows` into its own "package what already exists"
-> subcommand and re-packing after the signing step. Do that when the certificate is provisioned,
-> and re-check the zip's signatures before believing it is fixed.
+> **All three artifacts are packed after signing — this was not always true.** `windows` used to
+> build the portable zip in the same step as the Flutter build, so the zip was packed *before*
+> signing and would have shipped unsigned binaries inside a release that had a certificate. That is
+> the worst shape for the bug: the release looks signed, and the one file most likely to be scanned
+> by an endpoint tool isn't. The installer and the MSIX were never affected — both are produced
+> after signing.
+>
+> Fixed by splitting the zip into `windows-zip`, a "package what already exists" subcommand, which
+> the release runs after the signing step. The order in `gui-flutter-windows` is therefore
+> load-bearing: **build → verify runtime → sign the exes in place → `windows-zip` → installer →
+> sign installer → MSIX.** Do not reorder it, and do not make any of the packaging subcommands
+> rebuild — they exist precisely so all three artifacts carry the same signed bytes.
 
 ---
 

@@ -249,6 +249,18 @@ jobs:
           files-folder-filter: exe
           files-folder-recurse: false
 
+      # Repack the portable zip AFTER signing — nothing is rebuilt, it just re-zips the Release
+      # directory whose .exe files the step above signed in place.
+      #
+      # Without this the zip is the one Windows artifact that ships UNSIGNED binaries out of a
+      # release that has a certificate, because `windows` packs it in the same breath as the
+      # build. The installer and the MSIX were always fine: both are produced after signing. This
+      # is the worst shape for such a bug — the release looks signed, and only the download most
+      # likely to be scanned by an endpoint tool isn't.
+      - name: repack the portable zip from the signed binaries
+        shell: bash
+        run: ./scripts/build-gui-flutter.sh windows-zip
+
       # Inno Setup → bin/abgui-setup-x64.exe. The compiler ships on the windows-latest image;
       # the script also probes the per-user winget location and says so plainly if it finds
       # neither, because "ISCC is not on PATH" is otherwise reported as a bash 127.

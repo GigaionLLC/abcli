@@ -11,6 +11,7 @@
 #   ./scripts/build-gui-flutter.sh macos           # build + embed + sign → .dmg and .zip
 #   ./scripts/build-gui-flutter.sh macos-notarize  # notarize + staple what `macos` just built
 #   ./scripts/build-gui-flutter.sh windows         # build + embed → .zip
+#   ./scripts/build-gui-flutter.sh windows-zip        # repack the .zip from what is on disk
 #   ./scripts/build-gui-flutter.sh windows-installer  # Inno Setup → abgui-setup-x64.exe
 #   ./scripts/build-gui-flutter.sh windows-msix       # Store package → .msix
 #   ./scripts/build-gui-flutter.sh linux           # build + embed → .AppImage
@@ -19,9 +20,10 @@
 # `macos` notarizes inline when APPLE_NOTARIZE=1; the release splits the two so the signed
 # assets can be uploaded before anyone waits on Apple.
 #
-# `windows-installer` and `windows-msix` REPACKAGE what `windows` already built — same split,
-# same reason as `macos-notarize`. All three Windows artifacts must contain byte-identical
-# payloads (the release signs the exes in place between them), so none of them may rebuild.
+# `windows-zip`, `windows-installer` and `windows-msix` REPACKAGE what `windows` already built —
+# same split, same reason as `macos-notarize`. All three Windows artifacts must contain
+# byte-identical payloads, and the release signs the exes IN PLACE between the build and the
+# packaging, so none of them may rebuild and all three must be produced AFTER signing.
 #
 # `check` and `test` run anywhere (including the Linux dev container — see docker-compose.yml).
 # Each platform target MUST run on that platform: Flutter cross-compiles nothing for desktop,
@@ -351,6 +353,27 @@ cmd_windows() {
   # Next to abgui.exe: the locator resolves siblings of Platform.resolvedExecutable.
   cp "$OUT/abctl.exe" "$bundle/abctl.exe"
 
+  pack_windows_zip
+  warn "unsigned: Windows has no free notarization equivalent, so SmartScreen will warn until an"
+  warn "Authenticode/Azure Trusted Signing certificate is configured. See"
+  warn "docs/windows-store-and-signing.md."
+}
+
+# pack_windows_zip: zip the CURRENT contents of the Flutter Release dir.
+#
+# Split out of `cmd_windows` so the release can re-pack AFTER Authenticode signing. Signing
+# happens in place on the .exe files in that directory, and the installer and the MSIX are both
+# built from it afterwards — so they always contained signed binaries. The portable zip did not:
+# it was packed in the same breath as the build, i.e. BEFORE the signing step existed in the
+# sequence, so it would have shipped unsigned binaries inside a release that had a certificate.
+# That is the worst version of the bug, because the release looks signed.
+#
+# `cmd_windows` still calls this, so a local build and CI keep producing a zip in one command.
+# The release calls `windows-zip` again after signing, which simply overwrites it.
+pack_windows_zip() {
+  require_windows_payload
+  local bundle; bundle="$(win_release_dir)"
+
   local stage="$OUT/$APPNAME-$VERSION-windows"
   rm -rf "$stage"; mkdir -p "$stage"
   cp -R "$bundle"/. "$stage/"
@@ -382,9 +405,13 @@ cmd_windows() {
   fi
   rm -rf "$stage"
   log "packaged $zip"
-  warn "unsigned: Windows has no free notarization equivalent, so SmartScreen will warn until an"
-  warn "Authenticode/Azure Trusted Signing certificate is configured. See"
-  warn "docs/windows-store-and-signing.md."
+}
+
+# windows-zip: repack the portable zip from what is on disk now — nothing is rebuilt.
+cmd_windows_zip() {
+  require_host windows
+  mkdir -p "$OUT"
+  pack_windows_zip
 }
 
 # --- Windows: installer + Store package -------------------------------------------------------
@@ -670,9 +697,10 @@ case "${1:-}" in
   macos)             cmd_macos ;;
   macos-notarize)    cmd_macos_notarize ;;
   windows)           cmd_windows ;;
+  windows-zip)       cmd_windows_zip ;;
   windows-installer) cmd_windows_installer ;;
   windows-msix)      cmd_windows_msix ;;
   linux)             cmd_linux ;;
   clean)             cmd_clean ;;
-  *) die "usage: $0 {check|test|macos|macos-notarize|windows|windows-installer|windows-msix|linux|clean}" ;;
+  *) die "usage: $0 {check|test|macos|macos-notarize|windows|windows-zip|windows-installer|windows-msix|linux|clean}" ;;
 esac
