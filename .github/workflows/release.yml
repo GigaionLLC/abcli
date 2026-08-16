@@ -112,22 +112,22 @@ jobs:
           APPLE_NOTARIZE: "0" # notarized separately below so signed assets land first
         run: ./scripts/build-gui-flutter.sh macos
 
-      # Upload the SIGNED assets before anyone waits on Apple: a signed-but-unstapled build is
-      # installable behind one Gatekeeper prompt, whereas a release that died waiting on the notary
-      # ships nothing at all.
+      # Upload the signed-but-UNNOTARIZED assets before anyone waits on Apple: they install behind
+      # one Gatekeeper prompt, whereas a release that died waiting on the notary ships nothing.
       #
-      # ONE filename per artifact, replaced in place once stapling succeeds. The previous scheme
-      # published -signed AND -notarized variants of both the DMG and the zip — four macOS
-      # downloads, three of them wrong for any given user, and a release page that asked a question
-      # instead of answering one.
-      - name: upload the signed abgui assets
+      # They go up under their OWN name, `-macos-unnotarized`, and are never overwritten. An
+      # earlier version of this uploaded them under the plain name and clobbered it after
+      # stapling — which meant that for the few minutes Apple was working, the release page served
+      # an unnotarized build under the name that later meant "notarized", with nothing to tell the
+      # two apart. A filename must always disclose the trust state of what is inside it.
+      - name: upload the signed but unnotarized assets
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
           gh release upload "${GITHUB_REF_NAME}" \
-            bin/abgui-*-macos.dmg \
-            bin/abgui-*-macos.zip \
+            bin/abgui-*-macos-unnotarized.dmg \
+            bin/abgui-*-macos-unnotarized.zip \
             --clobber
 
       - name: notarize + staple
@@ -141,10 +141,12 @@ jobs:
           APPLE_NOTARY_TIMEOUT: "20m"
         run: ./scripts/build-gui-flutter.sh macos-notarize
 
-      # Same names, --clobber. `macos-notarize` staples in place and re-zips, so these ARE the
-      # stapled files now; anyone who downloaded during the notary wait simply had an earlier copy
-      # of the same asset, not a different one they must now find and replace.
-      - name: replace them with the notarized, stapled assets
+      # The notarized artifacts take the PLAIN name; the -unnotarized ones stay exactly as they
+      # were. Nothing is overwritten and nothing is renamed on the release, so a file's name always
+      # tells you what it is — and the presence of the plain name is itself the signal that
+      # notarization succeeded. If Apple's notary fails, the release carries only -unnotarized
+      # assets, which is the honest outcome rather than a silent downgrade.
+      - name: upload the notarized, stapled assets
         if: ${{ steps.notarize.outcome == 'success' }}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -177,6 +179,11 @@ jobs:
       # and an empty profile name fails inside the action with an Azure error rather than a
       # legible "not configured yet".
       HAS_WINDOWS_SIGNING: ${{ secrets.AZURE_TENANT_ID != '' && secrets.AZURE_CLIENT_ID != '' && secrets.AZURE_CLIENT_SECRET != '' && vars.AZURE_SIGNING_PROFILE != '' }}
+      # Drives the artifact NAMES: every packaging step in build-gui-flutter.sh appends
+      # "-unsigned" unless this is 1, so an unsigned build can never be published under a name
+      # that implies it was signed. Derived from the same condition that gates the signing steps
+      # themselves, so the label and the reality cannot drift apart.
+      ABGUI_SIGNED: ${{ (secrets.AZURE_TENANT_ID != '' && secrets.AZURE_CLIENT_ID != '' && secrets.AZURE_CLIENT_SECRET != '' && vars.AZURE_SIGNING_PROFILE != '') && '1' || '0' }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -296,7 +303,7 @@ jobs:
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: gh release upload "${GITHUB_REF_NAME}" bin/abgui-*-windows-x64.zip bin/abgui-setup-x64.exe --clobber
+        run: gh release upload "${GITHUB_REF_NAME}" bin/abgui-*-windows-x64*.zip bin/abgui-setup-x64*.exe --clobber
 
       # Microsoft Store package. `--store` means UNSIGNED and Partner-Center-ready (Microsoft
       # signs it on ingestion), so this needs no certificate and never prompts.
@@ -333,7 +340,7 @@ jobs:
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: gh release upload "${GITHUB_REF_NAME}" bin/abgui-*-windows-x64.msix --clobber
+        run: gh release upload "${GITHUB_REF_NAME}" bin/abgui-*-windows-x64-store.msix --clobber
 
   gui-flutter-linux:
     name: abgui (Flutter) Linux
@@ -372,4 +379,4 @@ jobs:
       - name: upload abgui Linux asset
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: gh release upload "${GITHUB_REF_NAME}" bin/abgui-*-x86_64.AppImage --clobber
+        run: gh release upload "${GITHUB_REF_NAME}" bin/abgui-*-x86_64*.AppImage --clobber

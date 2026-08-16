@@ -25,9 +25,9 @@ one payload.
 
 | Artifact | Built by | Who it is for |
 |---|---|---|
-| `abgui-<version>-windows-x64.zip` | `windows` | Portable. Unzip and run; nothing is installed or registered. |
-| `abgui-setup-x64.exe` | `windows-installer` | The normal download. Per-user by default (no UAC), Start-menu entry, optional desktop icon, real uninstaller. |
-| `abgui-<version>-windows-x64.msix` | `windows-msix` | Microsoft Store submission only. Unsigned by design — the Store signs it on ingestion. |
+| `abgui-<version>-windows-x64[-unsigned].zip` | `windows` / `windows-zip` | Portable. Unzip and run; nothing is installed or registered. |
+| `abgui-setup-x64[-unsigned].exe` | `windows-installer` | The normal download. Per-user by default (no UAC), Start-menu entry, optional desktop icon, real uninstaller. |
+| `abgui-<version>-windows-x64-store.msix` | `windows-msix` | Microsoft Store submission only. Unsigned by design — the Store signs it on ingestion — and Windows refuses to sideload it, so it is named `-store` rather than `-unsigned`: no user can be misled into running it. |
 
 All three contain the **embedded `abctl.exe`**. That is not a convenience: `AbctlLocator`
 resolves the CLI by absolute path next to `abgui.exe` and never through `PATH`, and every
@@ -48,8 +48,8 @@ this is also policy **10.2.4.1** (undisclosed dependency on non-integrated softw
 
 ```sh
 ./scripts/build-gui-flutter.sh windows            # Flutter build + embed abctl + zip
-./scripts/build-gui-flutter.sh windows-installer  # -> bin/abgui-setup-x64.exe
-./scripts/build-gui-flutter.sh windows-msix       # -> bin/abgui-<version>-windows-x64.msix
+./scripts/build-gui-flutter.sh windows-installer  # -> bin/abgui-setup-x64-unsigned.exe
+./scripts/build-gui-flutter.sh windows-msix       # -> bin/abgui-<version>-windows-x64-store.msix
 ```
 
 Windows only — Flutter cross-compiles nothing for desktop. The installer additionally needs
@@ -267,7 +267,7 @@ Because `--store` packages are unsigned, a wrong identity can be corrected **wit
 
 ### Submission steps
 
-1. Cut the tag. Confirm CI produced `bin/abgui-<version>-windows-x64.msix` and that the job did
+1. Cut the tag. Confirm CI produced `bin/abgui-<version>-windows-x64-store.msix` and that the job did
    **not** print the placeholder-identity warning.
 2. Download the `.msix` from the release page. Verify the payload before uploading anything —
    `makeappx unpack` it and confirm `abctl.exe` is inside. The build refuses to package without

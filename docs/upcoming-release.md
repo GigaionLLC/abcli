@@ -15,7 +15,7 @@ regresses.
 - **abgui runs on Windows and Linux.** One self-contained bundle per platform with `abctl` embedded
   inside it — no separate install, no `PATH` lookup. Linux ships a single-file **AppImage** (plus a
   tarball) so it runs on any distro without root or a package manager.
-- **Windows ships a real installer**, `abgui-setup-x64.exe` (Inno Setup): per-user by default with
+- **Windows ships a real installer**, `abgui-setup-x64[-unsigned].exe` (Inno Setup): per-user by default with
   no UAC prompt, Start-menu entry, optional desktop icon, silent install for fleet deployment, and
   an uninstaller that removes everything it put down — while deliberately never touching the
   private key or the run-log audit trail, which live outside the install directory. A **Microsoft

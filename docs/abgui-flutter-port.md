@@ -168,7 +168,7 @@ that flag the tool cannot mount even itself.
 | Build script | `scripts/build-gui-flutter.sh` |
 | Make targets | `make gui-check`, `gui-test`, `gui-macos`, `gui-windows`, `gui-linux` |
 | CI | `.github/workflows/gui-flutter.yml` (analyze/test everywhere + a real build per OS) |
-| Release assets | `abgui-*-macos.{dmg,zip}` (stapled in place once notarized), `abgui-*-windows-x64.zip`, `abgui-setup-x64.exe`, `abgui-*-windows-x64.msix`, `abgui-*-x86_64.AppImage` — **one filename per artifact**; no `-signed`/`-notarized` variants and no Linux tarball, both of which were redundancy that made the release page ask a question instead of answering one |
+| Release assets | **The filename discloses the trust state, and nothing is renamed after upload.** A plain name means signed (and on macOS, notarized + stapled); `-unnotarized` means Developer ID signed but not notarized; `-unsigned` means no signature at all; `-store.msix` is the Partner Center package, which cannot be sideloaded. So: `abgui-*-macos[-unnotarized].{dmg,zip}`, `abgui-*-windows-x64[-unsigned].zip`, `abgui-setup-x64[-unsigned].exe`, `abgui-*-windows-x64-store.msix`, `abgui-*-x86_64[-unsigned].AppImage`. No Linux tarball — the AppImage supersedes it. |
 | Bundle id | `com.gigaionllc.abgui` |
 | Signing / Store | macOS: [release-signing.md](release-signing.md) · Windows: [windows-store-and-signing.md](windows-store-and-signing.md) |
 

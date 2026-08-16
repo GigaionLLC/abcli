@@ -120,24 +120,24 @@ jobs:
         run: |
           lipo -info bin/abgui.app/Contents/Resources/abctl   # expect: arm64 x86_64
           bin/abgui.app/Contents/Resources/abctl --version    # embedded CLI runs, exit 0
-          ls -la bin/abgui-*-macos.dmg bin/abgui-*-macos.zip
+          ls -la bin/abgui-*-macos*.dmg bin/abgui-*-macos*.zip   # CI never signs: expect -unnotarized
 
       - name: verify the embedded abctl (Windows)
         if: matrix.target == 'windows'
         shell: bash
         run: |
           ./abgui-flutter/build/windows/x64/runner/Release/abctl.exe --version
-          ls -la bin/abgui-*-windows-x64.zip
+          ls -la bin/abgui-*-windows-x64*.zip                    # CI never signs: expect -unsigned
 
       - name: verify the embedded abctl (Linux)
         if: matrix.target == 'linux'
         run: |
           ./abgui-flutter/build/linux/x64/release/bundle/abctl --version
-          ls -la bin/abgui-*-x86_64.AppImage
+          ls -la bin/abgui-*-x86_64*.AppImage                    # CI never signs: expect -unsigned
           # Verify the AppImage's CONTENTS rather than launching it: abgui is a GUI and has no
           # --version, so running it headless would prove nothing that `|| true` didn't hide.
           # --appimage-extract needs no FUSE, which GitHub runners lack.
-          ( cd "$RUNNER_TEMP" && "$GITHUB_WORKSPACE"/bin/abgui-*-x86_64.AppImage --appimage-extract >/dev/null
+          ( cd "$RUNNER_TEMP" && "$GITHUB_WORKSPACE"/bin/abgui-*-x86_64*.AppImage --appimage-extract >/dev/null
             test -x squashfs-root/AppRun                       # entry point present + executable
             test -f squashfs-root/abgui.desktop                # required at the AppDir root
             test -f squashfs-root/usr/bin/data/flutter_assets/AssetManifest.bin  # Flutter assets came along
@@ -147,8 +147,8 @@ jobs:
         with:
           name: abgui-flutter-${{ matrix.target }}
           path: |
-            bin/abgui-*-macos.dmg
-            bin/abgui-*-macos.zip
-            bin/abgui-*-windows-x64.zip
-            bin/abgui-*-x86_64.AppImage
+            bin/abgui-*-macos*.dmg
+            bin/abgui-*-macos*.zip
+            bin/abgui-*-windows-x64*.zip
+            bin/abgui-*-x86_64*.AppImage
           if-no-files-found: error

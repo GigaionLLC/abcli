@@ -88,6 +88,29 @@ CODESIGN_IDENTITY="${APPLE_CODESIGN_IDENTITY:-${CODESIGN_IDENTITY:-}}"
 NOTARIZE="${APPLE_NOTARIZE:-${NOTARIZE:-0}}"
 NOTARY_TIMEOUT="${APPLE_NOTARY_TIMEOUT:-20m}"
 
+# --- the trust suffix ----------------------------------------------------------------------
+#
+# THE RULE: the filename always discloses the trust state, and the PLAIN name is reserved for
+# the trusted artifact. An untrusted build is never allowed to occupy a trusted name — not even
+# temporarily.
+#
+# This replaced an upload-then-clobber scheme, and the reason is worth keeping: while Apple's
+# notary was working, the release page carried a signed-but-UNNOTARIZED file under the same name
+# the notarized one would later take. Anyone downloading in that window got an unnotarized build
+# and had no way to know — same name, same page, different bytes. Distinct names make that
+# impossible to get wrong, and make it visible at a glance which artifacts are trusted.
+#
+# ABGUI_SIGNED=1 is set by CI only AFTER a signing step has actually run. It defaults to 0, so a
+# local build labels itself honestly (locally the macOS app is ad-hoc signed and the Windows
+# binaries are not signed at all) instead of producing something that looks shippable.
+SIGNED="${ABGUI_SIGNED:-0}"
+
+# unsigned_suffix: "-unsigned" unless a signing step ran. Used for Windows and Linux, which have
+# a signature or do not; macOS has the extra notarization state and uses its own suffix below.
+unsigned_suffix() {
+  truthy "$SIGNED" && printf '' || printf -- '-unsigned'
+}
+
 truthy() {
   case "${1:-}" in
     1|true|TRUE|yes|YES|on|ON) return 0 ;;
@@ -269,8 +292,11 @@ cmd_macos() {
 
   sign_app_macos "$app"
 
-  local zip="$OUT/$APPNAME-$VERSION-macos.zip"
-  local dmg="$OUT/$APPNAME-$VERSION-macos.dmg"
+  # -unnotarized until proven otherwise. `macos` cannot produce a notarized artifact — only
+  # `macos-notarize` can, and only after Apple accepts it — so this step must never write the
+  # plain name. That is the whole rule: the trusted name is earned, not assumed.
+  local zip="$OUT/$APPNAME-$VERSION-macos-unnotarized.zip"
+  local dmg="$OUT/$APPNAME-$VERSION-macos-unnotarized.dmg"
 
   # DMG staging: the app plus an /Applications symlink, which is the drag-to-install idiom.
   local staging="$OUT/dmg-staging"
@@ -310,11 +336,11 @@ cmd_macos_notarize() {
   # notarizes the real artifacts instead of failing, and a mismatch is reported loudly rather
   # than looking like "there was nothing to do".
   local zip dmg
-  zip="$(ls -1t "$OUT/$APPNAME-"*-macos.zip 2>/dev/null | head -1 || true)"
-  dmg="$(ls -1t "$OUT/$APPNAME-"*-macos.dmg 2>/dev/null | head -1 || true)"
-  [ -n "$zip" ] || die "no $OUT/$APPNAME-*-macos.zip — run './scripts/build-gui-flutter.sh macos' first"
-  [ -n "$dmg" ] || die "no $OUT/$APPNAME-*-macos.dmg — run './scripts/build-gui-flutter.sh macos' first"
-  if [ "$zip" != "$OUT/$APPNAME-$VERSION-macos.zip" ]; then
+  zip="$(ls -1t "$OUT/$APPNAME-"*-macos-unnotarized.zip 2>/dev/null | head -1 || true)"
+  dmg="$(ls -1t "$OUT/$APPNAME-"*-macos-unnotarized.dmg 2>/dev/null | head -1 || true)"
+  [ -n "$zip" ] || die "no $OUT/$APPNAME-*-macos-unnotarized.zip — run './scripts/build-gui-flutter.sh macos' first"
+  [ -n "$dmg" ] || die "no $OUT/$APPNAME-*-macos-unnotarized.dmg — run './scripts/build-gui-flutter.sh macos' first"
+  if [ "$zip" != "$OUT/$APPNAME-$VERSION-macos-unnotarized.zip" ]; then
     warn "notarizing $(basename "$zip"), but this run computed VERSION=$VERSION."
     warn "Set ABGUI_VERSION so both invocations agree — see the note at the top of this script."
   fi
@@ -336,7 +362,17 @@ cmd_macos_notarize() {
   rm -f "$zip"
   ( cd "$OUT" && ditto -c -k --sequesterRsrc --keepParent "$APPNAME.app" "$zip" )
   xcrun stapler staple "$dmg"
-  log "notarized + stapled app and DMG"
+
+  # Only NOW do these earn the plain name. Renaming rather than copying is deliberate: the
+  # -unnotarized files must not survive next to their notarized selves, because two artifacts
+  # with identical contents and different trust labels is its own confusion. What must never
+  # happen is the reverse — an unnotarized build wearing the trusted name — and a rename cannot
+  # produce that.
+  local final_zip="$OUT/$APPNAME-$VERSION-macos.zip"
+  local final_dmg="$OUT/$APPNAME-$VERSION-macos.dmg"
+  mv -f "$zip" "$final_zip"
+  mv -f "$dmg" "$final_dmg"
+  log "notarized + stapled: $(basename "$final_dmg"), $(basename "$final_zip")"
 }
 
 # --- Windows --------------------------------------------------------------------------------
@@ -377,7 +413,8 @@ pack_windows_zip() {
   local stage="$OUT/$APPNAME-$VERSION-windows"
   rm -rf "$stage"; mkdir -p "$stage"
   cp -R "$bundle"/. "$stage/"
-  local zip="$OUT/$APPNAME-$VERSION-windows-x64.zip"
+  # The name states whether these binaries are signed. See unsigned_suffix.
+  local zip="$OUT/$APPNAME-$VERSION-windows-x64$(unsigned_suffix).zip"
   rm -f "$zip"
 
   # bsdtar, NOT PowerShell's Compress-Archive.
@@ -509,7 +546,13 @@ cmd_windows_installer() {
 
   local setup="$OUT/$APPNAME-setup-x64.exe"
   [ -f "$setup" ] || die "ISCC reported success but produced no $setup"
-  log "packaged $setup"
+
+  # The suffix is applied HERE rather than in the .iss, because Inno's OutputBaseFilename is a
+  # compile-time constant and the trust state is not known to it. The installer is the file most
+  # users double-click, so it is the one that most needs to say what it is.
+  local final="$OUT/$APPNAME-setup-x64$(unsigned_suffix).exe"
+  [ "$setup" = "$final" ] || mv -f "$setup" "$final"
+  log "packaged $final"
 }
 
 # windows-msix: the Microsoft Store package.
@@ -563,10 +606,14 @@ cmd_windows_msix() {
       --build-windows false \
       --version "$BUILD_NAME.0" \
       --output-path "$(winpath "$OUT")" \
-      --output-name "$APPNAME-$VERSION-windows-x64" \
+      --output-name "$APPNAME-$VERSION-windows-x64-store" \
       "${identity[@]}" ) 1>&2
 
-  local msix="$OUT/$APPNAME-$VERSION-windows-x64.msix"
+  # "-store", not "-unsigned". A --store package IS unsigned, but Windows refuses to sideload
+  # it and Microsoft signs it on ingestion, so no user can be misled into running an untrusted
+  # build. What the name must convey is that this file is for Partner Center, not for a human
+  # to double-click.
+  local msix="$OUT/$APPNAME-$VERSION-windows-x64-store.msix"
   [ -f "$msix" ] || die "msix:create reported success but produced no $msix"
   log "packaged $msix"
 }
@@ -607,7 +654,10 @@ cmd_linux() {
 make_appimage() {
   local bundle="$1"
   local appdir="$OUT/$APPNAME.AppDir"
-  local outfile="$OUT/$APPNAME-$VERSION-x86_64.AppImage"
+  # Linux has no signing story at all today, so this is "-unsigned" in practice always — which
+  # is the honest label, not a placeholder. It reads from the same switch as Windows so that if
+  # Linux signing ever exists, the name stops lying on its own.
+  local outfile="$OUT/$APPNAME-$VERSION-x86_64$(unsigned_suffix).AppImage"
 
   local tool
   tool="$(find_appimagetool)" || {
