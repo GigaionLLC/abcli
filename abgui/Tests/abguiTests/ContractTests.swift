@@ -237,14 +237,30 @@ final class ContractTests: XCTestCase {
         XCTAssertEqual(recordedStdin, Data("<x/>".utf8))
     }
 
+    /// The attribute is `managedAppleAccount`. This fixture used to say `managedAppleId`, which
+    /// Apple does not emit — every Go read of it is `managedAppleAccount` (ab/client.go:453,475,
+    /// ab/detail.go:165, cli/inspect.go:304, cli/deploy.go:189) and `UserDetailSheet` had it
+    /// right. So the column silently fell through to `email` for every user, and this test
+    /// passed by asserting against the same invented key the column read. A fixture that
+    /// invents its input can only ever confirm the bug it was written beside.
     func testUserRolesDecodeAndColumns() throws {
-        let json = #"{"type":"users","id":"u1","attributes":{"firstName":"Ada","lastName":"Lovelace","managedAppleId":"ada@x.appleid.com","status":"ACTIVE","roles":[{"role":"Administrator","organizationalUnit":"HQ"},{"role":"Manager"}]}}"#
+        let json = #"{"type":"users","id":"u1","attributes":{"firstName":"Ada","lastName":"Lovelace","managedAppleAccount":"ada@x.appleid.com","email":"ada@corp.example","status":"ACTIVE","roles":[{"role":"Administrator","organizationalUnit":"HQ"},{"role":"Manager"}]}}"#
         let user = try JSONDecoder().decode(Resource.self, from: Data(json.utf8))
         XCTAssertEqual(user.roleNames(), "Administrator, Manager")
         let columns = ReadOnlyKind.users.columns
         XCTAssertEqual(columns.first { $0.header == "Name" }?.value(user), "Ada Lovelace")
         XCTAssertEqual(columns.first { $0.header == "Roles" }?.value(user), "Administrator, Manager")
+        // The managed account WINS over the corporate email — that is the distinction the
+        // column's header promises, and reading `email` first would quietly break it again.
         XCTAssertEqual(columns.first { $0.header == "Managed Apple ID" }?.value(user), "ada@x.appleid.com")
+    }
+
+    /// A user with no managed account still shows something useful rather than an em dash.
+    func testManagedAppleIDColumnFallsBackToEmail() throws {
+        let json = #"{"type":"users","id":"u2","attributes":{"firstName":"Grace","lastName":"Hopper","email":"grace@corp.example"}}"#
+        let user = try JSONDecoder().decode(Resource.self, from: Data(json.utf8))
+        XCTAssertEqual(ReadOnlyKind.users.columns.first { $0.header == "Managed Apple ID" }?.value(user),
+                       "grace@corp.example")
     }
 
     func testPackagesUsesGetPackages() async throws {
