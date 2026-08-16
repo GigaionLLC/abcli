@@ -132,9 +132,6 @@ struct ConsoleView: View {
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
-            if let error = model.lastWriteError, model.consoleEntries.isEmpty {
-                Text(error).font(.caption).foregroundStyle(.red)
-            }
         }
         .padding()
         .background(.quaternary.opacity(0.35))

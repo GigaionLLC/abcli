@@ -43,16 +43,14 @@ final class AppModel {
     var auditSince = "7d"
     var osReleases: [OSRelease] = []
 
+    /// Routed through `run` like every other resource load, rather than driving the shared
+    /// spinner itself. Owning `isLoading`/`loadError` without the generation guard let this one
+    /// clear another screen's error and another screen's spinner: opening OS Releases mid-fetch
+    /// wiped the Devices error, and its own `defer` then dropped the Devices spinner while that
+    /// fetch was still running. It is also called from inside a device detail sheet, so its
+    /// failures were landing on whatever list happened to be behind that sheet.
     func loadOSReleases() async {
-        guard let client = makeClient() else {
-            loadError = "abctl was not found in the app bundle."
-            return
-        }
-        isLoading = true
-        loadError = nil
-        defer { isLoading = false }
-        do { osReleases = try await client.osReleases() }
-        catch { loadError = error.localizedDescription }
+        await run { self.osReleases = try await $0.osReleases() }
     }
 
     // Apps & Books (VPP) — a separate service; the content token is held in-memory only.
@@ -74,6 +72,10 @@ final class AppModel {
     var verifyMode = "targeted"
     var needsSeed = false  // workspace chosen but has no gitops/ tree yet → offer to initialize
     var isSeeding = false  // `abctl seed` in flight
+    /// `abctl diff` in flight. Distinct from `isLoading`, which every resource list shares: a
+    /// Devices fetch must not put the Diff screen into its computing state, and finishing one
+    /// must not take the Diff screen out of it.
+    var isPlanning = false
 
     // Pre-flight verification of the local gitops/ profiles (`abctl validate --json`). Reads
     // files only — no tenant call, no credentials — so it can run before anything is synced.
@@ -428,7 +430,12 @@ final class AppModel {
 
     /// Point at a GitOps workspace (the dir containing `gitops/`) and recompute drift. The path
     /// is remembered so the next launch reopens it (see `restoreWorkspace`).
+    /// Also clears the in-flight work flags: picking a workspace is the user starting over, and
+    /// it must never be possible to land in a state whose only exit is relaunching the app.
     func setWorkspace(_ url: URL) {
+        workGeneration += 1 // orphan whatever was running against the previous workspace
+        isSeeding = false
+        isPlanning = false
         repoRoot = url
         plan = nil
         applyResult = nil
@@ -475,9 +482,14 @@ final class AppModel {
         guard let data = try? Data(contentsOf: entry.fileURL),
               let xml = String(data: data, encoding: .utf8) else {
             lastWriteError = "couldn't read the archived profile at \(entry.fileURL.lastPathComponent)."
+            lastWriteScope = .archive
             return false
         }
-        return await replaceConfiguration(id: entry.configName, xml: xml)
+        let ok = await runWrite(.archive) {
+            _ = try await $0.replaceConfiguration(id: entry.configName, xml: Data(xml.utf8))
+        }
+        if ok { await loadConfigurations() }
+        return ok
     }
 
     /// Reconcile the tenant to the workspace git state. Returns true on a clean apply.
@@ -492,6 +504,7 @@ final class AppModel {
         guard let client = makeClient(narrating: .apply) else {
             let message = "abctl was not found in the app bundle."
             lastWriteError = message
+            lastWriteScope = .apply
             syncFailure = SyncFailure(kind: .aborted, headline: message,
                                       details: "abgui runs the embedded CLI at abgui.app/Contents/Resources/abctl.")
             return false
@@ -549,6 +562,7 @@ final class AppModel {
                                            stderr: run.stderr, transcript: applyProgressLog)
             syncFailure = failure
             lastWriteError = failure?.headline // the short form; the blob is never the message
+            lastWriteScope = failure == nil ? nil : .apply
             isWriting = false
             let outcome = failure.map { "failed — \($0.headline)" }
                 ?? "succeeded: \(result.totalWrites) write(s), \(result.totalSkipped) skipped"
@@ -562,6 +576,7 @@ final class AppModel {
             let failure = SyncFailure.from(error: error, transcript: applyProgressLog)
             syncFailure = failure
             lastWriteError = failure.headline
+            lastWriteScope = .apply
             // Only the HEADLINE goes into the transcript: abctl's stderr was already streamed
             // into it line by line by ProcessRunner, so appending the whole blob again was
             // duplicating the log the user was complaining about.
@@ -622,9 +637,15 @@ final class AppModel {
     /// Load the saved connection contexts + the current one (for the settings picker/footer).
     func loadContexts() async {
         guard let client = makeClient() else { return }
-        if let list = try? await client.contextList() {
+        // A failed list used to leave `contexts` at its old value with no message — and on the
+        // first load that renders as "No saved connections yet" over a store that has them,
+        // inviting the user to re-enter credentials they already have.
+        do {
+            let list = try await client.contextList()
             contexts = list.contexts
             currentContext = list.current
+        } catch {
+            settingsError = "Couldn't read saved connections: \(error.localizedDescription)"
         }
     }
 
@@ -699,10 +720,20 @@ final class AppModel {
     }
 
     /// Switch the current context (the credential store's active tenant) and reconnect.
+    ///
+    /// The failure is reported, and `context` only moves if the switch actually took. Swallowing
+    /// it left the app addressing a tenant abctl had never selected: every later command carried
+    /// `--context <name>` for a context the store had refused to make current, with no message
+    /// anywhere on screen to explain the results that followed.
     func useConnection(_ name: String) async {
         guard let client = makeClient() else { return }
-        try? await client.useContext(name)
-        context = name
+        settingsError = nil
+        do {
+            try await client.useContext(name)
+            context = name
+        } catch {
+            settingsError = "Couldn't switch to \(name): \(error.localizedDescription)"
+        }
         await loadContexts()
         await check()
     }
@@ -711,8 +742,15 @@ final class AppModel {
     /// keys; a stale keys/<name>.pem is harmless and overwritten on the next save.)
     func deleteConnection(_ name: String) async {
         guard let client = makeClient() else { return }
-        try? await client.deleteContext(name)
-        if context == name { context = "" }
+        settingsError = nil
+        do {
+            try await client.deleteContext(name)
+            if context == name { context = "" }
+        } catch {
+            // Previously silent: the row stayed in the list, nothing was said, and the only
+            // reading available was "the button does nothing".
+            settingsError = "Couldn't delete \(name): \(error.localizedDescription)"
+        }
         await loadContexts()
         await check()
     }
@@ -746,7 +784,21 @@ final class AppModel {
             loadError = "abctl was not found in the app bundle."
             return
         }
-        isLoading = true
+        // Claim ownership of the shared plan state. `refreshPlan` cancels the previous run and
+        // starts this one, and the cancelled run STILL unwinds — its cleanup must not touch
+        // state that now belongs to a newer run.
+        //
+        // This is not a hypothetical race; the ordering is deterministic. `refreshPlan` returns
+        // on the main actor while the old run is suspended inside ProcessRunner, so the new run
+        // always sets `isLoading = true` first, and the old one's teardown then clears it while
+        // the new abctl child is still running. DiffView checks `isLoading` BEFORE the plan
+        // branch, so it fell through to the PREVIOUS plan: stale rows, stale "Checked" time, no
+        // Cancel button — and Apply enabled. Pressing it applied the new mode (which forces
+        // --prune) against a plan that never mentioned a single deletion. Flipping the
+        // source-of-truth switch mid-compute reached that in two clicks.
+        workGeneration += 1
+        let generation = workGeneration
+        isPlanning = true
         loadError = nil
         // A new plan compute is a new context, so a write error from before it goes with it.
         // DiffView renders `lastWriteError` (a refused adopt is otherwise a dead click), and
@@ -760,14 +812,22 @@ final class AppModel {
             resetProgressBuffers() // buffered tail belongs to the run being replaced, not this one
             progressLog = []
         }
-        defer { isLoading = false }
+        // Only the CURRENT owner may clear the spinner. A superseded run leaves it alone —
+        // the run that replaced it is still working, and saying otherwise re-enables Apply
+        // over a plan nobody is computing.
+        defer { if generation == workGeneration { isPlanning = false } }
         if newRunLog {
             await beginRunLog(.diff, argv: previewArgv(AbctlClient.planArgs(gitSourceOfTruth: gitSourceOfTruth,
                                                                            refresh: refreshMode)))
         }
         var outcome = "plan computed"
         do {
-            plan = try await client.plan(gitSourceOfTruth: gitSourceOfTruth, refresh: refreshMode)
+            let computed = try await client.plan(gitSourceOfTruth: gitSourceOfTruth, refresh: refreshMode)
+            // A superseded run must not publish its result either: its plan was computed for
+            // the OLD mode, and showing it next to the new mode's switch is the same lie from
+            // the other direction.
+            guard generation == workGeneration else { return }
+            plan = computed
             lastCheckedAt = Date() // stamp every successful check, so a refresh confirms even when in sync
         } catch is CancellationError {
             // user cancelled — clear the in-flight state, no error shown
@@ -775,19 +835,25 @@ final class AppModel {
         } catch {
             if Task.isCancelled {
                 outcome = "cancelled" // a race: cancelled just after the process returned
-            } else {
+            } else if generation == workGeneration {
                 // Publish the tail BEFORE diagnosing: the last lines abctl printed are exactly
                 // what `SyncFailure` reads, and leaving them in the buffer would diagnose the
                 // failure from a transcript missing its most relevant part.
                 flushProgress()
                 loadError = error.localizedDescription
                 outcome = "failed — \(SyncFailure.from(error: error, transcript: progressLog).headline)"
+            } else {
+                outcome = "superseded by a newer plan"
             }
         }
-        flushProgress() // idempotent — covers the success and cancelled paths
-        // Only the call that OPENED a log closes it: the seed hand-off's diff writes into the
-        // seed's file and lets `seedWorkspace` stamp the single outcome both phases share.
-        if newRunLog { await finishRunLog(outcome) }
+        if generation == workGeneration {
+            flushProgress() // idempotent — covers the success and cancelled paths
+        }
+        // Only the call that OPENED a log closes it — and only while it still owns the run.
+        // A superseded run that closed the log would close its SUCCESSOR's (runLog is a single
+        // property), stamping the file the user is watching as "cancelled" and silently
+        // dropping every line the live run still had to write.
+        if newRunLog && generation == workGeneration { await finishRunLog(outcome) }
     }
 
     /// Seed the workspace as a cancellable task (so the Cancel button can stop it).
@@ -804,6 +870,11 @@ final class AppModel {
             loadError = "Choose a workspace folder first."
             return false
         }
+        // Same ownership rule as loadPlan: `startSeed` cancels whatever ran before, and the
+        // cancelled run must not tear down the state — or close the run log — of the one that
+        // replaced it.
+        workGeneration += 1
+        let generation = workGeneration
         isSeeding = true
         loadError = nil
         resetProgressBuffers()
@@ -812,17 +883,20 @@ final class AppModel {
         do {
             _ = try await client.seed()
         } catch is CancellationError {
+            guard generation == workGeneration else { return false }
             isSeeding = false
             flushProgress()
             await finishRunLog("cancelled")
             return false
         } catch {
+            guard generation == workGeneration else { return false }
             isSeeding = false
             flushProgress() // the tail is what SyncFailure diagnoses from — publish it first
             loadError = "Couldn't initialize the workspace from the tenant: \(error.localizedDescription)"
             await finishRunLog("failed — \(SyncFailure.from(error: error, transcript: progressLog).headline)")
             return false
         }
+        guard generation == workGeneration else { return false }
         isSeeding = false
         flushProgress()
         needsSeed = false
@@ -1001,29 +1075,29 @@ final class AppModel {
     // --yes, so the caller MUST show its own confirm first. Config writes refresh the list.
 
     func createConfiguration(name: String, xml: String) async -> Bool {
-        let ok = await runWrite { _ = try await $0.createConfiguration(name: name, xml: Data(xml.utf8)) }
+        let ok = await runWrite(.configuration) { _ = try await $0.createConfiguration(name: name, xml: Data(xml.utf8)) }
         if ok { await loadConfigurations() }
         return ok
     }
 
     func replaceConfiguration(id: String, xml: String) async -> Bool {
-        let ok = await runWrite { _ = try await $0.replaceConfiguration(id: id, xml: Data(xml.utf8)) }
+        let ok = await runWrite(.configuration) { _ = try await $0.replaceConfiguration(id: id, xml: Data(xml.utf8)) }
         if ok { await loadConfigurations() }
         return ok
     }
 
     func deleteConfiguration(id: String) async -> Bool {
-        let ok = await runWrite { _ = try await $0.deleteConfiguration(id: id) }
+        let ok = await runWrite(.configuration) { _ = try await $0.deleteConfiguration(id: id) }
         if ok { await loadConfigurations() }
         return ok
     }
 
     func attach(configID: String, blueprint: String) async -> Bool {
-        await runWrite { _ = self.announceTreeGap(try await $0.attach(configID: configID, blueprint: blueprint)) }
+        await runWrite(.membership) { _ = self.announceTreeGap(try await $0.attach(configID: configID, blueprint: blueprint)) }
     }
 
     func detach(configID: String, blueprint: String) async -> Bool {
-        await runWrite { _ = self.announceTreeGap(try await $0.detach(configID: configID, blueprint: blueprint)) }
+        await runWrite(.membership) { _ = self.announceTreeGap(try await $0.detach(configID: configID, blueprint: blueprint)) }
     }
 
     /// Surface a write that reached Apple Business but not gitops/. abctl exits 0 for this (the
@@ -1046,9 +1120,10 @@ final class AppModel {
     func adoptMember(_ change: BlueprintChange) async -> Bool {
         guard let kind = change.memberKind, let name = change.config, !name.isEmpty else {
             lastWriteError = "This row doesn't name a blueprint member to adopt."
+            lastWriteScope = .adopt
             return false
         }
-        let ok = await runWrite {
+        let ok = await runWrite(.adopt) {
             _ = try await $0.adoptMember(kind: kind, name: name, blueprint: change.blueprint)
         }
         if ok {
@@ -1101,7 +1176,8 @@ final class AppModel {
         let argv = CommandLineParser.tokenize(line)
         guard !argv.isEmpty else { return false }
         guard let client = makeClient() else {
-            lastWriteError = "abctl was not found in the app bundle."
+            consoleEntries.append(ConsoleEntry(argv: CommandFormatter.redact(argv),
+                                               failedToStart: "abctl was not found in the app bundle."))
             return false
         }
         let trimmed = line.trimmingCharacters(in: .whitespaces)
@@ -1132,20 +1208,47 @@ final class AppModel {
 
     func clearConsole() { consoleEntries = [] }
 
+    /// Which screen's write produced `lastWriteError`.
+    ///
+    /// The error itself is one property shared by every gated write in the app, and five
+    /// surfaces render it. Without an owner, a failed config delete on the Configurations
+    /// screen showed up as red text under the Diff plan, across the Archive table, and
+    /// pre-filled in the next sheet opened — each one implying a failure that screen had
+    /// nothing to do with. Tagging the writer lets each surface ask only for its own.
+    enum WriteScope: Equatable {
+        case configuration   // create / replace / delete a profile
+        case membership      // attach / detach
+        case adopt           // record a live member in the manifest
+        case archive         // restore an archived version
+        case assignment      // device → MDM server
+        case apply           // sync --apply
+    }
+
+    private(set) var lastWriteScope: WriteScope?
+
+    /// The write error IF it belongs to `scope`. Views call this instead of reading
+    /// `lastWriteError` directly, so an unrelated failure cannot surface on their screen.
+    func writeError(_ scope: WriteScope) -> String? {
+        lastWriteScope == scope ? lastWriteError : nil
+    }
+
     /// Shared write wrapper: toggles isWriting, clears/sets lastWriteError, returns success.
-    private func runWrite(_ body: (AbctlClient) async throws -> Void) async -> Bool {
+    private func runWrite(_ scope: WriteScope, _ body: (AbctlClient) async throws -> Void) async -> Bool {
         guard let client = makeClient() else {
             lastWriteError = "abctl was not found in the app bundle."
+            lastWriteScope = scope
             return false
         }
         isWriting = true
         lastWriteError = nil
+        lastWriteScope = nil
         defer { isWriting = false }
         do {
             try await body(client)
             return true
         } catch {
             lastWriteError = error.localizedDescription
+            lastWriteScope = scope
             return false
         }
     }
@@ -1153,6 +1256,16 @@ final class AppModel {
     /// Bumped by every `run` so a stale load can't stomp a newer one's shared state
     /// (the dashboard's sequential pass can overlap a destination screen's own .task).
     private var loadGeneration = 0
+
+    /// Ownership token for the two workTask-backed operations — computing the plan, and seeding.
+    /// SEPARATE from `loadGeneration` on purpose.
+    ///
+    /// Sharing one counter looked tidy and was a trap: `run()` bumps it for every resource list,
+    /// so navigating to Configurations while a seed was in flight invalidated the SEED's token.
+    /// Its completion guard then failed, `isSeeding` was never cleared, and the Diff screen sat
+    /// on "Initializing workspace from the tenant…" forever with Refresh and Verify disabled —
+    /// unrecoverable without relaunching. Two independent concerns need two independent tokens.
+    private var workGeneration = 0
 
     /// Shared load wrapper: toggles isLoading, clears/sets loadError, runs `body`.
     /// Cancellation (navigating away terminates the abctl child) is swallowed like

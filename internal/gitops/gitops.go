@@ -64,17 +64,48 @@ func (t *Tree) LoadDesired() (map[string][]byte, error) {
 }
 
 // WriteConfig writes a profile into lib/ under the given name.
+//
+// The name comes from the TENANT (it is the configuration's `name` attribute, echoed
+// back by Apple), so it is untrusted input on a filesystem path. A console-created
+// config called `../../id_rsa` would otherwise have `seed`, `pull` and a reconcile
+// Pull write outside the workspace entirely. internal/archive has guarded this since
+// the beginning; lib/ never did.
 func (t *Tree) WriteConfig(name string, content []byte) error {
+	path, err := t.libPath(name)
+	if err != nil {
+		return err
+	}
 	if err := os.MkdirAll(t.LibDir, 0o755); err != nil {
 		return err
 	}
-	return os.WriteFile(filepath.Join(t.LibDir, name), content, 0o644)
+	return os.WriteFile(path, content, 0o644)
+}
+
+// libPath resolves a config name to its file inside LibDir, refusing anything that is
+// not a plain filename in that one directory. Rejecting is deliberate over sanitizing:
+// a silently rewritten name would no longer match the ABM config it came from, and the
+// resulting file would drift forever against a config it can never be compared to.
+func (t *Tree) libPath(name string) (string, error) {
+	// Both separators are checked, not just the host's: a tenant name carrying the
+	// foreign one still has to be refused, or the guard passes on one OS and not the
+	// other for the same configuration.
+	if name == "" || name == "." || name == ".." ||
+		strings.ContainsAny(name, `/\`) || strings.ContainsRune(name, 0) ||
+		filepath.IsAbs(name) || name != filepath.Base(name) {
+		return "", fmt.Errorf("configuration name %q is not a usable filename — abctl will not write it into %s "+
+			"(rename it in Apple Business)", name, t.LibDir)
+	}
+	return filepath.Join(t.LibDir, name), nil
 }
 
 // RemoveConfig deletes a profile from lib/ (used when a config was removed from
 // ABM → the git file is pruned). A missing file is not an error (idempotent).
 func (t *Tree) RemoveConfig(name string) error {
-	err := os.Remove(filepath.Join(t.LibDir, name))
+	path, perr := t.libPath(name)
+	if perr != nil {
+		return perr
+	}
+	err := os.Remove(path)
 	if os.IsNotExist(err) {
 		return nil
 	}

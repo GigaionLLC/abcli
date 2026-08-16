@@ -146,7 +146,13 @@ struct ApplySheet: View {
             // Either signal is enough to withhold the green verdict: the phase counters and the
             // per-item rows are two different numbers out of abctl, and the honest reading of a
             // disagreement between them is "something failed", never "all clear".
-            return result.totalErrors > 0 || model.syncFailure != nil ? .partial(result) : .succeeded(result)
+            // abctl's own STRUCTURED verdict is consulted first: a run can report every item
+            // `done` and still have failed, because Apple answers 2xx to a write it then
+            // declines to store. `verification.mismatches` is where abctl says so, and it is
+            // the reason the green verdict is not simply "no errors".
+            let notPersisted = result.verification?.mismatches.contains { $0.observed } ?? false
+            return result.totalErrors > 0 || model.syncFailure != nil || notPersisted
+                ? .partial(result) : .succeeded(result)
         }
         if model.syncFailure != nil { return .failed }
         // `lastWriteError` is SHARED with every other gated write in the app (a failed config
@@ -154,7 +160,7 @@ struct ApplySheet: View {
         // run something — `apply()` clears the progress log and writes its first line before any
         // of this can be true. Without that guard, opening Apply after an unrelated write failure
         // would greet the user with "Sync FAILED" for a sync that never happened.
-        if !model.applyProgressLog.isEmpty, model.lastWriteError != nil { return .failed }
+        if !model.applyProgressLog.isEmpty, model.writeError(.apply) != nil { return .failed }
         return nil
     }
 
@@ -528,6 +534,15 @@ struct ApplySheet: View {
             VStack(alignment: .leading, spacing: 6) {
                 Text("\(result.totalWrites) write(s) - \(result.totalErrors) error(s) - \(result.totalSkipped) skipped")
                     .foregroundStyle(result.totalErrors > 0 ? .red : .green)
+                if let verification = result.verification {
+                    // Read back from abctl's structured verdict rather than its prose. A write
+                    // Apple acknowledged and dropped shows up HERE and nowhere in the counters
+                    // above, which is exactly why it gets its own line.
+                    Text(verification.headline)
+                        .font(.caption)
+                        .foregroundStyle(verification.mismatches.contains { $0.observed } ? .red : .secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
                 if !result.rows.isEmpty {
                     Divider()
                     ScrollView {

@@ -23,7 +23,7 @@ struct MembershipSheet: View {
                 }
             }
 
-            if let error = model.lastWriteError {
+            if let error = model.writeError(.membership) {
                 Text(error).foregroundStyle(.red).font(.caption)
             }
 

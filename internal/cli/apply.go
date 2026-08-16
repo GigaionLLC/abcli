@@ -12,7 +12,6 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/GigaionLLC/abcli/internal/hash"
-	"github.com/GigaionLLC/abcli/internal/state"
 )
 
 // applyYes is the shared --yes for `apply -f` / `delete -f`.
@@ -158,25 +157,36 @@ func applyOneSpec(i *imp, s Spec, opts applyOpts) error {
 }
 
 // upsertConfig creates the config if absent in ABM, else archives + replaces it.
+//
+// The lookup is metadata-only, and profile XML is fetched for the ONE config being
+// replaced (it is what gets archived). Asking Apple for every profile in the tenant to
+// decide whether one name exists is the fan-out that made `adopt` time out — and here it
+// was paid once per document in a bulk file.
 func upsertConfig(i *imp, name string, content []byte, platforms []string) error {
-	live, err := i.c.FetchCustomSettings()
+	index, err := i.configIndex()
 	if err != nil {
 		return err
 	}
 	var existing *struct {
 		id, xml, updated string
 	}
-	for _, l := range live {
-		if l.Name == name {
-			existing = &struct{ id, xml, updated string }{l.ID, l.XML, l.Updated}
-			break
+	for _, l := range index {
+		if l.Name != name {
+			continue
 		}
+		detail, derr := i.c.FetchCustomSettingDetail(l.ID)
+		if derr != nil {
+			return fmt.Errorf("reading configuration %q before replacing it: %w", name, derr)
+		}
+		existing = &struct{ id, xml, updated string }{l.ID, detail.XML, detail.Updated}
+		break
 	}
 	if existing == nil {
 		id, updated, err := i.c.CreateConfiguration(name, string(content), platforms)
 		if err != nil {
 			return err
 		}
+		i.noteCreatedConfig(id, name) // a later doc in this run can now resolve it
 		return i.recordConfig(name, id, content, updated)
 	}
 	if _, err := i.archiver().Archive(name, "replaced", []byte(existing.xml), map[string]string{
@@ -191,12 +201,12 @@ func upsertConfig(i *imp, name string, content []byte, platforms []string) error
 	return i.recordConfig(name, existing.id, content, updated)
 }
 
-func (i *imp) recordConfig(name, id string, content []byte, updated string) error {
-	if err := i.tree.WriteConfig(name, content); err != nil {
-		return err
-	}
-	i.base.Configs[name] = state.Entry{ABMID: id, Hash: hash.Raw(content), UpdatedDateTime: updated}
-	return i.base.Save(i.tree.StateFile)
+// recordConfig confirms the write actually landed, then records the baseline from what
+// Apple STORED. See imp.confirmStored: a 2xx is not proof, and a baseline written from the
+// bytes we sent makes a dropped write invisible to every later sync.
+func (i *imp) recordConfig(name, id string, content []byte, _ string) error {
+	stored, verdict := i.confirmStored(id, content)
+	return i.recordWrite(name, id, content, stored, verdict, false)
 }
 
 // applyBlueprintSpec attaches every config listed in the spec that isn't already
@@ -207,8 +217,9 @@ func applyBlueprintSpec(i *imp, s Spec) error {
 		return err
 	}
 	// Metadata only — this path resolves names to ids and rewrites the manifest from
-	// live ids; it never reads a profile. See liveConfigIndex.
-	live, err := liveConfigIndex(i.c)
+	// live ids; it never reads a profile. Cached for the whole command: a bulk file used to
+	// pay one full tenant list per document.
+	live, err := i.configIndex()
 	if err != nil {
 		return err
 	}
@@ -216,7 +227,13 @@ func applyBlueprintSpec(i *imp, s Spec) error {
 	for _, l := range live {
 		idByName[l.Name] = l.ID
 	}
-	attached, _ := i.c.BlueprintRelationship(bp.ID, "configurations")
+	// NOT swallowed: an unreadable membership list is indistinguishable from an EMPTY one,
+	// which would re-POST every config in the spec — spending rate limit to reach a state
+	// we could not confirm we were not already in.
+	attached, err := i.c.BlueprintRelationship(bp.ID, "configurations")
+	if err != nil {
+		return fmt.Errorf("reading configuration membership of blueprint %q: %w", s.Metadata.Name, err)
+	}
 	have := map[string]bool{}
 	for _, r := range attached {
 		have[r.ID] = true
@@ -240,8 +257,13 @@ func applyBlueprintSpec(i *imp, s Spec) error {
 	}
 	// Mirror the ABM membership into the git manifest (full live set) so the tree
 	// stays == live and a later `sync --prune` never reverts this attach.
-	if err := i.syncBlueprintManifest(bp.AttrStr("name"), bp.ID, live); err != nil {
-		fmt.Fprintf(os.Stderr, "  warning: attached on ABM but local manifest update failed: %v\n", err)
+	if err := i.syncBlueprintManifest(bp.AttrStr("name"), bp.ID, live, ""); err != nil {
+		// A warning here left the command exiting 0 with the tenant attached and git
+		// untouched — drift manufactured by a "successful" run, and precisely the defect
+		// `attach`/`detach` were fixed for. Fail instead; the attach has already landed
+		// and is reported above, so re-running after fixing the tree is safe.
+		return fmt.Errorf("attached on ABM but the local manifest update failed (gitops/ and the tenant now "+
+			"disagree; fix the tree and re-run, or `abctl seed` to adopt): %w", err)
 	}
 	fmt.Fprintf(os.Stderr, "  ✓ Blueprint/%s: %d config(s) attached\n", s.Metadata.Name, attachedN)
 	return nil

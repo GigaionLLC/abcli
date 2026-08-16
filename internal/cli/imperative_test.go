@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/GigaionLLC/abcli/internal/ab"
@@ -18,9 +19,21 @@ func TestConfigName(t *testing.T) {
 	}
 }
 
+// wellFormedProfile is the minimum Apple actually accepts: a top-level dict with the
+// four required keys and a PayloadVersion of exactly 1.
+func wellFormedProfile(payloadVersion string) []byte {
+	return []byte(`<?xml version="1.0" encoding="UTF-8"?>
+<plist version="1.0"><dict>
+  <key>PayloadType</key><string>Configuration</string>
+  <key>PayloadVersion</key><integer>` + payloadVersion + `</integer>
+  <key>PayloadIdentifier</key><string>com.example.test</string>
+  <key>PayloadUUID</key><string>2B9E1A54-9E1D-4E7E-9B0E-9A1B2C3D4E5F</string>
+  <key>PayloadContent</key><array/>
+</dict></plist>`)
+}
+
 func TestValidateProfile(t *testing.T) {
-	good := []byte(`<plist><key>PayloadType</key><string>Configuration</string>PayloadContent</plist>`)
-	if err := validateProfile(good); err != nil {
+	if err := validateProfile(wellFormedProfile("1")); err != nil {
 		t.Errorf("valid profile rejected: %v", err)
 	}
 	if err := validateProfile([]byte("nope")); err == nil {
@@ -28,6 +41,26 @@ func TestValidateProfile(t *testing.T) {
 	}
 	if err := validateProfile(make([]byte, 1<<20)); err == nil {
 		t.Error("expected >=1MB profile to be rejected")
+	}
+}
+
+// TestValidateProfileRejectsBadPayloadVersion is the regression lock for the incident
+// that motivated all of the read-back machinery: Apple accepts a profile whose TOP-LEVEL
+// PayloadVersion is not 1 with a 2xx and then silently declines to store it, so the sync
+// loops forever on a change that never lands. `abctl validate` has caught this since
+// v0.4.19; the WRITE path did not, which meant create/replace/edit/apply -f would happily
+// push the exact shape known to be dropped. Catching it here costs no API call at all.
+func TestValidateProfileRejectsBadPayloadVersion(t *testing.T) {
+	err := validateProfile(wellFormedProfile("2"))
+	if err == nil {
+		t.Fatal("a top-level PayloadVersion of 2 must be rejected before the write")
+	}
+	if !strings.Contains(err.Error(), "payload-version") {
+		t.Errorf("error should name the payload-version rule, got: %v", err)
+	}
+	// The remedy has to be reachable: --force is how an operator overrides a hard error.
+	if !strings.Contains(err.Error(), "--force") {
+		t.Errorf("error should point at --force, got: %v", err)
 	}
 }
 

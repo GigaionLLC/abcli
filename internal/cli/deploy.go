@@ -144,7 +144,11 @@ func runMembership(verb, configArg, blueprintArg string, yes, noWriteTree, jsonO
 	if !noWriteTree {
 		// Rewrite the manifest to the FULL post-write live membership (not a delta),
 		// so the tree can never omit members that `sync --prune` would then detach.
-		if err := i.syncBlueprintManifest(bpName, bp.ID, live); err != nil {
+		detached := ""
+		if verb == "detach" {
+			detached = lc.Name
+		}
+		if err := i.syncBlueprintManifest(bpName, bp.ID, live, detached); err != nil {
 			treeUpdated, treeErr = false, err.Error()
 			fmt.Fprintf(os.Stderr, "warning: membership changed on ABM but the local manifest update failed: %v\n", err)
 			fmt.Fprintf(os.Stderr, "warning: gitops/blueprints/ still disagrees with ABM — run `abctl adopt config %q --blueprint %q` from the workspace to record it.\n", lc.Name, bpName)
@@ -468,7 +472,15 @@ func runStatusConfig(nameOrID string, asJSON bool) error {
 	var carriers []cov
 	totalDevices := 0
 	for _, bp := range bps {
-		links, _ := c.BlueprintRelationship(bp.ID, "configurations")
+		// Propagate relationship errors. A swallowed 429 or 403 here renders as
+		// "attached to 0 blueprint(s), targeting 0 device(s)" and exits 0 — an
+		// affirmatively FALSE coverage statement, and this loop is one call per
+		// blueprint so a rate-limited tenant is the likely case, not an edge one.
+		// (`status device` already learned this; see inspect.go.)
+		links, err := c.BlueprintRelationship(bp.ID, "configurations")
+		if err != nil {
+			return fmt.Errorf("reading configuration membership of blueprint %q: %w", bp.AttrStr("name"), err)
+		}
 		on := false
 		for _, l := range links {
 			if l.ID == lc.ID {
@@ -479,7 +491,10 @@ func runStatusConfig(nameOrID string, asJSON bool) error {
 		if !on {
 			continue
 		}
-		devs, _ := c.BlueprintRelationship(bp.ID, "orgDevices")
+		devs, err := c.BlueprintRelationship(bp.ID, "orgDevices")
+		if err != nil {
+			return fmt.Errorf("reading device membership of blueprint %q: %w", bp.AttrStr("name"), err)
+		}
 		carriers = append(carriers, cov{Blueprint: bp.AttrStr("name"), Devices: len(devs)})
 		totalDevices += len(devs)
 	}

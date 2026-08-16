@@ -31,12 +31,6 @@ actor ProcessRunner: AbctlRunner {
 
         try process.run()
 
-        // Write stdin (e.g. profile XML for `create -f -`) then close so abctl sees EOF.
-        if let stdin {
-            try? inPipe.fileHandleForWriting.write(contentsOf: stdin)
-        }
-        try? inPipe.fileHandleForWriting.close()
-
         // If the caller's Task is cancelled (e.g. a Cancel button), terminate the child so it
         // doesn't linger; its pipes then close, the drains reach EOF, and we unwind below.
         return try await withTaskCancellationHandler {
@@ -48,13 +42,34 @@ actor ProcessRunner: AbctlRunner {
                 process.terminate()
             }
 
+            // Feed stdin (profile XML for `create -f -`) off the calling thread and INSIDE the
+            // watchdog's reach, then close so abctl sees EOF.
+            //
+            // It used to run before the cancellation handler and before the drains were
+            // started, so for the duration of the write there was no Cancel, no timeout, and
+            // nobody reading the child's output. A profile larger than the pipe buffer, sent to
+            // an abctl that narrates before consuming stdin, deadlocks both ends with no way
+            // out. The write error is captured rather than discarded, because a partially
+            // written profile is a truncated one, and sending that to Apple as a `create` is
+            // worse than failing.
+            async let written: Error? = Self.writeStdin(inPipe.fileHandleForWriting, data: stdin)
+
             // Drain both pipes concurrently, THEN wait — reading first avoids the classic
             // 64 KB-pipe-buffer deadlock. stderr streams line-by-line to `onStderrLine`.
             async let out = Self.readToEnd(outPipe.fileHandleForReading)
             async let err = Self.streamToEnd(errPipe.fileHandleForReading, onLine: onStderrLine)
             let stdout = await out
             let stderr = await err
+            let stdinError = await written
             process.waitUntilExit()
+
+            // A failed stdin write means abctl received a TRUNCATED profile. It may well have
+            // sent that to Apple, so this is reported rather than swallowed — the exit code
+            // alone cannot distinguish "created what you meant" from "created half of it".
+            if let stdinError {
+                throw AbctlError.cli("failed to send the profile to abctl (it may have received only part of it): "
+                                     + stdinError.localizedDescription + "\n" + stderr)
+            }
 
             // The watchdog ran to completion iff it fired (timeout); if it was still sleeping
             // we cancel it and its sleep throws — telling success from timeout precisely.
@@ -76,6 +91,22 @@ actor ProcessRunner: AbctlRunner {
             )
         } onCancel: {
             process.terminate()
+        }
+    }
+
+    /// Write `data` to the child's stdin off the main thread and close the handle, returning the
+    /// error if the write failed. Closing happens either way: without EOF the child waits for
+    /// input that is never coming, which is a hang rather than an error.
+    private static func writeStdin(_ handle: FileHandle, data: Data?) async -> Error? {
+        await withCheckedContinuation { continuation in
+            DispatchQueue.global().async {
+                var failure: Error?
+                if let data, !data.isEmpty {
+                    do { try handle.write(contentsOf: data) } catch { failure = error }
+                }
+                try? handle.close()
+                continuation.resume(returning: failure)
+            }
         }
     }
 

@@ -15,6 +15,7 @@ import (
 	"github.com/GigaionLLC/abcli/internal/config"
 	"github.com/GigaionLLC/abcli/internal/gitops"
 	"github.com/GigaionLLC/abcli/internal/hash"
+	"github.com/GigaionLLC/abcli/internal/reconcile"
 	"github.com/GigaionLLC/abcli/internal/state"
 )
 
@@ -36,6 +37,38 @@ type imp struct {
 	cfg  *config.Config
 	tree *gitops.Tree
 	base *state.State
+
+	// configIndexCache is the tenant's name↔id list, fetched at most once per command.
+	// `apply -f` is the reason it exists: it resolves names once per DOCUMENT, so a 20-doc
+	// bulk file listed the whole tenant twenty times. nil means "not fetched yet"; an empty
+	// tenant caches as a non-nil empty slice, so an empty result is not refetched forever.
+	configIndexCache []ab.LiveConfig
+}
+
+// configIndex returns the cached metadata list, fetching it on first use.
+func (i *imp) configIndex() ([]ab.LiveConfig, error) {
+	if i.configIndexCache != nil {
+		return i.configIndexCache, nil
+	}
+	index, err := liveConfigIndex(i.c)
+	if err != nil {
+		return nil, err
+	}
+	if index == nil {
+		index = []ab.LiveConfig{} // distinguish "empty tenant" from "never fetched"
+	}
+	i.configIndexCache = index
+	return index, nil
+}
+
+// noteCreatedConfig keeps the cache truthful after a create, so a later document in the same
+// `apply -f` run can resolve a config an earlier document just made. Appending beats
+// invalidating: a bulk file that creates ten configs would otherwise re-list ten times.
+func (i *imp) noteCreatedConfig(id, name string) {
+	if i.configIndexCache == nil {
+		return // nothing cached yet; the next configIndex() will fetch a list that includes it
+	}
+	i.configIndexCache = append(i.configIndexCache, ab.LiveConfig{ID: id, Name: name})
 }
 
 func newImp() (*imp, error) {
@@ -82,14 +115,94 @@ func readFileArg(path string) ([]byte, error) {
 	return os.ReadFile(path)
 }
 
-// validateProfile is the built-in structural check (same as `abctl validate`).
+// validateProfile is the pre-write structural check. It runs the SAME inspector
+// `abctl validate` runs (checkProfile → inspectProfile), not a lesser one.
+//
+// It used to be three substring tests and a size cap, which meant the one rule the
+// project added *because* of a live incident — a top-level PayloadVersion that is
+// not exactly 1, which Apple accepts with a 2xx and then silently declines to store
+// — was enforced by `abctl validate` and by nothing on the path that actually
+// writes. `create`, `replace`, `edit` and `apply -f` would all cheerfully push the
+// exact profile shape known to be dropped.
+//
+// Warnings are deliberately not fatal here: they are advice, and `--force` remains
+// the way past a hard error.
 func validateProfile(b []byte) error {
-	s := string(b)
-	if len(b) >= 1<<20 {
-		return fmt.Errorf("profile is >= 1 MB (Apple Business cap)")
+	pr := checkProfile("", libFile{name: "profile", data: b})
+	if len(pr.Errors) == 0 {
+		return nil
 	}
-	if !strings.Contains(s, "<key>PayloadType</key>") || !strings.Contains(s, "Configuration") || !strings.Contains(s, "PayloadContent") {
-		return fmt.Errorf("profile is missing the Configuration/PayloadContent structure (use --force to skip)")
+	msgs := make([]string, 0, len(pr.Errors))
+	for _, e := range pr.Errors {
+		msgs = append(msgs, e.Code+": "+e.Message)
+	}
+	return fmt.Errorf("profile failed validation (use --force to skip):\n  - %s", strings.Join(msgs, "\n  - "))
+}
+
+// confirmStored re-reads a config abctl just created or replaced and reports whether
+// Apple actually kept the bytes that were sent.
+//
+// A 2xx is NOT proof. Apple accepts the write and then silently declines to persist a
+// profile that violates its schema, leaving both the stored bytes and updatedDateTime
+// untouched. Recording the bytes we SENT as the baseline turns that into a permanent
+// lie: the next `--refresh=smart` run finds a baseline whose id and timestamp match
+// live, reuses the cached hash, never fetches the real XML, and reports "in sync"
+// forever while Apple holds the old profile. The reconcile engine learned this from a
+// live incident (see reconcile.push); the imperative commands issue the same writes
+// against the same API and need the same proof.
+//
+// The verdicts are reconcile's, deliberately — one incident, one vocabulary:
+//   - VerifyConfirmed   the stored bytes match; the returned config is authoritative
+//   - VerifyNotPersisted Apple kept something else; the write did not take
+//   - VerifyUnconfirmed  the read-back gave no answer. This is NOT evidence of
+//     failure — a GET that failed says nothing about the PATCH — so the caller must
+//     report it as unverified rather than failed.
+func (i *imp) confirmStored(id string, sent []byte) (ab.LiveConfig, reconcile.Verification) {
+	stored, err := i.c.FetchCustomSettingDetail(id)
+	switch {
+	case err != nil:
+		return ab.LiveConfig{}, reconcile.VerifyUnconfirmed
+	case stored.ContentHash() == "":
+		// A detail response with no profile XML cannot be compared, and must not be
+		// used to accuse Apple of dropping a write it may well have stored.
+		return ab.LiveConfig{}, reconcile.VerifyUnconfirmed
+	case stored.ContentHash() != hash.Raw(sent):
+		return stored, reconcile.VerifyNotPersisted
+	default:
+		return stored, reconcile.VerifyConfirmed
+	}
+}
+
+// recordWrite writes the profile into the git tree and records the baseline from what
+// APPLE STORED, never from what was sent. It returns the error the command should exit
+// with — non-nil only when Apple did not persist the write.
+//
+// On VerifyNotPersisted the tree file and the baseline are still written: the tree holds
+// the operator's intent, the baseline holds Apple's reality, and the difference between
+// them is exactly what makes the next `diff` show the drift and offer to retry. Writing
+// neither would leave the operator with a failed command and no record of what they
+// meant; writing the sent bytes into the baseline is the bug this exists to prevent.
+func (i *imp) recordWrite(name, id string, sent []byte, stored ab.LiveConfig, v reconcile.Verification, noWriteTree bool) error {
+	if !noWriteTree {
+		if err := i.tree.WriteConfig(name, sent); err != nil {
+			return err
+		}
+		// No baseline at all when the read-back gave no answer: a baseline is a claim
+		// that git and Apple agreed at a known instant, and an unconfirmed write cannot
+		// support that claim. Its absence makes the next run re-read, which is right.
+		if v != reconcile.VerifyUnconfirmed {
+			i.base.Configs[name] = state.Entry{ABMID: id, Hash: stored.ContentHash(), UpdatedDateTime: stored.Updated}
+			if err := i.base.Save(i.tree.StateFile); err != nil {
+				return err
+			}
+		}
+	}
+	switch v {
+	case reconcile.VerifyNotPersisted:
+		return fmt.Errorf("%s (stored updatedDateTime %s)", reconcile.NotPersistedMessage, stored.Updated)
+	case reconcile.VerifyUnconfirmed:
+		fmt.Fprintf(os.Stderr, "warning: %q was written but could not be read back to confirm it landed; "+
+			"the baseline was left alone so the next `abctl diff` re-checks it.\n", name)
 	}
 	return nil
 }
@@ -120,6 +233,11 @@ type writeOutcome struct {
 	// caller that reports the write as fully done would be lying, and the drift it
 	// leaves behind resurfaces on every later diff.
 	TreeError string `json:"treeError,omitempty"`
+	// Verified is the read-back verdict for a create/replace (reconcile.Verification):
+	// "confirmed", "not-persisted", or "unconfirmed". A 2xx from Apple is not proof the
+	// profile was stored, so a caller that reports success without reading this is
+	// reporting the tenant's acknowledgement rather than its state.
+	Verified string `json:"verified,omitempty"`
 }
 
 // wantsMachine reports whether a machine format (the --json shorthand or a global
@@ -180,17 +298,16 @@ func runCreateConfig(name string, fl writeFlags) error {
 	if err != nil {
 		return err
 	}
-	if !fl.noWriteTree {
-		if err := i.tree.WriteConfig(name, content); err != nil {
-			return err
-		}
-		i.base.Configs[name] = state.Entry{ABMID: id, Hash: hash.Raw(content), UpdatedDateTime: updated}
-		if err := i.base.Save(i.tree.StateFile); err != nil {
-			return err
-		}
+	stored, verdict := i.confirmStored(id, content)
+	if stored.Updated != "" {
+		updated = stored.Updated // Apple's stored timestamp beats the one the write echoed
+	}
+	if err := i.recordWrite(name, id, content, stored, verdict, fl.noWriteTree); err != nil {
+		return err
 	}
 	if wantsMachine(fl.json) {
-		return emitWrite(writeOutcome{Action: "create", Name: name, ID: id, UpdatedDateTime: updated, TreeUpdated: !fl.noWriteTree}, fl.json)
+		return emitWrite(writeOutcome{Action: "create", Name: name, ID: id, UpdatedDateTime: updated,
+			TreeUpdated: !fl.noWriteTree, Verified: string(verdict)}, fl.json)
 	}
 	fmt.Fprintf(os.Stderr, "created %q (id %s)%s\n", name, id, treeNote(fl.noWriteTree))
 	return nil
@@ -253,17 +370,16 @@ func runReplaceConfig(nameOrID string, fl writeFlags) error {
 	if err != nil {
 		return err
 	}
-	if !fl.noWriteTree {
-		if err := i.tree.WriteConfig(lc.Name, content); err != nil {
-			return err
-		}
-		i.base.Configs[lc.Name] = state.Entry{ABMID: lc.ID, Hash: hash.Raw(content), UpdatedDateTime: updated}
-		if err := i.base.Save(i.tree.StateFile); err != nil {
-			return err
-		}
+	stored, verdict := i.confirmStored(lc.ID, content)
+	if stored.Updated != "" {
+		updated = stored.Updated // Apple's stored timestamp beats the one the write echoed
+	}
+	if err := i.recordWrite(lc.Name, lc.ID, content, stored, verdict, fl.noWriteTree); err != nil {
+		return err
 	}
 	if wantsMachine(fl.json) {
-		return emitWrite(writeOutcome{Action: "replace", Name: lc.Name, ID: lc.ID, UpdatedDateTime: updated, Archive: arch, TreeUpdated: !fl.noWriteTree}, fl.json)
+		return emitWrite(writeOutcome{Action: "replace", Name: lc.Name, ID: lc.ID, UpdatedDateTime: updated,
+			Archive: arch, TreeUpdated: !fl.noWriteTree, Verified: string(verdict)}, fl.json)
 	}
 	fmt.Fprintf(os.Stderr, "replaced %q%s\n", lc.Name, treeNote(fl.noWriteTree))
 	return nil
@@ -332,18 +448,12 @@ func applyReplaceResolved(i *imp, lc ab.LiveConfig, content []byte, fl writeFlag
 	}); err != nil {
 		return fmt.Errorf("archive failed (PATCH skipped): %w", err)
 	}
-	updated, err := i.c.UpdateConfiguration(lc.ID, lc.Name, string(content))
-	if err != nil {
+	if _, err := i.c.UpdateConfiguration(lc.ID, lc.Name, string(content)); err != nil {
 		return err
 	}
-	if !fl.noWriteTree {
-		if err := i.tree.WriteConfig(lc.Name, content); err != nil {
-			return err
-		}
-		i.base.Configs[lc.Name] = state.Entry{ABMID: lc.ID, Hash: hash.Raw(content), UpdatedDateTime: updated}
-		if err := i.base.Save(i.tree.StateFile); err != nil {
-			return err
-		}
+	stored, verdict := i.confirmStored(lc.ID, content)
+	if err := i.recordWrite(lc.Name, lc.ID, content, stored, verdict, fl.noWriteTree); err != nil {
+		return err
 	}
 	fmt.Fprintf(os.Stderr, "updated %q%s\n", lc.Name, treeNote(fl.noWriteTree))
 	return nil
@@ -425,16 +535,36 @@ func runDeleteConfig(nameOrID string, fl writeFlags) error {
 	return nil
 }
 
-// resolveLiveConfig finds a live CUSTOM_SETTING config (with its XML) by name or id.
+// resolveLiveConfig finds ONE live CUSTOM_SETTING config by name or id, with its XML.
+//
+// Two requests, not 1+N: a metadata-only list to turn the name into an id, then a single
+// detail fetch for that one config. It used to call FetchCustomSettings, which asks Apple
+// for `customSettingsValues` — the profile XML — for EVERY config in the tenant, and falls
+// back to a per-config GET whenever the list comes back sparse. That is the trap `adopt`
+// hit: the caller wants one profile and pays for all of them, and on a real tenant the
+// command outran abgui's budget and appeared to do nothing at all.
+//
+// Callers here genuinely need the XML (it is what gets archived before an overwrite), so
+// unlike liveConfigIndex this still fetches a profile — exactly one.
 func resolveLiveConfig(c *ab.Client, nameOrID string) (ab.LiveConfig, error) {
-	live, err := c.FetchCustomSettings()
+	index, err := liveConfigIndex(c)
 	if err != nil {
 		return ab.LiveConfig{}, err
 	}
-	if lc, ok := findLiveConfig(live, nameOrID); ok {
-		return lc, nil
+	found, ok := findLiveConfig(index, nameOrID)
+	if !ok {
+		return ab.LiveConfig{}, fmt.Errorf("CUSTOM_SETTING config %q not found (by name or id)", nameOrID)
 	}
-	return ab.LiveConfig{}, fmt.Errorf("CUSTOM_SETTING config %q not found (by name or id)", nameOrID)
+	detail, err := c.FetchCustomSettingDetail(found.ID)
+	if err != nil {
+		return ab.LiveConfig{}, fmt.Errorf("reading configuration %q: %w", found.Name, err)
+	}
+	// The list is authoritative for the name (the detail response has been seen to omit
+	// fields); the detail is authoritative for the bytes.
+	if detail.Name == "" {
+		detail.Name = found.Name
+	}
+	return detail, nil
 }
 
 func findLiveConfig(live []ab.LiveConfig, nameOrID string) (ab.LiveConfig, bool) {
@@ -451,7 +581,10 @@ func findLiveConfig(live []ab.LiveConfig, nameOrID string) (ab.LiveConfig, bool)
 // post-write live config membership, so the git manifest always equals live (never
 // a partial set that a later `sync --prune` would treat as configs to detach).
 // live is the current CUSTOM_SETTING list (for id→name resolution).
-func (i *imp) syncBlueprintManifest(bpName, bpID string, live []ab.LiveConfig) error {
+// removed names the config a DETACH just took off the blueprint, or "" for an attach.
+// It is excluded from the union below: without it, detaching a config that the manifest
+// still declares would re-add it from the manifest and the detach would never stick.
+func (i *imp) syncBlueprintManifest(bpName, bpID string, live []ab.LiveConfig, removed string) error {
 	links, err := i.c.BlueprintRelationship(bpID, "configurations")
 	if err != nil {
 		return err
@@ -479,8 +612,35 @@ func (i *imp) syncBlueprintManifest(bpName, bpID string, live []ab.LiveConfig) e
 		return fmt.Errorf("reading existing blueprint manifests: %w", err)
 	}
 	spec := all[bpName]
+	// UNION with what the manifest already declares, rather than replacing it.
+	//
+	// A plain rewrite from live discards any config the operator has declared in git but
+	// not yet attached — a pending `attach-config` row in the plan — so attaching A would
+	// silently delete B's intent, and no later sync would ever propose it again. The
+	// rewrite-from-live rule is still right for the member that was just written (that
+	// one IS live now); it was only ever wrong about the entries it did not touch.
+	//
+	// A DETACH still has to remove its member, so the removed one is excluded explicitly
+	// rather than trusting the union to drop it.
+	attachedNames := toStringSet(names)
+	for _, declared := range spec.Configurations {
+		if _, isAttached := attachedNames[declared]; !isAttached && declared != removed {
+			names = append(names, declared)
+		}
+	}
+	sort.Strings(names)
 	spec.Name, spec.ID, spec.Configurations = bpName, bpID, names
 	return i.tree.WriteBlueprintSpec(spec)
+}
+
+// toStringSet is the membership test used above; a map keeps the union linear rather
+// than quadratic on a blueprint with many configurations.
+func toStringSet(ss []string) map[string]struct{} {
+	m := make(map[string]struct{}, len(ss))
+	for _, s := range ss {
+		m[s] = struct{}{}
+	}
+	return m
 }
 
 func addWriteFlags(cmd *cobra.Command, fl *writeFlags, needFile bool) {
