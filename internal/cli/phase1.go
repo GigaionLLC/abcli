@@ -253,7 +253,7 @@ func runSync(fl syncFlags) error {
 	switch fl.verify {
 	case verifyFull:
 		fmt.Fprintln(os.Stderr, "post-apply verification: full live configuration and blueprint refresh...")
-		fetched, err := fetchLiveConfigsForPlan(pc.c, pc.desired, pc.base, fl.gitSourceOfTruth, refreshFull, true, func(line string) {
+		fetched, err := fetchLiveConfigsForPlan(pc.c, pc.desired, pc.base, refreshFull, true, func(line string) {
 			fmt.Fprintln(os.Stderr, "post-apply verification: "+line)
 		})
 		if err != nil {
@@ -878,7 +878,7 @@ func validateVerifyMode(mode string) error {
 // willWrite says whether THIS run may actually pull, archive or prune. It gates the
 // per-config profile fetch in smart mode: a dry run compares nothing it keeps, so paying
 // a request per live-only config buys a hash that is thrown away.
-func fetchLiveConfigsForPlan(c *ab.Client, desired map[string][]byte, base *state.State, gitSourceOfTruth bool, refresh string, willWrite bool, progress func(string)) ([]ab.LiveConfig, error) {
+func fetchLiveConfigsForPlan(c *ab.Client, desired map[string][]byte, base *state.State, refresh string, willWrite bool, progress func(string)) ([]ab.LiveConfig, error) {
 	switch refresh {
 	case refreshFull:
 		return c.FetchCustomSettingsWithProgress(progress)
@@ -890,13 +890,18 @@ func fetchLiveConfigsForPlan(c *ab.Client, desired map[string][]byte, base *stat
 		reuseCachedLiveHashes(live, base, progress)
 		return live, nil
 	case refreshSmart:
-		return fetchLiveConfigsSmart(c, desired, base, gitSourceOfTruth, willWrite, progress)
+		return fetchLiveConfigsSmart(c, desired, base, willWrite, progress)
 	default:
 		return nil, fmt.Errorf("invalid refresh mode %q", refresh)
 	}
 }
 
-func fetchLiveConfigsSmart(c *ab.Client, desired map[string][]byte, base *state.State, gitSourceOfTruth bool, willWrite bool, progress func(string)) ([]ab.LiveConfig, error) {
+// The git-source-of-truth flag is deliberately NOT a parameter: it used to force a detail
+// fetch for every live-only config, but under that mode such a config is a DELETE, and a
+// delete needs the bytes only when the run will actually archive them — which is precisely
+// what willWrite already says. Two flags meaning one thing is how the dry-run path ended up
+// fetching profiles it discarded.
+func fetchLiveConfigsSmart(c *ab.Client, desired map[string][]byte, base *state.State, willWrite bool, progress func(string)) ([]ab.LiveConfig, error) {
 	live, err := c.FetchCustomSettingsMetadata(progress)
 	if err != nil {
 		return nil, err
@@ -1025,7 +1030,7 @@ func loadPlan(gitSourceOfTruth bool, refresh string, willWrite bool) (*planCtx, 
 	}
 	fmt.Fprintf(os.Stderr, "building plan: loaded %d baseline configuration record(s).\n", len(base.Configs))
 	fmt.Fprintf(os.Stderr, "building plan: fetching live configurations from Apple (%s refresh)...\n", refresh)
-	live, err := fetchLiveConfigsForPlan(c, desired, base, gitSourceOfTruth, refresh, willWrite, func(line string) {
+	live, err := fetchLiveConfigsForPlan(c, desired, base, refresh, willWrite, func(line string) {
 		fmt.Fprintln(os.Stderr, "building plan: "+line)
 	})
 	if err != nil {

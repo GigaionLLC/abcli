@@ -67,8 +67,10 @@ actor ProcessRunner: AbctlRunner {
             // sent that to Apple, so this is reported rather than swallowed — the exit code
             // alone cannot distinguish "created what you meant" from "created half of it".
             if let stdinError {
+                // `stderr` is still Data here — it is decoded once, below, for the result.
                 throw AbctlError.cli("failed to send the profile to abctl (it may have received only part of it): "
-                                     + stdinError.localizedDescription + "\n" + stderr)
+                                     + stdinError.localizedDescription + "\n"
+                                     + String(decoding: stderr, as: UTF8.self))
             }
 
             // The watchdog ran to completion iff it fired (timeout); if it was still sleeping
