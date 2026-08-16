@@ -133,7 +133,7 @@ jobs:
         if: matrix.target == 'linux'
         run: |
           ./abgui-flutter/build/linux/x64/release/bundle/abctl --version
-          ls -la bin/abgui-*-linux-x64.tar.gz bin/abgui-*-x86_64.AppImage
+          ls -la bin/abgui-*-x86_64.AppImage
           # Verify the AppImage's CONTENTS rather than launching it: abgui is a GUI and has no
           # --version, so running it headless would prove nothing that `|| true` didn't hide.
           # --appimage-extract needs no FUSE, which GitHub runners lack.
@@ -150,6 +150,5 @@ jobs:
             bin/abgui-*-macos.dmg
             bin/abgui-*-macos.zip
             bin/abgui-*-windows-x64.zip
-            bin/abgui-*-linux-x64.tar.gz
             bin/abgui-*-x86_64.AppImage
           if-no-files-found: error

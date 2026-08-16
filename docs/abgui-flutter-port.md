@@ -130,6 +130,28 @@ The three things that would otherwise be found at release time:
    makes the AppImage's "runs on any distro" claim true — an AppImage bundles the GTK stack it
    needs but *not* glibc, so the pin is load-bearing, not hygiene.
 
+### Windows ships three artifacts, from one payload
+
+A portable zip, an Inno Setup installer (`abgui-setup-x64.exe`), and a Microsoft Store MSIX. The
+installer and the MSIX **repackage** what `build-gui-flutter.sh windows` already built rather than
+rebuilding — the same "operate on existing output" split as `macos-notarize`, and for a stricter
+reason: the release job signs `abgui.exe` and the embedded `abctl.exe` **in place** between the
+steps, so a rebuild would ship wrappers around unsigned binaries.
+
+Two things about the Store package are permanent constraints on the app, not packaging trivia:
+
+- **A packaged app must not download executable code at runtime.** abgui complies only because
+  abctl is *bundled*. Any future "update abctl in place" feature has to be dead when
+  Store-packaged, and it is the *download* that must be gated, not the button. Detection is a
+  `GetCurrentPackageFullName` FFI call — no Dart API answers it.
+- **`runFullTrust` cannot be removed.** Every Flutter Win32 app has a
+  `Windows.FullTrustApplication` entry point, so `msix` always emits it. It is what lets abgui
+  spawn abctl at all, and it makes a restricted-capability justification mandatory on every
+  submission.
+
+Both, plus the repo variables and secrets a human must create, are in
+[windows-store-and-signing.md](windows-store-and-signing.md).
+
 ### Linux ships an AppImage, not a .deb
 
 One self-contained executable: no root, no package manager, every distro. A `.deb` was
@@ -146,8 +168,9 @@ that flag the tool cannot mount even itself.
 | Build script | `scripts/build-gui-flutter.sh` |
 | Make targets | `make gui-check`, `gui-test`, `gui-macos`, `gui-windows`, `gui-linux` |
 | CI | `.github/workflows/gui-flutter.yml` (analyze/test everywhere + a real build per OS) |
-| Release assets | `abgui-*-macos-{signed,notarized}.{dmg,zip}`, `abgui-*-windows-x64.zip`, `abgui-*-x86_64.AppImage`, `abgui-*-linux-x64.tar.gz` |
+| Release assets | `abgui-*-macos.{dmg,zip}` (stapled in place once notarized), `abgui-*-windows-x64.zip`, `abgui-setup-x64.exe`, `abgui-*-windows-x64.msix`, `abgui-*-x86_64.AppImage` — **one filename per artifact**; no `-signed`/`-notarized` variants and no Linux tarball, both of which were redundancy that made the release page ask a question instead of answering one |
 | Bundle id | `com.gigaionllc.abgui` |
+| Signing / Store | macOS: [release-signing.md](release-signing.md) · Windows: [windows-store-and-signing.md](windows-store-and-signing.md) |
 
 The Flutter macOS app keeps `com.gigaionllc.abgui`, so it installs *over* the previous app rather
 than beside it — which is what you want once there is only one.

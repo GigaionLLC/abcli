@@ -82,7 +82,7 @@ release:
     |---|---|
     | macOS | **`abgui-*-macos-notarized.dmg`** when present, else `abgui-*-macos-signed.dmg` |
     | Windows | `abgui-*-windows-x64.zip` |
-    | Linux | **`abgui-*-x86_64.AppImage`** — one file, any distro, no install. Or `abgui-*-linux-x64.tar.gz` |
+    | Linux | **`abgui-*-x86_64.AppImage`** — one file, any distro, no install, no root |
 
     The signed macOS assets are uploaded first, while Apple notarization runs; the notarized
     ones replace them a few minutes later and install without a Gatekeeper prompt.

@@ -87,6 +87,36 @@ if(PLUGIN_BUNDLED_LIBRARIES)
     COMPONENT Runtime)
 endif()
 
+# Ship the MSVC runtime app-local (msvcp140.dll, vcruntime140.dll, vcruntime140_1.dll).
+#
+# Flutter's Windows build links the DYNAMIC MSVC runtime, which is NOT part of Windows — it
+# arrives with Visual Studio or the "Visual C++ Redistributable". A dev box always has one,
+# which is exactly why this is invisible until someone installs the app on a machine that does
+# not: abgui.exe then fails to start with a missing-DLL dialog naming msvcp140.dll, before any
+# of our code runs and with nothing in a log. The sibling Airclone project shipped that and
+# failed Microsoft Store certification on it (policy 10.2.4.1, undisclosed dependency on
+# non-integrated software), which is the cheaper way for us to learn it.
+#
+# Only the VC++ runtime is copied, NOT the Universal CRT: CMAKE_INSTALL_UCRT_LIBRARIES is
+# deliberately left unset because ucrtbase.dll and the api-ms-win-crt-* set ship in-box from
+# Windows 10 on, and Windows 10 is this app's floor (see MinVersion in windows/installer/abgui.iss).
+# _SKIP stops the module emitting its own install() rules — those land in bin/ under the default
+# component, i.e. not beside the exe, where nothing would find them.
+set(CMAKE_INSTALL_SYSTEM_RUNTIME_LIBS_SKIP TRUE)
+include(InstallRequiredSystemLibraries)
+if(CMAKE_INSTALL_SYSTEM_RUNTIME_LIBS)
+  install(FILES ${CMAKE_INSTALL_SYSTEM_RUNTIME_LIBS}
+    DESTINATION "${INSTALL_BUNDLE_LIB_DIR}"
+    COMPONENT Runtime)
+else()
+  # A warning, not FATAL_ERROR: an unusual local VS layout should still be able to build and
+  # run, because the dev machine has the runtime installed anyway. The gate that matters is in
+  # CI — the release job hard-fails a Release dir with no msvcp140.dll — so no shippable
+  # artifact can quietly regress to depending on the redistributable.
+  message(WARNING "MSVC runtime redistributable not found - this build will require the "
+                  "Visual C++ Redistributable to be installed separately.")
+endif()
+
 # Copy the native assets provided by the build.dart from all packages.
 set(NATIVE_ASSETS_DIR "${PROJECT_BUILD_DIR}native_assets/windows/")
 install(DIRECTORY "${NATIVE_ASSETS_DIR}"

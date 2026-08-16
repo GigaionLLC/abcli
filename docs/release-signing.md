@@ -3,6 +3,9 @@
 `abgui` can be shipped as a Developer ID-signed and notarized macOS app. Local builds still
 work without secrets and fall back to ad-hoc signing.
 
+The Windows half — Authenticode signing, the Inno Setup installer, and the Microsoft Store
+package — is in **[windows-store-and-signing.md](windows-store-and-signing.md)**.
+
 This covers `abgui.app`, the embedded `abctl` inside that app bundle, and the DMG installer.
 The standalone cross-platform `abctl` archives remain signed through the existing
 Sigstore/cosign checksum flow.

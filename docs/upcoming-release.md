@@ -15,6 +15,17 @@ regresses.
 - **abgui runs on Windows and Linux.** One self-contained bundle per platform with `abctl` embedded
   inside it — no separate install, no `PATH` lookup. Linux ships a single-file **AppImage** (plus a
   tarball) so it runs on any distro without root or a package manager.
+- **Windows ships a real installer**, `abgui-setup-x64.exe` (Inno Setup): per-user by default with
+  no UAC prompt, Start-menu entry, optional desktop icon, silent install for fleet deployment, and
+  an uninstaller that removes everything it put down — while deliberately never touching the
+  private key or the run-log audit trail, which live outside the install directory. A **Microsoft
+  Store package** (`.msix`) is built on every tag too; it carries placeholder identity until a Store
+  reservation exists. See **[windows-store-and-signing.md](windows-store-and-signing.md)**.
+- **The Windows build is now self-contained.** The MSVC runtime (`msvcp140.dll`,
+  `vcruntime140*.dll`) is copied next to `abgui.exe` and CI hard-fails if it is not. Flutter links
+  it dynamically and it is not part of Windows, so every previous Windows artifact silently required
+  the Visual C++ Redistributable — invisible on any dev box, a missing-DLL dialog before first paint
+  on a clean one.
 - **A purpose-built table.** Every list screen shares one widget with sortable, resizable,
   type-aware columns; a severity stripe that encodes state in form rather than colour alone;
   filter chips with real semantics; in-cell match highlighting; multi-select with keyboard
@@ -68,4 +79,7 @@ regresses.
 - The Flutter app must BUILD on all three platforms in CI, and each build must prove the embedded
   `abctl` is present and executes from the location the runtime locator resolves.
 - The Linux job stays pinned to `ubuntu-22.04`; the artifact's glibc floor is the builder's.
-- Release assets are signed/notarized on macOS; Windows and Linux ship unsigned.
+- The Windows job hard-fails if the MSVC runtime is not next to `abgui.exe`, and the installer and
+  MSIX both refuse to package a bundle with no embedded `abctl.exe`.
+- Release assets are signed/notarized on macOS; Windows and Linux ship unsigned. The Windows
+  Authenticode steps are pre-wired and light up the moment the Azure signing credentials exist.

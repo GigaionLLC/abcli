@@ -43,5 +43,118 @@ dev_dependencies:
     sdk: flutter
   flutter_lints: ^5.0.0
 
+  # Packages the Windows build as an .msix for the Microsoft Store — see the msix_config
+  # block at the bottom of this file, `build-gui-flutter.sh windows-msix`, and the
+  # gui-flutter-windows job in .github/workflows/release.yml. DEV-ONLY: it is a command-line
+  # packager, nothing from it is compiled into or shipped inside the app, and it is never
+  # imported from lib/. Listing it under `dependencies` would put a build tool in the runtime
+  # dependency graph for no reason.
+  msix: ^3.18.0
+
 flutter:
   uses-material-design: true
+
+# --- Microsoft Store packaging (the `msix` dev dependency) --------------------------------
+#
+# Build with `../scripts/build-gui-flutter.sh windows-msix`, which packages what
+# `windows` ALREADY built (`--build-windows false`) rather than rebuilding — the same
+# "operate on existing output" split as `macos` / `macos-notarize`, and the reason the
+# MSIX is guaranteed to contain the exact bytes that were zipped and installer-ed.
+#
+# CI passes `--store`, which produces an UNSIGNED, Partner-Center-uploadable package
+# (Microsoft signs it on ingestion). A local `dart run msix:create` without `--store`
+# test-signs it instead, which installs for testing and is NOT submittable.
+#
+# == IDENTITY: the three values below marked PLACEHOLDER are inert on purpose ==
+#
+# Store identity is validated on UPLOAD, before certification even starts, and a mismatch
+# is a hard "Package acceptance validation error" — with the first failure MASKING the
+# rest, so they must be fixed as a set. None of it comes from a signing certificate.
+# `Package/Identity/Publisher` is a Partner-Center-assigned GUID and **this repo is
+# public**, so release.yml injects the real values from the repo variables
+# MSIX_IDENTITY_NAME / MSIX_PUBLISHER / MSIX_DISPLAY_NAME. Keeping obvious placeholders
+# here means a local build still runs end-to-end; it does not mean the local package can
+# be submitted. See docs/windows-store-and-signing.md.
+#
+# `publisher_display_name` is the ONE real value: it is the company name, already public
+# throughout this repo (LICENSE, NOTICE, the installer's AppPublisher, the macOS signing
+# subject), it is not a GUID, and it must match the Store account's publisher display name
+# byte-for-byte — "GigaionLLC" is a different string and is rejected.
+#
+# Gotcha: msix drives BOTH `Package/Properties/DisplayName` and the Start-menu tile
+# (`uap:VisualElements/@DisplayName`) from one `display_name`, so MSIX_DISPLAY_NAME has to
+# be a RESERVED app name AND is what users read on the tile. Reserving a short name is the
+# only way to get a short tile.
+#
+# ==========================================================================================
+# ==  AN MSIX MUST NOT DOWNLOAD EXECUTABLE CODE AT RUNTIME (Store policy 10.2.x).         ==
+# ==========================================================================================
+# abgui COMPLIES today, and only because of how it is packaged: `abctl.exe` is BUILT in the
+# release job and copied next to `abgui.exe` before this package is made, so the engine the
+# app spawns is already inside the .msix. Nothing is fetched on first run.
+#
+# If an "update abctl in place" feature is ever added — a self-updater, a "download the
+# matching CLI" button, anything that writes a new executable and then runs it — it MUST be
+# hard-disabled when the app is Store-packaged. Disabling the BUTTON is not enough; the
+# download itself is the policy violation, so the check has to gate the fetch.
+#
+# How to detect it: call the Win32 `GetCurrentPackageFullName` (kernel32) over dart:ffi.
+# It returns APPMODEL_ERROR_NO_PACKAGE (15700) for the zip / Inno-installer build and
+# ERROR_SUCCESS plus a package full name inside the MSIX. There is no Dart or Flutter API
+# for this — `Platform` and `package_info_plus` cannot tell the two apart. Treat any
+# failure to answer as "packaged" (fail closed): shipping an update path that silently
+# turns itself on is how a certification pass becomes a takedown.
+#
+# Belt and braces, the write would fail anyway — an installed MSIX lives under
+# `%ProgramFiles%\WindowsApps`, whose ACLs deny the running user write access — but "the
+# OS happened to stop us" is not a compliance argument, and the DOWNLOAD would already
+# have happened by then.
+msix_config:
+  # Overridden in CI by MSIX_DISPLAY_NAME. Left as the app's own name so a local package
+  # is recognisable; it is NOT a reserved Store name and will be rejected as one.
+  display_name: abgui
+  publisher_display_name: "Gigaion, LLC"
+  identity_name: PLACEHOLDER.SetMsixIdentityNameVar
+  publisher: CN=PLACEHOLDER-SET-MSIX-PUBLISHER-VAR
+  # Four parts, and the last MUST be 0 — the Store reserves the revision field. CI passes
+  # `--version <x.y.z>.0` derived from the release tag, so this only serves local builds
+  # and should track `version:` above.
+  msix_version: 0.4.27.0
+  # The same 1024x1024 source the AppImage and the macOS icon set come from; msix
+  # generates the whole tile/logo family from it.
+  logo_path: assets/icon/abgui.png
+  # == capabilities: the MINIMUM set, and why nothing else is here ==
+  #
+  # internetClient — the only one. abgui itself opens no sockets; `abctl.exe` does, and it
+  #   runs inside this package, so its traffic is this package's traffic: outbound TLS to
+  #   api-business.apple.com (the Apple Business API) and account.apple.com (the token
+  #   endpoint that ES256-signs a client assertion into an access token). A full-trust
+  #   package is not network-isolated, so omitting this would not *break* the app — it
+  #   would be an undisclosed capability, which is a certification finding, not a runtime
+  #   one. Declare what the product actually does.
+  #
+  # NOT internetClientServer — nothing listens. abgui talks to abctl over the child
+  #   process's stdout/stderr pipes, not a loopback HTTP server, so there is no inbound
+  #   socket to declare. (This is where a port from a GUI that drives a daemon over
+  #   127.0.0.1 would differ; ours does not.)
+  #
+  # NOT privateNetworkClientServer — Apple's endpoints are public internet. Declaring it
+  #   would claim LAN/domain reach the app never uses, and certification asks why.
+  #
+  # NOT broadFileSystemAccess / documentsLibrary — those are for AppContainer apps. This
+  #   package's entry point is `Windows.FullTrustApplication`, so the process already runs
+  #   on the user's own token and reads/writes the chosen GitOps workspace and
+  #   %LOCALAPPDATA%\abgui directly. Adding them buys nothing and adds a second restricted
+  #   capability to justify.
+  #
+  # runFullTrust is DELIBERATELY ABSENT from this list and must stay absent: msix emits
+  #   `<rescap:Capability Name="runFullTrust"/>` unconditionally (see msix's
+  #   appx_manifest.dart) because every Flutter Win32 app has that entry point. It is what
+  #   lets abgui spawn abctl.exe at all, so it cannot be removed — but it IS a restricted
+  #   capability, which means every packaged submission must fill Partner Center's
+  #   "Restricted capabilities" justification box. Text to paste is in
+  #   docs/windows-store-and-signing.md.
+  capabilities: internetClient
+  # Local builds are test-signed and installable; CI passes `--store` on the command line
+  # for the Partner-Center-ready, Microsoft-signed-on-ingestion package.
+  store: false

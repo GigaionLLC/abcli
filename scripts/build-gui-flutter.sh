@@ -11,11 +11,17 @@
 #   ./scripts/build-gui-flutter.sh macos           # build + embed + sign → .dmg and .zip
 #   ./scripts/build-gui-flutter.sh macos-notarize  # notarize + staple what `macos` just built
 #   ./scripts/build-gui-flutter.sh windows         # build + embed → .zip
-#   ./scripts/build-gui-flutter.sh linux           # build + embed → .AppImage + .tar.gz
+#   ./scripts/build-gui-flutter.sh windows-installer  # Inno Setup → abgui-setup-x64.exe
+#   ./scripts/build-gui-flutter.sh windows-msix       # Store package → .msix
+#   ./scripts/build-gui-flutter.sh linux           # build + embed → .AppImage
 #   ./scripts/build-gui-flutter.sh clean
 #
 # `macos` notarizes inline when APPLE_NOTARIZE=1; the release splits the two so the signed
 # assets can be uploaded before anyone waits on Apple.
+#
+# `windows-installer` and `windows-msix` REPACKAGE what `windows` already built — same split,
+# same reason as `macos-notarize`. All three Windows artifacts must contain byte-identical
+# payloads (the release signs the exes in place between them), so none of them may rebuild.
 #
 # `check` and `test` run anywhere (including the Linux dev container — see docker-compose.yml).
 # Each platform target MUST run on that platform: Flutter cross-compiles nothing for desktop,
@@ -35,6 +41,19 @@ log()  { printf '%s==>%s %s\n'      "$c_g" "$c_r" "$*" >&2; }
 warn() { printf '%swarning:%s %s\n' "$c_y" "$c_r" "$*" >&2; }
 die()  { printf '%serror:%s %s\n'   "$c_e" "$c_r" "$*" >&2; exit 1; }
 have() { command -v "$1" >/dev/null 2>&1; }
+
+# A warning that also survives into GitHub's run summary.
+#
+# `warn` writes to stderr, which is right for a human but disappears into a collapsed log
+# group in Actions — and the packaging warnings this is used for (a Store package built with
+# placeholder identity) are precisely the ones nobody reads until Partner Center rejects the
+# upload. `::warning::` must go to STDOUT: Actions parses workflow commands from the step's
+# stdout, so emitting it on stderr would be a no-op annotation that still looked correct here.
+gha_warning() {
+  warn "$*"
+  [ -n "${GITHUB_ACTIONS:-}" ] && printf '::warning::%s\n' "$*"
+  return 0
+}
 
 GUIDIR="$repo/abgui-flutter"
 APPNAME="abgui"
@@ -364,7 +383,165 @@ cmd_windows() {
   rm -rf "$stage"
   log "packaged $zip"
   warn "unsigned: Windows has no free notarization equivalent, so SmartScreen will warn until an"
-  warn "Authenticode/Azure Trusted Signing certificate is configured. See docs/release-signing.md."
+  warn "Authenticode/Azure Trusted Signing certificate is configured. See"
+  warn "docs/windows-store-and-signing.md."
+}
+
+# --- Windows: installer + Store package -------------------------------------------------------
+#
+# Both operate on the Release directory `windows` ALREADY produced, and neither rebuilds. That
+# is not just speed: the release job signs abgui.exe and abctl.exe IN PLACE between `windows`
+# and these two steps, so a rebuild here would quietly ship an installer and a Store package
+# containing UNSIGNED copies of the binaries the zip had signed. The three artifacts must be
+# three wrappers around one payload.
+
+# The directory `flutter build windows` writes, and the one all three artifacts package.
+win_release_dir() { printf '%s\n' "$GUIDIR/build/windows/x64/runner/Release"; }
+
+# require_windows_payload: fail with an actionable message if `windows` has not run, or ran
+# without embedding the CLI.
+#
+# The abctl.exe check is the important one. A bundle missing abgui.exe is obviously broken; a
+# bundle missing abctl.exe INSTALLS and LAUNCHES and then fails on the first command with
+# AbctlMissingBinary, which reads like a user's machine being wrong rather than the build being
+# wrong. Airclone shipped several releases with an engine-less installer behind exactly that
+# gap, because the bundling step was allowed to fail quietly.
+require_windows_payload() {
+  local rel; rel="$(win_release_dir)"
+  [ -d "$rel" ] || die "no $rel — run './scripts/build-gui-flutter.sh windows' first."
+  [ -f "$rel/$APPNAME.exe" ] || die "no $APPNAME.exe in $rel — the Flutter build did not complete."
+  [ -f "$rel/abctl.exe" ] || die \
+    "abctl.exe is not in $rel. The GUI is a facade over the CLI and does nothing without it; './scripts/build-gui-flutter.sh windows' is what copies it there. Refusing to package a CLI-less artifact."
+}
+
+# winpath <unix path>: the same path as a native Windows tool sees it.
+#
+# ISCC.exe and dart.exe are native binaries; they cannot open "/d/git/abcli/bin". MSYS would
+# normally translate arguments on the way through, but that translation is exactly what we turn
+# OFF below, so the conversion is done explicitly and visibly instead.
+winpath() {
+  if have cygpath; then cygpath -w "$1"; else printf '%s\n' "$1"; fi
+}
+
+# find_iscc: print a path to Inno Setup 6's command-line compiler, or return 1.
+#
+# The install location depends on how it was installed and there is no registry-free way to ask:
+# `winget install JRSoftware.InnoSetup` lands PER-USER in %LOCALAPPDATA%\Programs, while
+# `choco install innosetup` and the classic installer land in Program Files (x86). CI hits the
+# second, a developer box usually the first — checking only one is why "works in CI, missing
+# locally" (or the reverse) is the default experience with this tool.
+find_iscc() {
+  if have iscc; then command -v iscc; return 0; fi
+  if have ISCC; then command -v ISCC; return 0; fi
+  local dir candidate
+  # `ProgramFiles(x86)` is not a legal shell identifier, so it can only be read via printenv.
+  for dir in \
+    "${LOCALAPPDATA:-}/Programs" \
+    "$(printenv 'ProgramFiles(x86)' 2>/dev/null || true)" \
+    "${PROGRAMFILES:-}" \
+    "/c/Program Files (x86)" \
+    "/c/Program Files"; do
+    [ -n "$dir" ] || continue
+    candidate="$(cygpath -u "$dir" 2>/dev/null || printf '%s\n' "$dir")/Inno Setup 6/ISCC.exe"
+    if [ -f "$candidate" ]; then printf '%s\n' "$candidate"; return 0; fi
+  done
+  return 1
+}
+
+# windows-installer: compile abgui-flutter/windows/installer/abgui.iss into bin/.
+cmd_windows_installer() {
+  require_host windows
+  require_windows_payload
+  mkdir -p "$OUT"
+
+  local iscc
+  iscc="$(find_iscc)" || die \
+    "no Inno Setup 6 compiler (ISCC.exe) on this machine. Install it with 'winget install JRSoftware.InnoSetup' or 'choco install innosetup -y', then re-run. The zip from './scripts/build-gui-flutter.sh windows' is unaffected — only the .exe installer needs this."
+
+  local iss="$GUIDIR/windows/installer/$APPNAME.iss"
+  [ -f "$iss" ] || die "no $iss"
+
+  # BUILD_NAME, not VERSION: Inno derives the installer's VersionInfo from AppVersion, and
+  # `git describe` output like "v0.4.27-3-gabc1234" is not a version number. BUILD_NAME is
+  # already normalised to x.y.z for exactly this class of tool (see the header).
+  log "Inno Setup: $APPNAME-setup-x64.exe ($BUILD_NAME) with $iscc"
+
+  # MSYS argument translation OFF for this call.
+  #
+  # Git Bash rewrites arguments that look like POSIX paths before handing them to a native
+  # .exe, and every switch ISCC takes starts with a slash: `/DAppVersion=0.4.27` comes out the
+  # other side as something like `D:\Git\DAppVersion=0.4.27`, and ISCC then reports a missing
+  # or unreadable script rather than a bad switch. Both variables are needed — MSYS2_ARG_CONV_EXCL
+  # is the MSYS2 runtime's, MSYS_NO_PATHCONV is Git-for-Windows' — and paths are converted by
+  # `winpath` above instead.
+  MSYS2_ARG_CONV_EXCL='*' MSYS_NO_PATHCONV=1 "$iscc" \
+    "/DAppVersion=$BUILD_NAME" \
+    "/DSourceDir=$(winpath "$(win_release_dir)")" \
+    "/O$(winpath "$OUT")" \
+    "$(winpath "$iss")" 1>&2
+
+  local setup="$OUT/$APPNAME-setup-x64.exe"
+  [ -f "$setup" ] || die "ISCC reported success but produced no $setup"
+  log "packaged $setup"
+}
+
+# windows-msix: the Microsoft Store package.
+#
+# `--build-windows false` is what makes this repackage rather than rebuild (see the section
+# header). `--store` produces an UNSIGNED, Partner-Center-uploadable package that Microsoft
+# signs on ingestion — no certificate and no interactive prompt in CI. For a locally
+# INSTALLABLE test package, run `dart run msix:create` in abgui-flutter/ instead: pubspec's
+# `store: false` makes it test-sign one.
+#
+# Identity comes from the environment, not pubspec, because Package/Identity/Publisher is a
+# Partner-Center-assigned GUID and this repo is public. See the msix_config block in
+# abgui-flutter/pubspec.yaml and docs/windows-store-and-signing.md.
+cmd_windows_msix() {
+  require_host windows
+  require_flutter
+  # Deliberately BEFORE anything else: an MSIX whose payload has no abctl.exe is a Store
+  # package for an app that cannot run a command. CI marks this step continue-on-error, so
+  # dying here costs the (optional) Store lane for one tag instead of shipping a broken one.
+  require_windows_payload
+  mkdir -p "$OUT"
+
+  # Assemble the identity overrides. A missing variable is LOUD but not fatal: the package
+  # still builds — useful for testing the payload — and simply is not submittable. Silence
+  # here is how a placeholder-identity package gets uploaded and rejected.
+  local identity=() missing=() name
+  for name in MSIX_IDENTITY_NAME MSIX_PUBLISHER MSIX_DISPLAY_NAME; do
+    local value="${!name:-}"
+    if [ -z "$value" ]; then
+      missing+=("$name")
+      continue
+    fi
+    case "$name" in
+      MSIX_IDENTITY_NAME) identity+=(--identity-name "$value") ;;
+      MSIX_PUBLISHER)     identity+=(--publisher "$value") ;;
+      MSIX_DISPLAY_NAME)  identity+=(--display-name "$value") ;;
+    esac
+  done
+  if [ "${#missing[@]}" -gt 0 ]; then
+    gha_warning "MSIX identity variable(s) not set: ${missing[*]}. The package carries the pubspec PLACEHOLDER identity and Partner Center WILL reject it (package acceptance validation). Set them under Settings → Secrets and variables → Actions → Variables; see docs/windows-store-and-signing.md."
+  else
+    log "MSIX identity supplied from the environment (name + publisher + display name)"
+  fi
+
+  # x.y.z.0 — four parts, and the Store reserves the last one, so it must be 0. BUILD_NAME is
+  # the same normalised version the installer gets, which keeps the two artifacts from a single
+  # tag claiming different versions.
+  log "dart run msix:create --store ($BUILD_NAME.0)"
+  ( cd "$GUIDIR" && dart run msix:create \
+      --store \
+      --build-windows false \
+      --version "$BUILD_NAME.0" \
+      --output-path "$(winpath "$OUT")" \
+      --output-name "$APPNAME-$VERSION-windows-x64" \
+      "${identity[@]}" ) 1>&2
+
+  local msix="$OUT/$APPNAME-$VERSION-windows-x64.msix"
+  [ -f "$msix" ] || die "msix:create reported success but produced no $msix"
+  log "packaged $msix"
 }
 
 # --- Linux ----------------------------------------------------------------------------------
@@ -381,19 +558,14 @@ cmd_linux() {
   cp "$OUT/abctl" "$bundle/abctl"
   chmod +x "$bundle/abctl"
 
-  local stage="$OUT/$APPNAME-$VERSION-linux-x64"
-  rm -rf "$stage"; mkdir -p "$stage"
-  cp -R "$bundle"/. "$stage/"
-  local tgz="$OUT/$APPNAME-$VERSION-linux-x64.tar.gz"
-  rm -f "$tgz"
-  ( cd "$OUT" && tar -czf "$(basename "$tgz")" "$(basename "$stage")" )
-  rm -rf "$stage"
-  log "packaged $tgz"
-
+  # AppImage ONLY. A tarball of the same bundle used to ship beside it and was pure redundancy:
+  # the AppImage is one file, needs no root and no package manager, runs on any distro, and
+  # `--appimage-extract` recovers exactly the tarball's contents for anyone who wanted the raw
+  # tree. Two artifacts that differ only in convenience make a release page ask a question.
   make_appimage "$bundle"
 
-  # The glibc floor of BOTH artifacts is the BUILDER's, not Flutter's. Built on a modern
-  # runner they simply will not start on Debian 12 / Ubuntu 22.04 ("GLIBC_2.38 not found").
+  # The glibc floor of the AppImage is the BUILDER's, not Flutter's. Built on a modern
+  # runner it simply will not start on Debian 12 / Ubuntu 22.04 ("GLIBC_2.38 not found").
   # An AppImage bundles the GTK stack but NOT glibc, so "runs on any distro" is only true
   # because CI pins ubuntu-22.04 for this job. Keep it pinned.
   warn "glibc floor = this builder's. Build on the oldest distro you intend to support."
@@ -486,18 +658,21 @@ find_appimagetool() {
 
 cmd_clean() {
   rm -rf "$GUIDIR/build" "$OUT/$APPNAME.app" "$OUT/$APPNAME.AppDir" "$OUT/$APPNAME-"*-macos.* \
-         "$OUT/$APPNAME-"*-windows-*.zip "$OUT/$APPNAME-"*-linux-*.tar.gz \
+         "$OUT/$APPNAME-"*-windows-*.zip "$OUT/$APPNAME-"*-windows-*.msix \
+         "$OUT/$APPNAME-setup-x64.exe" "$OUT/$APPNAME-"*-linux-*.tar.gz \
          "$OUT/$APPNAME-"*-x86_64.AppImage "$OUT/notary-"*
   log "cleaned"
 }
 
 case "${1:-}" in
-  check)          cmd_check ;;
-  test)           cmd_test ;;
-  macos)          cmd_macos ;;
-  macos-notarize) cmd_macos_notarize ;;
-  windows)        cmd_windows ;;
-  linux)          cmd_linux ;;
-  clean)          cmd_clean ;;
-  *) die "usage: $0 {check|test|macos|macos-notarize|windows|linux|clean}" ;;
+  check)             cmd_check ;;
+  test)              cmd_test ;;
+  macos)             cmd_macos ;;
+  macos-notarize)    cmd_macos_notarize ;;
+  windows)           cmd_windows ;;
+  windows-installer) cmd_windows_installer ;;
+  windows-msix)      cmd_windows_msix ;;
+  linux)             cmd_linux ;;
+  clean)             cmd_clean ;;
+  *) die "usage: $0 {check|test|macos|macos-notarize|windows|windows-installer|windows-msix|linux|clean}" ;;
 esac

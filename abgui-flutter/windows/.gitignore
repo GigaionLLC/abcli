@@ -1,5 +1,10 @@
 flutter/ephemeral/
 
+# Inno Setup output. The build script redirects it to bin/ (already ignored at the repo root),
+# but the .iss carries OutputDir=. so that a bare `ISCC abgui.iss` also works — and that drops
+# a ~40 MB installer right here, next to the script, where it is very easy to `git add -A`.
+installer/*.exe
+
 # Visual Studio user-specific files.
 *.suo
 *.user

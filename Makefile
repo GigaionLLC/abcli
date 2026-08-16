@@ -4,7 +4,8 @@ VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 LDFLAGS := -X github.com/GigaionLLC/abcli/internal/cli.version=$(VERSION)
 
 .PHONY: build test vet lint fmt tidy clean \
-        gui-check gui-test gui-macos gui-windows gui-linux gui-clean
+        gui-check gui-test gui-macos gui-windows gui-windows-installer gui-windows-msix \
+        gui-linux gui-clean
 
 build:            ## build the binary into bin/
 	go build -ldflags "$(LDFLAGS)" -o bin/$(BINARY) ./cmd/abctl
@@ -38,6 +39,12 @@ gui-macos:        ## build + embed abctl + sign/notarize → .dmg + .zip   (macO
 	./scripts/build-gui-flutter.sh macos
 gui-windows:      ## build + embed abctl → .zip                          (Windows host only)
 	./scripts/build-gui-flutter.sh windows
+# The next two REPACKAGE what gui-windows built; they never rebuild, because the release signs
+# the binaries in place between them. Run gui-windows first or they refuse.
+gui-windows-installer: ## Inno Setup → abgui-setup-x64.exe              (after gui-windows)
+	./scripts/build-gui-flutter.sh windows-installer
+gui-windows-msix: ## Microsoft Store package → .msix                    (after gui-windows)
+	./scripts/build-gui-flutter.sh windows-msix
 gui-linux:        ## build + embed abctl → .AppImage + .tar.gz           (Linux host only)
 	./scripts/build-gui-flutter.sh linux
 gui-clean:        ## remove Flutter build products + packaged artifacts
