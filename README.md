@@ -3,21 +3,23 @@
 # abcli
 
 **abcli** is Apple Business command-line and desktop tooling from Gigaion, LLC. It ships two tools:
-**`abctl`**, the GitOps/imperative CLI, and **`abgui`**, a native macOS app that drives the same engine.
+**`abctl`**, the GitOps/imperative CLI, and **`abgui`**, a cross-platform desktop app that drives the same engine.
 
 `abctl` keeps your organization's built-in-MDM **Configurations** (custom `.mobileconfig` profiles) and
 full **Blueprint** membership — configurations, apps, packages, devices, users, and groups — in sync with a
 git-declarative desired state — read-only by default, every write gated, with an archive-on-overwrite audit
 trail. It also gives deep read-only inspection of the whole tenant (device detail + AppleCare, built-in-MDM
 enrollment posture, users/roles, `status device <serial>`) and gated device→MDM-server assignment.
-**[abgui](#abgui--native-macos-app)** is a native SwiftUI desktop app that bundles and shells out to `abctl`.
+**[abgui](#abgui--desktop-app)** is a Flutter desktop app (macOS, Windows, Linux) that bundles and shells out to `abctl`.
 
 > **Status:** pre-1.0. Auth + read + plan are live-verified. Config CRUD and blueprint config-membership
 > GitOps are built, unit-tested, and their core write operations verified live against a production Apple
 > Business tenant. The Apple **API v2.0/v2.1** surface (detail reads, posture, blueprint lifecycle + all six
 > membership collections, device assignment, MDM-server lifecycle) is built + unit-tested; its write verbs
 > await first live runs. The **abgui** desktop app (dashboard · browse + inspectors · diff/drift · gated
-> apply · archive rollback) is built and CI-green on macOS. See **[HANDOFF.md](HANDOFF.md)** for exact state
+> apply · archive rollback) is being rewritten in Flutter for macOS, Windows and Linux; the outgoing macOS-only
+> macOS-only SwiftUI build was removed at v0.4.28 (see **[docs/abgui-flutter-port.md](docs/abgui-flutter-port.md)**).
+> See **[HANDOFF.md](HANDOFF.md)** for exact state
 > and **[TODO.md](TODO.md)** for the roadmap.
 
 ---
@@ -27,7 +29,7 @@ enrollment posture, users/roles, `status device <serial>`) and gated device→MD
 | Tool | What it is | Ships as |
 |---|---|---|
 | `abctl` | GitOps + imperative CLI for the Apple Business API | Cross-platform Go binary |
-| `abgui` | Native macOS GUI on top of the embedded `abctl` engine | Signed/notarized macOS `.app` + DMG |
+| `abgui` | Cross-platform desktop GUI on top of the embedded `abctl` engine | Signed/notarized macOS `.app` + DMG, Windows `.zip`, Linux `.tar.gz` |
 
 ## Why abctl
 
@@ -62,12 +64,12 @@ them, so your MDM profiles and blueprint membership live in version control like
 - **Enterprise-grade engineering.** Cobra CLI, AGPL-3.0-or-later, race-tested unit + `httptest` suite,
   `golangci-lint` clean, gated live integration tests, and a Makefile — Linux/macOS CI.
 
-## abgui — native macOS app
+## abgui — desktop app
 
 ![abgui — the read-only Users view with roles (UI preview)](docs/assets/abgui-screenshot.png)
 
-**[abgui](abgui/)** puts a native **Swift / SwiftUI** control plane on top of `abctl`. It ships as one
-self-contained `.app` with a universal `abctl` **embedded inside it** (no separate install, no `PATH`),
+**[abgui](abgui-flutter/)** puts a **Flutter** control plane on top of `abctl`, for **macOS, Windows and Linux**.
+It ships as one self-contained bundle with `abctl` **embedded inside it** (no separate install, no `PATH`),
 reuses your `abctl` connection contexts, and re-implements none of the API — it shells out to the embedded
 CLI, decodes its JSON, and renders it.
 
@@ -113,12 +115,14 @@ CLI, decodes its JSON, and renders it.
   shown, copyable, revealable in Finder — with a self-describing header (abgui/abctl versions, context,
   workspace, the **redacted** command), an outcome footer, and 50-file / 14-day / 20 MiB retention.
 - **Archive / rollback:** browse every pre-overwrite live version abctl archived and restore one in a click.
-- **Mac distribution:** local builds are ad-hoc signed; tagged GitHub releases can be Developer ID-signed
-  and notarized when the Apple signing secrets are configured. Build it with `make gui-app` (macOS 14+).
+- **Distribution:** macOS builds are Developer ID-signed and notarized when the Apple signing secrets are
+  configured; Windows and Linux ship unsigned. Build with `make gui-macos` / `make gui-windows` /
+  `make gui-linux` — each on its own platform, since Flutter does not cross-compile desktop targets.
 
-See **[abgui/README.md](abgui/README.md)** and the design plan in **[docs/abgui-design.md](docs/abgui-design.md)**.
+See the port plan in **[docs/abgui-flutter-port.md](docs/abgui-flutter-port.md)** and the original design in
+**[docs/abgui-design.md](docs/abgui-design.md)**.
 
-> The image above is a UI preview. abgui is macOS-only and builds on a macOS runner.
+> The image above is a UI preview of the previous SwiftUI build, kept until a new screenshot is taken.
 
 ## Install & build
 
@@ -410,12 +414,12 @@ It's the same logic the workflows run, so local and CI never disagree.
 - **[docs/design-abctl.md](docs/design-abctl.md)** — architecture: bidirectional sync, newest-wins, archive-on-overwrite, blueprint membership.
 - **[docs/cicd.md](docs/cicd.md)** — the GitOps CI/CD pipelines (plan / apply / drift) and how to set them up.
 - **[docs/imperative-cli.md](docs/imperative-cli.md)** — design + roadmap for the imperative CLI + signed binary release.
-- **[docs/abgui-design.md](docs/abgui-design.md)** — the abgui (native macOS GUI) design plan.
+- **[docs/abgui-flutter-port.md](docs/abgui-flutter-port.md)** — the SwiftUI → Flutter rewrite: rationale, risk, what gets worse, cutover.
+- **[docs/abgui-design.md](docs/abgui-design.md)** — the original abgui design plan (still the behavioural spec).
 - **[docs/vpp-design.md](docs/vpp-design.md)** — Apps & Books (VPP) — verified App-and-Book-Management-API-v2 reference + plan.
 - **[docs/app-provisioning-research.md](docs/app-provisioning-research.md)** — 2026 Apple app-provisioning API decision handoff: Blueprints, VPP, external MDM, identity, and portal-only gaps.
 - **[docs/os-releases.md](docs/os-releases.md)** — GDMF software-release catalog, filters, and interpretation limits.
 - **[docs/upcoming-release.md](docs/upcoming-release.md)** — scope and release gates for the next update.
-- **[abgui/README.md](abgui/README.md)** — the desktop app: scope, layout, and how to build / run it.
 - **[docs/auth.md](docs/auth.md)** + **[docs/endpoints/](docs/endpoints/)** — the *live-verified* Apple Business API reference.
 - **[HANDOFF.md](HANDOFF.md)** / **[TODO.md](TODO.md)** — current state and roadmap.
 - **[AGENT.md](AGENT.md)** — instructions for AI agents working in this repo.

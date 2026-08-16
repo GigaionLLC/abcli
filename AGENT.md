@@ -45,5 +45,23 @@ make lint       # golangci-lint
 - `internal/reconcile` — the 3-way `Plan`; **`apply.go` (executor) is the next thing to build**.
 - `internal/cli` — Cobra commands (thin wrappers over the packages above).
 
+## The GUI (two trees, one of them frozen)
+- **`abgui-flutter/`** — the cross-platform desktop app (macOS/Windows/Linux). **All GUI work goes here.**
+  Dart package name is `abgui`, so imports are `package:abgui/...`. Build: `make gui-check` / `gui-test`
+  (anywhere, or `./tool/flutter.sh` in Docker) and `make gui-macos|gui-windows|gui-linux` (each on its own
+  platform — Flutter does not cross-compile desktop).
+- **The SwiftUI app is gone.** It was deleted at v0.4.28 once the Flutter app reached parity. If you need the
+  original — it remains the historical reference for behaviour — read it out of git history at tag `v0.4.27`
+  (`git show v0.4.27:abgui/...`). Do not resurrect it.
+- Read **[docs/abgui-flutter-port.md](docs/abgui-flutter-port.md)** before touching either. It records what
+  the port must not get wrong, what regresses, and the cutover checklist.
+- **The safety-critical rule for the port:** `abctl_args.dart` and its contract test come BEFORE any UI, and
+  `sync --apply` is not armed in the Flutter app until the `--prune` coupling, the decode-before-exit-code
+  rule, and the previewed-argv-equals-executed-argv invariant each have a Dart test.
+  The Swift `ContractTests.swift` was the specification; its assertions now live in
+  `abgui-flutter/test/abctl_args_contract_test.dart` and `test/write_safety_test.dart`, which are the
+  specification now. A source-scanning test also forbids `--prune` outside `abctl_args.dart`, so the
+  invariant survives its author.
+
 ## When you change behavior
 Update `docs/` + note it. Preserve the read-only-default, gated-write posture in every new command.

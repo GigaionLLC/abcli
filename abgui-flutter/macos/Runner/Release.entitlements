@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- DELIBERATELY UNSANDBOXED. `flutter create` writes app-sandbox=true here; leaving it
+     true breaks the two things this app is built around:
+
+       1. Process.start of the embedded abctl at Contents/Resources/abctl — a sandboxed
+          app may not exec an arbitrary child, so every command in the UI fails.
+       2. Reading the user's chosen GitOps workspace by a plain stored path, and reading
+          ~/.abctl/contexts.yaml. A sandboxed app only reaches paths it was handed through
+          a security-scoped bookmark, so the workspace stops resolving between launches.
+
+     The consequence is recorded, not discovered: an unsandboxed app CANNOT ship on the
+     Mac App Store. Distribution is Developer ID + notarization only, which is what abgui
+     has always done (the Swift bundle carries no sandbox entitlement either — see
+     abgui-swift/Packaging/Info.plist). Do not "fix" this file back to true. -->
+<plist version="1.0">
+<dict>
+</dict>
+</plist>

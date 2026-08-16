@@ -1,0 +1,155 @@
+# CI for abgui-flutter — the cross-platform GUI replacing the Swift app.
+#
+# Two tiers, on purpose:
+#   * `analyze-test` runs on ubuntu on EVERY touch. It is cheap, it is the only compile-time
+#     check code paths without tests get, and it is the gate that should stay required.
+#   * `build` runs the real desktop build on all three OSes. Flutter cross-compiles nothing for
+#     desktop, so each target needs its own runner. These prove the app still LINKS and that the
+#     embedded abctl lands in the bundle and executes — a packaging break otherwise surfaces at
+#     release time, which is the worst moment to find it.
+#
+# Paths-filtered so Go-only changes don't spend three runners. `cmd/abctl/**` and `internal/**`
+# ARE in the filter for the build tier: the GUI embeds abctl, so a CLI change can break the
+# bundle even when no Dart changed.
+name: GUI (Flutter)
+
+on:
+  pull_request:
+    paths:
+      - 'abgui-flutter/**'
+      - 'scripts/build-gui-flutter.sh'
+      - '.github/workflows/gui-flutter.yml'
+      - 'cmd/abctl/**'
+      - 'internal/**'
+      - 'go.mod'
+  push:
+    branches: [main]
+    paths:
+      - 'abgui-flutter/**'
+      - 'scripts/build-gui-flutter.sh'
+      - '.github/workflows/gui-flutter.yml'
+      - 'cmd/abctl/**'
+      - 'internal/**'
+      - 'go.mod'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  # PINNED, never floating "stable". A Flutter minor bump can change analyzer behaviour and
+  # `dart format` output on the same day for everyone, turning a green branch red with no
+  # commit to blame. Bump this deliberately, and keep docker-compose.yml's note in mind: the
+  # container image tracks stable and can drift ahead of this pin.
+  FLUTTER_VERSION: 3.47.0
+
+jobs:
+  analyze-test:
+    name: format + analyze + test
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: abgui-flutter
+    steps:
+      - uses: actions/checkout@v7
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          cache: true
+      - run: flutter pub get
+      - name: verify formatting
+        run: dart format --output=none --set-exit-if-changed .
+      - name: analyze
+        run: flutter analyze
+      - name: unit tests
+        run: flutter test --coverage
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: abgui-flutter-coverage
+          path: abgui-flutter/coverage/lcov.info
+          if-no-files-found: ignore
+
+  build:
+    name: build ${{ matrix.target }}
+    needs: analyze-test
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: macos
+            runs-on: macos-15
+          - target: windows
+            runs-on: windows-latest
+          # PINNED to 22.04, not ubuntu-latest. A Flutter Linux binary's glibc floor is the
+          # BUILDER's: built on 24.04 (glibc 2.39) it refuses to start on Debian 12 or Ubuntu
+          # 22.04 with "GLIBC_2.38 not found". Building on the oldest distro we support is the
+          # only fix — there is no Flutter flag for this.
+          - target: linux
+            runs-on: ubuntu-22.04
+    runs-on: ${{ matrix.runs-on }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0 # full history → a matching `git describe` version
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true # to compile the embedded abctl
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          cache: true
+
+      - name: install Linux desktop build deps
+        if: matrix.target == 'linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build libgtk-3-dev
+
+      - name: build + embed abctl
+        shell: bash
+        run: ./scripts/build-gui-flutter.sh ${{ matrix.target }}
+
+      # Prove the packaging contract, not just that the compiler was happy: the embedded CLI
+      # must be present AND runnable from where abctl_locator.dart looks for it.
+      - name: verify the embedded abctl (macOS)
+        if: matrix.target == 'macos'
+        run: |
+          lipo -info bin/abgui.app/Contents/Resources/abctl   # expect: arm64 x86_64
+          bin/abgui.app/Contents/Resources/abctl --version    # embedded CLI runs, exit 0
+          ls -la bin/abgui-*-macos.dmg bin/abgui-*-macos.zip
+
+      - name: verify the embedded abctl (Windows)
+        if: matrix.target == 'windows'
+        shell: bash
+        run: |
+          ./abgui-flutter/build/windows/x64/runner/Release/abctl.exe --version
+          ls -la bin/abgui-*-windows-x64.zip
+
+      - name: verify the embedded abctl (Linux)
+        if: matrix.target == 'linux'
+        run: |
+          ./abgui-flutter/build/linux/x64/release/bundle/abctl --version
+          ls -la bin/abgui-*-linux-x64.tar.gz bin/abgui-*-x86_64.AppImage
+          # Verify the AppImage's CONTENTS rather than launching it: abgui is a GUI and has no
+          # --version, so running it headless would prove nothing that `|| true` didn't hide.
+          # --appimage-extract needs no FUSE, which GitHub runners lack.
+          ( cd "$RUNNER_TEMP" && "$GITHUB_WORKSPACE"/bin/abgui-*-x86_64.AppImage --appimage-extract >/dev/null
+            test -x squashfs-root/AppRun                       # entry point present + executable
+            test -f squashfs-root/abgui.desktop                # required at the AppDir root
+            test -f squashfs-root/usr/bin/data/flutter_assets/AssetManifest.bin  # Flutter assets came along
+            ./squashfs-root/usr/bin/abctl --version )          # the embedded CLI runs from inside the image
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: abgui-flutter-${{ matrix.target }}
+          path: |
+            bin/abgui-*-macos.dmg
+            bin/abgui-*-macos.zip
+            bin/abgui-*-windows-x64.zip
+            bin/abgui-*-linux-x64.tar.gz
+            bin/abgui-*-x86_64.AppImage
+          if-no-files-found: error

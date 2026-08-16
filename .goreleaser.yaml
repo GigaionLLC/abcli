@@ -77,8 +77,16 @@ release:
     Cross-platform binaries are attached below. Verify a download:
     `cosign verify-blob --bundle checksums.txt.sigstore.json checksums.txt`
 
-    ### abgui — macOS app (self-contained; a universal abctl is embedded inside it)
-    Prefer **`abgui-*-macos-notarized.dmg`** when present. **`abgui-*-macos-signed.dmg`** is uploaded first while Apple notarization runs.
+    ### abgui — desktop app (self-contained; abctl is embedded inside it, no separate install)
+    | You are on | Download |
+    |---|---|
+    | macOS | **`abgui-*-macos-notarized.dmg`** when present, else `abgui-*-macos-signed.dmg` |
+    | Windows | `abgui-*-windows-x64.zip` |
+    | Linux | **`abgui-*-x86_64.AppImage`** — one file, any distro, no install. Or `abgui-*-linux-x64.tar.gz` |
+
+    The signed macOS assets are uploaded first, while Apple notarization runs; the notarized
+    ones replace them a few minutes later and install without a Gatekeeper prompt.
+    Windows and Linux builds are unsigned — Windows will show a SmartScreen warning.
 
     ---
     Licensed **AGPL-3.0-or-later**. Copyright 2026 Gigaion, LLC.

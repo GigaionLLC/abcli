@@ -1,0 +1,47 @@
+name: abgui
+description: "Apple Business Manager GitOps, with a GUI. A desktop front-end for the abctl CLI."
+publish_to: 'none'
+
+# The version is NOT the source of truth — releases are cut from a `v*` git tag and the
+# real version is injected at build time (see scripts/build-gui-flutter.sh, which passes
+# --build-name/--build-number from `git describe`). This line only keeps `flutter run`
+# and a bare `flutter build` from failing, and should track the last shipped tag.
+version: 0.4.27+1
+
+environment:
+  sdk: ^3.12.0
+
+dependencies:
+  flutter:
+    sdk: flutter
+
+  # State. One provider per pane rather than one app-wide `isLoading`, because the Swift
+  # app's single shared flag is exactly what made every screen blank whenever any one of
+  # them was refreshing. See docs/abgui-flutter-port.md §"what we are NOT porting".
+  flutter_riverpod: ^2.6.1
+
+  # Where the app keeps its own files: the run-log directory and the PEM written for a
+  # pasted private key (the Swift CredentialStore's Application Support tree).
+  path_provider: ^2.1.4
+
+  # Remembered settings: the chosen GitOps workspace path, the active context, window
+  # geometry. The Swift app used @AppStorage/UserDefaults for the same job.
+  shared_preferences: ^2.3.0
+
+  # Native folder picker for choosing the GitOps workspace, and the save dialog behind
+  # CSV export.
+  file_selector: ^1.0.0
+
+  # Opening documentation links from the About/Settings surface.
+  url_launcher: ^6.3.0
+
+  # The app's own version for the run-log header and the About panel.
+  package_info_plus: ^8.0.0
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^5.0.0
+
+flutter:
+  uses-material-design: true

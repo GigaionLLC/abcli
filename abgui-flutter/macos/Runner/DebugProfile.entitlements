@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Unsandboxed for the same reason as Release.entitlements — see the note there.
+     Debug keeps allow-jit (the Dart VM needs it) and network.server (the Flutter tool
+     attaches to the running app over a local socket); both are debug-only and must NOT
+     be copied into Release. -->
+<plist version="1.0">
+<dict>
+	<key>com.apple.security.cs.allow-jit</key>
+	<true/>
+	<key>com.apple.security.network.server</key>
+	<true/>
+</dict>
+</plist>

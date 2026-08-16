@@ -1,0 +1,37 @@
+# Static analysis for abgui. `flutter analyze` is a REQUIRED gate in CI (see
+# .github/workflows/gui-flutter.yml) — it is the only compile-time check this app gets on
+# Linux/Windows runners, and the only one at all for code paths no test exercises.
+
+analyzer:
+  exclude:
+    # Generated + platform scaffolding. `flutter create` writes these and regenerates
+    # parts of them (GeneratedPluginRegistrant, generated_plugin_registrant.cc) on every
+    # `pub get`, so linting them produces churn nobody can fix.
+    - build/**
+    - linux/**
+    - macos/**
+    - windows/**
+    - android/**
+    - ios/**
+    - web/**
+  errors:
+    # An unawaited Future in this app means a command silently never ran, or ran twice.
+    # That is the single easiest way to reintroduce the class of bug the Swift app had
+    # (a stranded loading flag that froze a screen), so it is an ERROR, not a hint.
+    unawaited_futures: error
+
+include: package:flutter_lints/flutter.yaml
+
+linter:
+  rules:
+    # The repo's Swift and Go both use explicit types at API boundaries; keep Dart honest
+    # the same way rather than leaning on inference across file boundaries.
+    - always_declare_return_types
+    # `print` writes to a console no packaged desktop user ever sees. Diagnostics belong
+    # in the run log (lib/src/abctl/run_log.dart), which is the thing we ask users to send.
+    - avoid_print
+    - prefer_single_quotes
+    - unawaited_futures
+    # Every command this app runs reaches a live Apple Business tenant. A swallowed
+    # exception is a write whose outcome nobody checked.
+    - only_throw_errors

@@ -44,14 +44,23 @@ jobs:
             dist/*.zip
             dist/checksums.txt
 
-  # abgui is a macOS .app (with a universal abctl embedded) — GoReleaser can't build it,
-  # so a macOS job packages the DMG installer + zip and uploads them to the SAME release.
-  gui-release:
-    name: abgui signed installer (.dmg)
+  # --- abgui — the desktop app, one job per platform --------------------------------------
+  #
+  # GoReleaser cannot build these: Flutter does not cross-compile desktop, so each target needs a
+  # runner of its own. They attach to the SAME GitHub Release the goreleaser job created.
+  #
+  # macOS signs and uploads BEFORE notarizing, so an Apple notary outage can never leave a release
+  # with no installable asset. .github/workflows/gui-flutter.yml builds all three platforms on every
+  # PR, so a packaging break surfaces there rather than here.
+
+  gui-flutter-macos:
+    name: abgui (Flutter) macOS installer
     needs: goreleaser # the GitHub Release must exist before we upload to it
     runs-on: macos-15
+    timeout-minutes: 60
     env:
       HAS_APPLE_SIGNING_CERT: ${{ secrets.APPLE_DEVELOPER_ID_APPLICATION_P12_BASE64 != '' }}
+      HAS_APPLE_NOTARY_CREDS: ${{ secrets.APPLE_ID != '' && secrets.APPLE_APP_SPECIFIC_PASSWORD != '' && secrets.APPLE_TEAM_ID != '' }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -59,6 +68,11 @@ jobs:
       - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
+          cache: true # to compile the embedded abctl
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          flutter-version: 3.47.0 # keep in step with .github/workflows/gui-flutter.yml
           cache: true
       - name: import Developer ID certificate
         if: ${{ env.HAS_APPLE_SIGNING_CERT == 'true' }}
@@ -84,36 +98,55 @@ jobs:
           security set-key-partition-list -S apple-tool:,apple: -s -k "$APPLE_KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
           security find-identity -v -p codesigning "$KEYCHAIN_PATH"
           echo "APPLE_CODESIGN_IDENTITY=${APPLE_CODESIGN_IDENTITY:-Developer ID Application}" >> "$GITHUB_ENV"
-      - name: build + package abgui (DMG + zip, universal abctl embedded)
+
+      - name: build + sign abgui (DMG + zip, universal abctl embedded)
         env:
-          APPLE_NOTARIZE: "0"
-        run: ./scripts/build-gui.sh dist
-      - name: label signed abgui artifacts
-        run: |
-          for f in bin/abgui-*-macos.dmg; do mv "$f" "${f%.dmg}-signed.dmg"; done
-          for f in bin/abgui-*-macos.zip; do mv "$f" "${f%.zip}-signed.zip"; done
-      - name: upload abgui to the release
+          APPLE_NOTARIZE: "0" # notarized separately below so signed assets land first
+        run: ./scripts/build-gui-flutter.sh macos
+
+      # Upload the SIGNED assets before anyone waits on Apple. A signed-but-unstapled build is
+      # installable (one Gatekeeper prompt); a release that died waiting on the notary ships
+      # nothing. This is the same guarantee the Swift jobs above give, in one job instead of two.
+      - name: label + upload signed abgui assets
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          set -euo pipefail
+          for f in bin/abgui-*-macos.dmg; do cp "$f" "${f%.dmg}-signed.dmg"; done
+          for f in bin/abgui-*-macos.zip; do cp "$f" "${f%.zip}-signed.zip"; done
           gh release upload "${GITHUB_REF_NAME}" \
             bin/abgui-*-macos-signed.dmg \
             bin/abgui-*-macos-signed.zip \
             --clobber
 
-  gui-notarize:
-    name: abgui notarize + upload notarized assets
-    needs: gui-release
-    runs-on: macos-15
-    # Safety net only: the real fast-fail guard is APPLE_NOTARY_TIMEOUT (per Apple submit).
-    timeout-minutes: 45
-    # Best-effort: gui-release already shipped usable *-signed assets, so a notary failure
-    # must not fail the release. With `notarytool log` now always dumped, inspect this job's
-    # log to see Apple's verdict when it goes yellow.
-    continue-on-error: true
-    env:
-      HAS_APPLE_SIGNING_CERT: ${{ secrets.APPLE_DEVELOPER_ID_APPLICATION_P12_BASE64 != '' }}
-      HAS_APPLE_NOTARY_CREDS: ${{ secrets.APPLE_ID != '' && secrets.APPLE_APP_SPECIFIC_PASSWORD != '' && secrets.APPLE_TEAM_ID != '' }}
+      - name: notarize + staple
+        id: notarize
+        continue-on-error: true # signed assets already shipped; a notary outage must not fail the release
+        if: ${{ env.HAS_APPLE_SIGNING_CERT == 'true' && env.HAS_APPLE_NOTARY_CREDS == 'true' }}
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_NOTARY_TIMEOUT: "20m"
+        run: ./scripts/build-gui-flutter.sh macos-notarize
+
+      - name: label + upload notarized abgui assets
+        if: ${{ steps.notarize.outcome == 'success' }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          for f in bin/abgui-*-macos.dmg; do mv "$f" "${f%.dmg}-notarized.dmg"; done
+          for f in bin/abgui-*-macos.zip; do mv "$f" "${f%.zip}-notarized.zip"; done
+          gh release upload "${GITHUB_REF_NAME}" \
+            bin/abgui-*-macos-notarized.dmg \
+            bin/abgui-*-macos-notarized.zip \
+            --clobber
+
+  gui-flutter-windows:
+    name: abgui (Flutter) Windows
+    needs: goreleaser
+    runs-on: windows-latest
     steps:
       - uses: actions/checkout@v7
         with:
@@ -122,57 +155,49 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
-      - name: import Developer ID certificate
-        if: ${{ env.HAS_APPLE_SIGNING_CERT == 'true' && env.HAS_APPLE_NOTARY_CREDS == 'true' }}
-        env:
-          APPLE_DEVELOPER_ID_APPLICATION_P12_BASE64: ${{ secrets.APPLE_DEVELOPER_ID_APPLICATION_P12_BASE64 }}
-          APPLE_DEVELOPER_ID_APPLICATION_P12_PASSWORD: ${{ secrets.APPLE_DEVELOPER_ID_APPLICATION_P12_PASSWORD }}
-          APPLE_CODESIGN_IDENTITY: ${{ secrets.APPLE_CODESIGN_IDENTITY }}
-          APPLE_KEYCHAIN_PASSWORD: ${{ secrets.APPLE_KEYCHAIN_PASSWORD || github.run_id }}
-        run: |
-          set -euo pipefail
-          CERTIFICATE_PATH="$RUNNER_TEMP/developer_id_application.p12"
-          KEYCHAIN_PATH="$RUNNER_TEMP/app-signing.keychain-db"
-
-          echo "$APPLE_DEVELOPER_ID_APPLICATION_P12_BASE64" | base64 --decode > "$CERTIFICATE_PATH"
-          security create-keychain -p "$APPLE_KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
-          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
-          security unlock-keychain -p "$APPLE_KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
-          security import "$CERTIFICATE_PATH" \
-            -P "$APPLE_DEVELOPER_ID_APPLICATION_P12_PASSWORD" \
-            -A -t cert -f pkcs12 \
-            -k "$KEYCHAIN_PATH"
-          security list-keychains -d user -s "$KEYCHAIN_PATH" $(security list-keychains -d user | sed 's/"//g')
-          security set-key-partition-list -S apple-tool:,apple: -s -k "$APPLE_KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
-          security find-identity -v -p codesigning "$KEYCHAIN_PATH"
-          echo "APPLE_CODESIGN_IDENTITY=${APPLE_CODESIGN_IDENTITY:-Developer ID Application}" >> "$GITHUB_ENV"
-      - name: build + notarize abgui
-        if: ${{ env.HAS_APPLE_SIGNING_CERT == 'true' && env.HAS_APPLE_NOTARY_CREDS == 'true' }}
-        env:
-          APPLE_NOTARIZE: "1"
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-          # Per-submission cap: fail fast with a `notarytool log` dump instead of hanging
-          # to the 45-min job SIGKILL. The app zip + DMG are submitted concurrently, so the
-          # release waits on Apple roughly once (max), not twice (sum). Retries fire ONLY on
-          # fast upload failures (never after a polling timeout), so worst-case notary
-          # wall-clock is ~20m + brief retries — under the job cap even with the rebuild.
-          # See notary_submit in scripts/build-gui.sh.
-          APPLE_NOTARY_TIMEOUT: "20m"
-          APPLE_NOTARY_RETRIES: "2"
-        run: ./scripts/build-gui.sh dist
-      - name: label notarized abgui artifacts
-        if: ${{ env.HAS_APPLE_SIGNING_CERT == 'true' && env.HAS_APPLE_NOTARY_CREDS == 'true' }}
-        run: |
-          for f in bin/abgui-*-macos.dmg; do mv "$f" "${f%.dmg}-notarized.dmg"; done
-          for f in bin/abgui-*-macos.zip; do mv "$f" "${f%.zip}-notarized.zip"; done
-      - name: upload notarized abgui assets
-        if: ${{ env.HAS_APPLE_SIGNING_CERT == 'true' && env.HAS_APPLE_NOTARY_CREDS == 'true' }}
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          flutter-version: 3.47.0
+          cache: true
+      - name: build + package abgui (Windows x64)
+        shell: bash
+        run: ./scripts/build-gui-flutter.sh windows
+      # Unsigned: there is no free Windows equivalent of Apple notarization, so SmartScreen
+      # warns until an Authenticode / Azure Trusted Signing certificate is configured.
+      - name: upload abgui Windows asset
+        shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release upload "${GITHUB_REF_NAME}" bin/abgui-*-windows-x64.zip --clobber
+
+  gui-flutter-linux:
+    name: abgui (Flutter) Linux
+    needs: goreleaser
+    # PINNED to 22.04, not ubuntu-latest — a Flutter Linux binary's glibc floor is the
+    # BUILDER's. Built on 24.04 it refuses to start on Debian 12 / Ubuntu 22.04 with
+    # "GLIBC_2.38 not found", and there is no Flutter flag that changes this.
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          flutter-version: 3.47.0
+          cache: true
+      - name: install Linux desktop build deps
         run: |
-          gh release upload "${GITHUB_REF_NAME}" \
-            bin/abgui-*-macos-notarized.dmg \
-            bin/abgui-*-macos-notarized.zip \
-            --clobber
+          sudo apt-get update
+          sudo apt-get install -y ninja-build libgtk-3-dev
+      - name: build + package abgui (Linux x64)
+        run: ./scripts/build-gui-flutter.sh linux
+      - name: upload abgui Linux asset
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release upload "${GITHUB_REF_NAME}" bin/abgui-*-x86_64.AppImage bin/abgui-*-linux-x64.tar.gz --clobber

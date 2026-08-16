@@ -1,5 +1,18 @@
 # abgui — design plan
 
+> **Read this first — this describes an implementation that no longer exists.** The SwiftUI macOS
+> app was removed at v0.4.28; the GUI is now Flutter, for macOS, Windows and Linux. See
+> **[abgui-flutter-port.md](abgui-flutter-port.md)**. The Swift source is in git history at tag
+> `v0.4.27` (`git show v0.4.27:abgui/...`).
+>
+> Everything below about **file layout, Swift types, build scripts, Makefile targets and CI** is
+> therefore obsolete — none of those paths exist any more.
+>
+> Everything below about **behaviour** — the abctl facade, the exit-code contract (0/1/3), the
+> decode-before-exit-code rule, argv construction, redaction, the write-gating posture, screen
+> semantics — remains the **authoritative specification** and is what the Flutter app must
+> reproduce. It is the reason this file is kept rather than deleted with the code.
+
 `abgui` is a native **Swift / SwiftUI** macOS application that puts a graphical control plane on top of
 [`abctl`](design-abctl.md), the GitOps CLI for the **Apple Business API** (built-in MDM: **Configurations**
 + **Blueprints**), developed by **Gigaion, LLC**. abgui is **frontend-only**: it shells out to `abctl`,

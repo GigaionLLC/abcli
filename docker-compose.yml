@@ -1,0 +1,43 @@
+# Container-based dev workflow for abgui-flutter (the cross-platform GUI).
+#
+# What a Linux container CAN do here: `flutter pub get`, `dart format`, `flutter analyze`,
+# `flutter test`, and the Linux desktop build. What it CANNOT do: the Windows build (needs
+# MSVC) and anything macOS — building, code-signing, notarizing and stapling all require a
+# real macOS host with Xcode, and no container or third-party tool substitutes. Those come
+# out of GitHub Actions runners (see .github/workflows/gui-flutter.yml).
+#
+# The pub cache lives in a Docker NAMED VOLUME rather than the bind mount: it is faster, it
+# survives across runs, and it never shows up in `git status`. Do NOT move PUB_CACHE onto
+# the bind mount — cross-mount atomic renames fail and it pollutes the working tree.
+#
+# Usage:
+#   docker compose run --rm flutter flutter --version
+#   docker compose run --rm flutter flutter pub get
+#   docker compose run --rm flutter flutter analyze
+#   docker compose run --rm flutter flutter test
+#
+# Helper wrappers: tool/flutter.sh (bash) and tool/flutter.ps1 (PowerShell).
+
+services:
+  flutter:
+    # NOTE: this image tracks `stable` and can LAG the version CI pins in
+    # .github/workflows/gui-flutter.yml. That is fine for a quick analyze/test, but do NOT
+    # run `dart format` from it unless `flutter --version` here matches the pin — an older
+    # formatter reformats files the CI gate then rejects, which is a genuinely confusing
+    # way to fail a green-looking branch. The native SDK on the dev machine is the one to
+    # keep in step with the pin.
+    image: ghcr.io/cirruslabs/flutter:stable
+    working_dir: /work/abgui-flutter
+    volumes:
+      - ./:/work
+      - pub-cache:/root/.pub-cache
+    environment:
+      PUB_CACHE: /root/.pub-cache
+      # Mark the bind-mounted repo safe for the SDK's own git calls (it shells out to git
+      # to resolve its version), otherwise every command warns about dubious ownership.
+      GIT_CONFIG_COUNT: '1'
+      GIT_CONFIG_KEY_0: safe.directory
+      GIT_CONFIG_VALUE_0: '*'
+
+volumes:
+  pub-cache:
