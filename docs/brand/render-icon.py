@@ -45,10 +45,15 @@ N = S * SS
 HERE = pathlib.Path(__file__).parent
 
 # --- palette -------------------------------------------------------------------
-INK = (235, 244, 252)        # the window, the prompt, the letters
-GROUND_TOP = (18, 57, 92)    # cyanotype — the app's own theme
-GROUND_BOT = (7, 24, 39)
-AMBER = (240, 168, 74)       # the merge: the one thing that happens
+INK = (255, 255, 255)        # the window, the prompt, the letters
+# Indigo -> violet, on the DIAGONAL. Sampled from the original abgui mark
+# (git show v0.4.27:abgui/Resources/AppIcon.png): #525FEA top-left, #633AD9
+# bottom-right, dominant ~#5840E0. Carried over deliberately — it is the colour
+# the product has always been, and the one people recognise it by.
+GROUND_TOP = (82, 95, 234)   # #525FEA
+GROUND_BOT = (99, 58, 217)   # #633AD9
+AMBER = (255, 176, 60)       # the merge. Warm against violet: the one complementary
+                             # accent on the tile, so the eye lands on what HAPPENS
 
 # --- geometry ------------------------------------------------------------------
 TILE_RADIUS = 196
@@ -121,10 +126,15 @@ def _glyph_b(mask):
 def render_png(path: pathlib.Path) -> None:
     img = Image.new('RGBA', (N, N), (0, 0, 0, 0))
     d = ImageDraw.Draw(img)
-    for y in range(N):
-        t = y / (N - 1)
-        d.line([(0, y), (N, y)],
-               fill=tuple(round(a + (b - a) * t) for a, b in zip(GROUND_TOP, GROUND_BOT)) + (255,))
+    # Diagonal, top-left to bottom-right, matching the original mark. Drawn as
+    # anti-diagonal bands (constant x+y) rather than rows, which is the cheap way to
+    # get a 45-degree ramp out of a line primitive.
+    span = 2 * (N - 1)
+    for i in range(span + 1):
+        t = i / span
+        col = tuple(round(a + (b - a) * t) for a, b in zip(GROUND_TOP, GROUND_BOT)) + (255,)
+        d.line([(max(0, i - (N - 1)), min(i, N - 1)), (min(i, N - 1), max(0, i - (N - 1)))],
+               fill=col, width=2)
 
     ink = Image.new('L', (N, N), 0)
     idr = ImageDraw.Draw(ink)
@@ -186,7 +196,7 @@ def render_svg(path: pathlib.Path) -> None:
        does (reconciles two states into one). AB is Apple Business, and also the two things
        being merged — declared and live. -->
   <defs>
-    <linearGradient id="ground" x1="0" y1="0" x2="0.35" y2="1">
+    <linearGradient id="ground" x1="0" y1="0" x2="1" y2="1">
       <stop offset="0" stop-color="{_hex(GROUND_TOP)}"/>
       <stop offset="1" stop-color="{_hex(GROUND_BOT)}"/>
     </linearGradient>

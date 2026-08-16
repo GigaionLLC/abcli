@@ -8,9 +8,9 @@
        does (reconciles two states into one). AB is Apple Business, and also the two things
        being merged — declared and live. -->
   <defs>
-    <linearGradient id="ground" x1="0" y1="0" x2="0.35" y2="1">
-      <stop offset="0" stop-color="#12395C"/>
-      <stop offset="1" stop-color="#071827"/>
+    <linearGradient id="ground" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#525FEA"/>
+      <stop offset="1" stop-color="#633AD9"/>
     </linearGradient>
     <clipPath id="tile"><rect width="1024" height="1024" rx="196" ry="196"/></clipPath>
   </defs>
@@ -18,15 +18,15 @@
     <rect width="1024" height="1024" fill="url(#ground)"/>
 
     <!-- the merge: branches out of the window, into one arrow -->
-    <g stroke="#F0A84A" stroke-width="46" stroke-linecap="round" fill="none">
+    <g stroke="#FFB03C" stroke-width="46" stroke-linecap="round" fill="none">
       <path d="M320,624 L512,806"/>
       <path d="M704,624 L512,806"/>
       <path d="M512,792 L512,856"/>
     </g>
-    <polygon points="512,952 404,842 620,842" fill="#F0A84A"/>
+    <polygon points="512,952 404,842 620,842" fill="#FFB03C"/>
 
     <!-- the terminal window -->
-    <g stroke="#EBF4FC" fill="none" stroke-linecap="round" stroke-linejoin="round">
+    <g stroke="#FFFFFF" fill="none" stroke-linecap="round" stroke-linejoin="round">
       <!-- Inset by half the stroke. Pillow draws a rectangle outline INSIDE the given box,
            whereas SVG centres a stroke on its path — so emitting the same numbers to both
            renderers would put the SVG's frame half a stroke-width proud on every side. The
@@ -53,7 +53,7 @@
 
     <!-- title-bar dots, in ink: the title bar is a RULE, not a filled bar, so knocking
          them out in the ground colour produced nothing visible at all. -->
-    <g fill="#EBF4FC">
+    <g fill="#FFFFFF">
       <circle cx="196" cy="220" r="17"/>
       <circle cx="256" cy="220" r="17"/>
       <circle cx="316" cy="220" r="17"/>
