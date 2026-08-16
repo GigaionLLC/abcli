@@ -105,8 +105,9 @@ NOTARY_TIMEOUT="${APPLE_NOTARY_TIMEOUT:-20m}"
 # binaries are not signed at all) instead of producing something that looks shippable.
 SIGNED="${ABGUI_SIGNED:-0}"
 
-# unsigned_suffix: "-unsigned" unless a signing step ran. Used for Windows and Linux, which have
-# a signature or do not; macOS has the extra notarization state and uses its own suffix below.
+# unsigned_suffix: "-unsigned" unless a signing step ran. WINDOWS ONLY. macOS has the extra
+# notarization state and uses "-unnotarized"; Linux has no suffix at all, because nothing on
+# Linux refuses to run an unsigned binary — see the note in make_appimage.
 unsigned_suffix() {
   truthy "$SIGNED" && printf '' || printf -- '-unsigned'
 }
@@ -654,10 +655,16 @@ cmd_linux() {
 make_appimage() {
   local bundle="$1"
   local appdir="$OUT/$APPNAME.AppDir"
-  # Linux has no signing story at all today, so this is "-unsigned" in practice always — which
-  # is the honest label, not a placeholder. It reads from the same switch as Windows so that if
-  # Linux signing ever exists, the name stops lying on its own.
-  local outfile="$OUT/$APPNAME-$VERSION-x86_64$(unsigned_suffix).AppImage"
+  # NO trust suffix on Linux, deliberately — unlike Windows and macOS.
+  #
+  # "-unsigned" exists to warn that an OS will refuse or complain. Linux does not gatekeep:
+  # there is no SmartScreen and no Gatekeeper, so an AppImage runs either way and the label
+  # would warn about nothing. What a Linux user actually wants is a way to VERIFY, and that
+  # ships beside the artifact: the release cosign-signs the AppImage keylessly and publishes
+  # `<name>.AppImage.sigstore.json`, whose identity is this repo's release workflow at the tag.
+  # That is stronger provenance than a code signature anyway — it names the build, not just a
+  # keyholder — and it needs no key to store, rotate or leak.
+  local outfile="$OUT/$APPNAME-$VERSION-x86_64.AppImage"
 
   local tool
   tool="$(find_appimagetool)" || {
@@ -737,7 +744,7 @@ cmd_clean() {
   rm -rf "$GUIDIR/build" "$OUT/$APPNAME.app" "$OUT/$APPNAME.AppDir" "$OUT/$APPNAME-"*-macos.* \
          "$OUT/$APPNAME-"*-windows-*.zip "$OUT/$APPNAME-"*-windows-*.msix \
          "$OUT/$APPNAME-setup-x64.exe" "$OUT/$APPNAME-"*-linux-*.tar.gz \
-         "$OUT/$APPNAME-"*-x86_64.AppImage "$OUT/notary-"*
+         "$OUT/$APPNAME-"*-x86_64.AppImage "$OUT/$APPNAME-"*.sigstore.json "$OUT/notary-"*
   log "cleaned"
 }
 

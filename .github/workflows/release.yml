@@ -374,9 +374,27 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y ninja-build libgtk-3-dev
+      - uses: sigstore/cosign-installer@v3
+
       - name: build + package abgui (Linux x64)
         run: ./scripts/build-gui-flutter.sh linux
+
+      # Sign the AppImage KEYLESSLY. Linux has no Authenticode equivalent and Azure Trusted
+      # Signing cannot help here — it signs Windows PE files, and an AppImage is an ELF — so
+      # the artifact carries no suffix and ships a Sigstore bundle instead.
+      #
+      # Keyless is the point: the identity in the certificate is THIS workflow at THIS tag,
+      # recorded in Rekor, so the signature attests to how the binary was built rather than to
+      # whoever held a key. There is nothing to store, rotate or leak. The abctl checksums are
+      # already signed this way by GoReleaser, so this is the same trust story, not a new one.
+      - name: cosign-sign the AppImage
+        run: |
+          set -euo pipefail
+          for f in bin/abgui-*-x86_64.AppImage; do
+            cosign sign-blob --yes --bundle "$f.sigstore.json" "$f"
+            echo "signed $f"
+          done
       - name: upload abgui Linux asset
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: gh release upload "${GITHUB_REF_NAME}" bin/abgui-*-x86_64*.AppImage --clobber
+        run: gh release upload "${GITHUB_REF_NAME}" bin/abgui-*-x86_64.AppImage bin/abgui-*-x86_64.AppImage.sigstore.json --clobber

@@ -82,7 +82,7 @@ release:
     |---|---|
     | macOS | **`abgui-*-macos.dmg`** |
     | Windows | **`abgui-setup-x64*.exe`** (installer) or `abgui-*-windows-x64*.zip` (portable) |
-    | Linux | **`abgui-*-x86_64*.AppImage`** — one file, any distro, no install, no root |
+    | Linux | **`abgui-*-x86_64.AppImage`** — one file, any distro, no install, no root |
 
     **The filename always tells you the trust state, and nothing is ever renamed after upload.**
 
@@ -91,8 +91,18 @@ release:
       These are uploaded first so a notary outage never leaves a release with nothing
       installable. If a plain `abgui-*-macos.dmg` is also present, **prefer it** — its presence
       is the signal that notarization succeeded.
-    * `-unsigned` — no code signature at all. Windows will show a SmartScreen warning; Linux has
-      no signing story, so its artifacts carry this permanently and honestly.
+    * `-unsigned` — no code signature at all. Windows shows a SmartScreen warning until an
+      Authenticode certificate is in place.
+    * **Linux carries no suffix.** Nothing on Linux refuses to run an unsigned binary, so the
+      label would warn about nothing. The AppImage instead ships a Sigstore bundle beside it —
+      verify with:
+
+      ```
+      cosign verify-blob --bundle abgui-<version>-x86_64.AppImage.sigstore.json --certificate-identity-regexp '^https://github\.com/GigaionLLC/abcli/' --certificate-oidc-issuer https://token.actions.githubusercontent.com abgui-<version>-x86_64.AppImage
+      ```
+
+      That proves the file was built by this repository's release workflow at a tag — provenance
+      about the BUILD, not merely about whoever held a signing key.
     * `-store.msix` — the Microsoft Store package. It is unsigned by design (Microsoft signs it
       on ingestion) and **cannot be sideloaded**; it is for Partner Center, not for downloading.
 

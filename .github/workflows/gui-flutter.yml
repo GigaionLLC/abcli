@@ -133,11 +133,11 @@ jobs:
         if: matrix.target == 'linux'
         run: |
           ./abgui-flutter/build/linux/x64/release/bundle/abctl --version
-          ls -la bin/abgui-*-x86_64*.AppImage                    # CI never signs: expect -unsigned
+          ls -la bin/abgui-*-x86_64.AppImage   # Linux carries no trust suffix — see make_appimage
           # Verify the AppImage's CONTENTS rather than launching it: abgui is a GUI and has no
           # --version, so running it headless would prove nothing that `|| true` didn't hide.
           # --appimage-extract needs no FUSE, which GitHub runners lack.
-          ( cd "$RUNNER_TEMP" && "$GITHUB_WORKSPACE"/bin/abgui-*-x86_64*.AppImage --appimage-extract >/dev/null
+          ( cd "$RUNNER_TEMP" && "$GITHUB_WORKSPACE"/bin/abgui-*-x86_64.AppImage --appimage-extract >/dev/null
             test -x squashfs-root/AppRun                       # entry point present + executable
             test -f squashfs-root/abgui.desktop                # required at the AppDir root
             test -f squashfs-root/usr/bin/data/flutter_assets/AssetManifest.bin  # Flutter assets came along
@@ -150,5 +150,5 @@ jobs:
             bin/abgui-*-macos*.dmg
             bin/abgui-*-macos*.zip
             bin/abgui-*-windows-x64*.zip
-            bin/abgui-*-x86_64*.AppImage
+            bin/abgui-*-x86_64.AppImage
           if-no-files-found: error
