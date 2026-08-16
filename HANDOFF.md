@@ -10,6 +10,45 @@ A Go CLI + GitOps engine (by **Gigaion, LLC**) that syncs Apple Business built-i
 (`CUSTOM_SETTING` `.mobileconfig` profiles) and **Blueprints** with a git-declarative desired state:
 read-only by default, gated writes, bidirectional sync with newest-wins + archive-on-overwrite.
 
+## The GUI is Flutter now (v0.4.28, 2026-08-16)
+
+`abgui` was a macOS-only SwiftUI app. It is now a **Flutter desktop app for macOS, Windows and
+Linux**, in `abgui-flutter/` (Dart package `abgui`). The SwiftUI tree was **deleted** — one GUI, not
+two — and lives in history at `v0.4.27` (`git show v0.4.27:abgui/...`).
+
+Why it was possible: the GUI never had a real macOS dependency. It is a facade over the `abctl`
+CLI — spawn a process, decode JSON — with no Apple Business API logic, no Keychain binding, and an
+entire native surface of two behaviours in three files (clipboard, reveal-in-file-manager).
+
+Read **[docs/abgui-flutter-port.md](docs/abgui-flutter-port.md)** before touching it. The things
+most likely to be broken by a well-meaning edit:
+
+- **`--prune` is unrepresentable outside `abctl_args.dart`.** `ApplyOptions` has a private
+  constructor and three named public ones; `prune` is a read-only field, so a checkbox has nothing
+  to bind to, and git-as-truth *without* prune (a half-applied desired state) cannot be spelled. A
+  test scans all of `lib/` and fails if the flag appears anywhere else.
+- **The confirmed command is the executed command** — same function, pinned across all 11 write
+  verbs by a test using a tapped runner.
+- **A typed confirmation approves a command, not a phrase.** Escalating the plan re-arms the gate.
+- **`sync --apply` and `validate` decode stdout before mapping the exit code** — abctl prints a
+  valid document *and* exits non-zero.
+- **Success is the receipt, never the exit code.** A cancelled or timed-out apply reports an
+  *unknown* state and says some writes may have landed.
+- **A truncated stdin write is undetectable on POSIX.** Measured: Dart reports nothing at `add`,
+  `flush`, `close` or `done`. What actually guards `create config -f -` is abctl rejecting a
+  profile it could not parse and exiting non-zero. Do not "fix" `_writeStdin` believing it covers
+  macOS — it never did, and neither did the Swift original.
+
+Build: `make gui-check` / `gui-test` (anywhere, or `./tool/flutter.sh` in Docker) and
+`make gui-macos|gui-windows|gui-linux`, each on its own platform — Flutter does not cross-compile
+desktop. Linux ships a single-file **AppImage** (no `.deb`; it would need a dependency list correct
+on Debian and wrong elsewhere forever) and is pinned to `ubuntu-22.04` because an AppImage bundles
+GTK but not glibc.
+
+572 tests, verified on Windows and Linux. The long-standing sidebar-blanking bug is gone: load
+state is per-pane and command progress lives in a pinned run strip, so nothing is ever replaced by
+a spinner.
+
 ## Current state
 **Built and live-verified (read-only):**
 - **Auth** — ES256 client-assertion, `kid` omitted, `aud = …/v2/token`, `exp < iat+180d`, token cache,
