@@ -63,7 +63,7 @@ struct DiffView: View {
                         .disabled((model.plan?.actionableChangeCount ?? 0) == 0)
                     Button { model.refreshPlan() } label: { Label("Refresh", systemImage: "arrow.clockwise") }
                         .toolbarLabel("Recompute the plan: re-read gitops/ and re-fetch the live tenant.")
-                        .disabled(model.isLoading || model.isSeeding)
+                        .disabled(model.isPlanning || model.isSeeding)
                 }
                 Button { showWorkspacePicker = true } label: { Label("Workspace", systemImage: "folder") }
                     .toolbarLabel("Choose the folder that contains your gitops/ tree. Every command on this screen runs there.")
@@ -114,8 +114,10 @@ struct DiffView: View {
             }
         } else if model.isSeeding {
             workingView("Initializing workspace from the tenant...")
-        } else if model.isLoading {
-            // Check isLoading BEFORE the plan branch, so a refresh from an already-computed
+        } else if model.isPlanning {
+            // `isPlanning`, not the shared `isLoading`: a Devices or Configurations fetch must
+            // not put THIS screen into its computing state, and finishing one must not take it
+            // out of it. Checked BEFORE the plan branch, so a refresh from an already-computed
             // state visibly shows progress instead of silently redisplaying the old result.
             workingView("Computing plan...")
         } else if model.needsSeed {
@@ -229,7 +231,7 @@ struct DiffView: View {
                 // nothing rendering it, a row-button click that abctl rejected (unmanaged
                 // collection, no manifest for the blueprint, member not actually attached)
                 // looked like a click that did nothing at all.
-                if let error = model.lastWriteError {
+                if let error = model.writeError(.adopt) {
                     Label(error, systemImage: "exclamationmark.triangle")
                         .font(.caption)
                         .foregroundStyle(.red)
@@ -350,7 +352,7 @@ private struct PlanDetailRow: View {
                     .buttonStyle(.bordered)
                     .controlSize(.small)
                     .help(adopt.help)
-                    .disabled(model.isWriting || model.isLoading)
+                    .disabled(model.isWriting || model.isPlanning)
             }
         }
         .padding(.vertical, 8)

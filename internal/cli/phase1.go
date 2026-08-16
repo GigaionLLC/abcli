@@ -61,7 +61,7 @@ func newDiffCmd() *cobra.Command {
 			if err := validateRefreshMode(refresh); err != nil {
 				return err
 			}
-			pc, err := loadPlan(gitSourceOfTruth, refresh)
+			pc, err := loadPlan(gitSourceOfTruth, refresh, false) // diff never writes
 			if err != nil {
 				return err
 			}
@@ -150,7 +150,17 @@ func runSync(fl syncFlags) error {
 	if err := validateVerifyMode(fl.verify); err != nil {
 		return err
 	}
-	pc, err := loadPlan(fl.gitSourceOfTruth, fl.refresh)
+	// metadata-only never populates LiveConfig.XML, and every actionable item needs it:
+	// an update archives the live profile first, a pull writes those bytes into git, a
+	// prune archives before deleting. Applying in this mode fails item by item and leaves
+	// the baseline untouched, so the identical plan comes back next run — loud, but a
+	// dead end. Refuse it here, where the remedy is one flag away.
+	if fl.apply && fl.refresh == refreshMetadata {
+		return fmt.Errorf("--refresh=metadata-only cannot be applied: it never fetches profile XML, "+
+			"which every write needs to archive, pull or prune. Use --refresh=%s (the default) or --refresh=%s",
+			refreshSmart, refreshFull)
+	}
+	pc, err := loadPlan(fl.gitSourceOfTruth, fl.refresh, fl.apply)
 	if err != nil {
 		return err
 	}
@@ -243,7 +253,7 @@ func runSync(fl syncFlags) error {
 	switch fl.verify {
 	case verifyFull:
 		fmt.Fprintln(os.Stderr, "post-apply verification: full live configuration and blueprint refresh...")
-		fetched, err := fetchLiveConfigsForPlan(pc.c, pc.desired, pc.base, fl.gitSourceOfTruth, refreshFull, func(line string) {
+		fetched, err := fetchLiveConfigsForPlan(pc.c, pc.desired, pc.base, fl.gitSourceOfTruth, refreshFull, true, func(line string) {
 			fmt.Fprintln(os.Stderr, "post-apply verification: "+line)
 		})
 		if err != nil {
@@ -865,7 +875,10 @@ func validateVerifyMode(mode string) error {
 	}
 }
 
-func fetchLiveConfigsForPlan(c *ab.Client, desired map[string][]byte, base *state.State, gitSourceOfTruth bool, refresh string, progress func(string)) ([]ab.LiveConfig, error) {
+// willWrite says whether THIS run may actually pull, archive or prune. It gates the
+// per-config profile fetch in smart mode: a dry run compares nothing it keeps, so paying
+// a request per live-only config buys a hash that is thrown away.
+func fetchLiveConfigsForPlan(c *ab.Client, desired map[string][]byte, base *state.State, gitSourceOfTruth bool, refresh string, willWrite bool, progress func(string)) ([]ab.LiveConfig, error) {
 	switch refresh {
 	case refreshFull:
 		return c.FetchCustomSettingsWithProgress(progress)
@@ -877,13 +890,13 @@ func fetchLiveConfigsForPlan(c *ab.Client, desired map[string][]byte, base *stat
 		reuseCachedLiveHashes(live, base, progress)
 		return live, nil
 	case refreshSmart:
-		return fetchLiveConfigsSmart(c, desired, base, gitSourceOfTruth, progress)
+		return fetchLiveConfigsSmart(c, desired, base, gitSourceOfTruth, willWrite, progress)
 	default:
 		return nil, fmt.Errorf("invalid refresh mode %q", refresh)
 	}
 }
 
-func fetchLiveConfigsSmart(c *ab.Client, desired map[string][]byte, base *state.State, gitSourceOfTruth bool, progress func(string)) ([]ab.LiveConfig, error) {
+func fetchLiveConfigsSmart(c *ab.Client, desired map[string][]byte, base *state.State, gitSourceOfTruth bool, willWrite bool, progress func(string)) ([]ab.LiveConfig, error) {
 	live, err := c.FetchCustomSettingsMetadata(progress)
 	if err != nil {
 		return nil, err
@@ -896,15 +909,27 @@ func fetchLiveConfigsSmart(c *ab.Client, desired map[string][]byte, base *state.
 		if hasBase && baseEntry.ABMID == l.ID && sameAppleTime(baseEntry.UpdatedDateTime, l.Updated) {
 			l.Hash = baseEntry.Hash
 		}
-		needDetail := l.Hash == ""
-		if hasDesired && l.Hash != "" && hash.Raw(desiredXML) != l.Hash {
-			needDetail = true
-		}
-		if !hasDesired {
-			// Pulls and prunes need the actual live XML for writing or archiving.
-			needDetail = true
-		}
-		if gitSourceOfTruth && !hasDesired {
+		// Fetch a profile only where its BYTES are actually used.
+		//
+		// The order matters: an unconditional `needDetail := l.Hash == ""` first would make
+		// every other condition unreachable on an unseeded workspace, because with no baseline
+		// nothing has a cached hash. That is precisely the case worth optimizing, so the
+		// live-only branch has to be the one that decides.
+		needDetail := false
+		switch {
+		case hasDesired:
+			// Present on both sides, so the plan is decided by comparing hashes: the live
+			// hash must be real. Refetch when it was never cached, and when the cached hash
+			// disagrees with git — that disagreement is what an apply would act on, so it is
+			// confirmed against the actual bytes rather than trusted.
+			needDetail = l.Hash == "" || hash.Raw(desiredXML) != l.Hash
+		case willWrite:
+			// Live-only. The PLAN never needs these bytes — reconcile.Compute picks pull-new
+			// vs delete from the BASELINE, not from a hash — but an apply does, to write them
+			// into git or to archive before deleting. A dry run (`diff`, the CI plan job,
+			// `sync` without --apply) writes and archives nothing, and paying one request per
+			// live-only config to compute a hash it then discards is what turned the FAST
+			// mode into 1+N requests where `--refresh=full` is a single list call.
 			needDetail = true
 		}
 		if !needDetail {
@@ -980,7 +1005,7 @@ type planCtx struct {
 
 // loadPlan reads git desired + baseline + live for both configs and blueprints and
 // computes the two 3-way plans. Shared by diff and sync so both see an identical plan.
-func loadPlan(gitSourceOfTruth bool, refresh string) (*planCtx, error) {
+func loadPlan(gitSourceOfTruth bool, refresh string, willWrite bool) (*planCtx, error) {
 	fmt.Fprintln(os.Stderr, "building plan: loading connection and workspace settings...")
 	c, cfg, err := mustClient()
 	if err != nil {
@@ -1000,7 +1025,7 @@ func loadPlan(gitSourceOfTruth bool, refresh string) (*planCtx, error) {
 	}
 	fmt.Fprintf(os.Stderr, "building plan: loaded %d baseline configuration record(s).\n", len(base.Configs))
 	fmt.Fprintf(os.Stderr, "building plan: fetching live configurations from Apple (%s refresh)...\n", refresh)
-	live, err := fetchLiveConfigsForPlan(c, desired, base, gitSourceOfTruth, refresh, func(line string) {
+	live, err := fetchLiveConfigsForPlan(c, desired, base, gitSourceOfTruth, refresh, willWrite, func(line string) {
 		fmt.Fprintln(os.Stderr, "building plan: "+line)
 	})
 	if err != nil {

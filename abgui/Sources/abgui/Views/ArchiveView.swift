@@ -52,19 +52,30 @@ struct ArchiveView: View {
                 Text("Choose a workspace in Diff / Drift to browse its archive.")
             }
         } else {
-            Table(model.archiveEntries, selection: $selection) {
-                TableColumn("Configuration") { Text($0.configName) }
-                TableColumn("Archived") { Text($0.archivedAt) }
-                TableColumn("Reason") { Text($0.reason) }
-            }
-            .overlay {
-                if model.archiveEntries.isEmpty {
-                    ContentUnavailableView("No archived versions", systemImage: "clock.arrow.circlepath",
-                                           description: Text("abctl archives a live profile before each overwrite or delete."))
+            // A VStack, not two bare siblings. This branch emitted the Table and the error Text
+            // as an unwrapped pair into a slot that takes ONE view, so the error composited over
+            // the middle of the table instead of sitting under it — the same class of layout
+            // fault as the safe-area insets, and it only ever showed up when a write had failed.
+            VStack(spacing: 0) {
+                Table(model.archiveEntries, selection: $selection) {
+                    TableColumn("Configuration") { Text($0.configName) }
+                    TableColumn("Archived") { Text($0.archivedAt) }
+                    TableColumn("Reason") { Text($0.reason) }
                 }
-            }
-            if let error = model.lastWriteError {
-                Text(error).foregroundStyle(.red).font(.caption).padding(.horizontal)
+                .overlay {
+                    if model.archiveEntries.isEmpty {
+                        ContentUnavailableView("No archived versions", systemImage: "clock.arrow.circlepath",
+                                               description: Text("abctl archives a live profile before each overwrite or delete."))
+                    }
+                }
+                if let error = model.writeError(.archive) {
+                    Text(error)
+                        .foregroundStyle(.red)
+                        .font(.caption)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding([.horizontal, .vertical], 8)
+                }
             }
         }
     }

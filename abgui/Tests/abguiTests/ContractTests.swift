@@ -1506,3 +1506,70 @@ final class CommandLineParserTests: XCTestCase {
         XCTAssertFalse(CommandLineParser.isUnapprovedWrite([]))
     }
 }
+
+// MARK: - the structured post-apply verdict (replacing the stderr grep)
+
+final class ApplyVerificationTests: XCTestCase {
+    private func decode(_ json: String) throws -> ApplyResult {
+        try JSONDecoder().decode(ApplyResult.self, from: Data(json.utf8))
+    }
+
+    private let emptyPhases = #""configs":{"outcomes":[],"writes":1,"errors":0,"skipped":0},"blueprints":{"outcomes":[],"writes":0,"errors":0,"skipped":0}"#
+
+    /// abctl publishes its verdict as DATA (`internal/cli/phase1.go` verificationReport). abgui
+    /// used to re-derive it by grepping stderr for the word FAILED against a hand-maintained
+    /// list of abctl's narration strings — so rewording one Go sentence silently downgraded the
+    /// GUI's verdict. Decoding the key is what makes that impossible.
+    func testDecodesTheVerificationVerdict() throws {
+        let result = try decode("""
+        {\(emptyPhases),
+         "verification":{"mode":"targeted","written":3,"verified":2,
+           "mismatches":[{"name":"WiFi.mobileconfig","detail":"still differs","observed":true}]}}
+        """)
+        let verification = try XCTUnwrap(result.verification)
+        XCTAssertEqual(verification.mode, "targeted")
+        XCTAssertEqual(verification.written, 3)
+        XCTAssertEqual(verification.verified, 2)
+        XCTAssertTrue(verification.hasMismatches)
+        XCTAssertTrue(verification.headline.contains("did not land"))
+    }
+
+    /// A write Apple ACKNOWLEDGED and dropped is the whole reason this exists: every counter
+    /// reads clean and the run still failed. `observed` is what separates that from a write
+    /// abctl merely could not check, and collapsing the two would report a network blip as data
+    /// loss — abctl keeps them apart deliberately.
+    func testObservedSeparatesADroppedWriteFromAnUncheckedOne() throws {
+        let dropped = try decode("""
+        {\(emptyPhases),
+         "verification":{"mode":"targeted","written":1,"verified":0,
+           "mismatches":[{"name":"A","detail":"stored profile still differs","observed":true}]}}
+        """)
+        XCTAssertTrue(dropped.verification?.mismatches.first?.observed == true)
+        XCTAssertTrue(dropped.verification?.headline.contains("did not land") == true)
+
+        let unchecked = try decode("""
+        {\(emptyPhases),
+         "verification":{"mode":"targeted","written":1,"verified":0,
+           "mismatches":[{"name":"A","detail":"read-back failed","observed":false}]}}
+        """)
+        XCTAssertFalse(unchecked.verification?.mismatches.first?.observed == true)
+        XCTAssertTrue(unchecked.verification?.headline.contains("could not be checked") == true)
+    }
+
+    /// `--verify=none` checked nothing; that is not a failure and must not read as one.
+    func testVerifyNoneIsNotAFailure() throws {
+        let result = try decode("""
+        {\(emptyPhases),"verification":{"mode":"none","written":2,"verified":0,"mismatches":[]}}
+        """)
+        XCTAssertFalse(result.verification?.hasMismatches == true)
+        XCTAssertTrue(result.verification?.headline.contains("not verified") == true)
+    }
+
+    /// An older abctl — or a run that died before verification — emits no key at all. That must
+    /// decode, not throw, or the GUI loses the per-item receipt as well as the verdict.
+    func testAbsentVerificationDecodesToNil() throws {
+        let result = try decode("{\(emptyPhases)}")
+        XCTAssertNil(result.verification)
+        XCTAssertEqual(result.totalWrites, 1)
+    }
+}

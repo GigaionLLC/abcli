@@ -41,7 +41,7 @@ struct ConfigEditorView: View {
 
             editor
 
-            if let error = model.lastWriteError {
+            if let error = model.writeError(.configuration) {
                 Text(error).foregroundStyle(.red).font(.caption)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding([.horizontal, .bottom])

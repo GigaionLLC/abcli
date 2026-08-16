@@ -73,7 +73,10 @@ enum ReadOnlyKind: String, CaseIterable, Identifiable, Hashable {
             return [
                 ColumnSpec(header: "Serial") { $0.attr("serialNumber") ?? $0.id },
                 ColumnSpec(header: "Model") { $0.attr("deviceModel") ?? "—" },
-                ColumnSpec(header: "OS") { $0.attr("osVersion") ?? "—" },
+                // No "OS" column: `osVersion` is BUILT-IN-MDM posture, not an orgDevices
+                // attribute — every Go read of it comes off mdmDetails, and abctl's own
+                // orgDevices table prints serial/family/model only. It was permanently "—",
+                // in the table and in the CSV export. Enrolled Devices is where OS lives.
                 ColumnSpec(header: "Family") { $0.attr("productFamily") ?? "—" },
             ]
         case .mdmDevices:
@@ -87,9 +90,9 @@ enum ReadOnlyKind: String, CaseIterable, Identifiable, Hashable {
             return [
                 ColumnSpec(header: "Name") {
                     let n = [$0.attr("firstName"), $0.attr("lastName")].compactMap { $0 }.joined(separator: " ")
-                    return n.isEmpty ? ($0.attr("managedAppleId") ?? $0.id) : n
+                    return n.isEmpty ? ($0.attr("managedAppleAccount") ?? $0.id) : n
                 },
-                ColumnSpec(header: "Managed Apple ID") { $0.attr("managedAppleId") ?? $0.attr("email") ?? "—" },
+                ColumnSpec(header: "Managed Apple ID") { $0.attr("managedAppleAccount") ?? $0.attr("email") ?? "—" },
                 ColumnSpec(header: "Roles") { let r = $0.roleNames(); return r.isEmpty ? "—" : r },
                 ColumnSpec(header: "Status") { $0.attr("status") ?? "—" },
             ]

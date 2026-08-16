@@ -29,6 +29,12 @@ const notPersisted = "write accepted (2xx) but Apple did not persist it — the 
 	"Apple silently drops profiles that violate its schema; check that the TOP-LEVEL Configuration PayloadVersion " +
 	"is exactly 1 (Apple requires 1; a value of 2 reproduces this exactly)."
 
+// NotPersistedMessage is the operator-facing diagnosis of a 2xx write Apple did not
+// store. Exported so the imperative commands (which issue the same writes against the
+// same API) report it in the same words as the reconcile engine — one incident, one
+// explanation, one place to improve it.
+const NotPersistedMessage = notPersisted
+
 // Applier is the subset of the Apple Business write API the executor needs. It is
 // an interface so Apply can be unit-tested with a fake — no production writes.
 type Applier interface {
