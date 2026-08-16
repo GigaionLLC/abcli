@@ -636,6 +636,13 @@ type fakeTenant struct {
 	gets    []string
 }
 
+// BlueprintRelationship satisfies reconcile.Applier. These tests drive the CONFIG phase,
+// which makes no membership writes, so the post-apply membership check has nothing to
+// verify and never calls this with a real expectation.
+func (f *fakeTenant) BlueprintRelationship(_, _ string) ([]ab.Resource, error) {
+	return nil, nil
+}
+
 func (f *fakeTenant) CreateConfiguration(name, xml string, _ []string) (string, string, error) {
 	id := "cfg-" + name
 	f.stored[id] = ab.LiveConfig{Name: name, ID: id, XML: xml, Updated: "2026-07-25T12:00:00Z"}

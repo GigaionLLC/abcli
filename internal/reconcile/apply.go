@@ -49,6 +49,12 @@ type Applier interface {
 	CreateBlueprint(name, description string, members map[string][]string) (*ab.Resource, error)
 	AddBlueprintMembers(bpID, rel, memberType string, ids []string) error
 	RemoveBlueprintMembers(bpID, rel, memberType string, ids []string) error
+	// BlueprintRelationship re-reads one relationship so a membership write can be
+	// confirmed against what Apple actually holds. The project's rule — a 2xx is not
+	// proof — was enforced for configuration writes and nowhere for membership, which
+	// left `attached` reported on the strength of the response code alone. Signature is
+	// *ab.Client's own, so the real client keeps satisfying Applier with no adapter.
+	BlueprintRelationship(bpID, rel string) ([]ab.Resource, error)
 }
 
 // Archiver files a pre-overwrite live profile + sidecar (see internal/archive).

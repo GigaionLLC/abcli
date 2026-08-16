@@ -52,14 +52,14 @@ struct ConfigurationsView: View {
             }
         }
         .overlay {
-            ListStateOverlay(isLoading: model.isLoading, error: model.loadError,
+            ListStateOverlay(isLoading: model.loading(.configurations), error: model.failure(.configurations),
                              isEmpty: model.configurations.isEmpty,
                              emptyTitle: "No configurations", emptySymbol: "doc.text")
         }
         .navigationTitle("Configurations")
         .toolbar {
             Button { editorTarget = .create } label: { Label("New", systemImage: "plus") }
-                .toolbarLabel("Write a new .mobileconfig and create it in Apple Business.")
+                .toolbarLabel("Write a new .mobileconfig and create it in Apple Business.", weight: .titled)
             Button {
                 if let config = selectedResource { editorTarget = .edit(config) }
             } label: { Label("Edit", systemImage: "pencil") }
@@ -71,7 +71,7 @@ struct ConfigurationsView: View {
                 .toolbarLabel("Attach or detach the selected configuration to a blueprint. Writes Apple Business and updates gitops/blueprints/.")
                 .disabled(selection == nil)
             Button(role: .destructive) { confirmDelete = true } label: { Label("Delete", systemImage: "trash") }
-                .toolbarLabel("Delete the selected configuration from Apple Business (archived first).")
+                .toolbarLabel("Delete the selected configuration from Apple Business (archived first).", weight: .titled)
                 .disabled(selection == nil)
             RefreshButton(help: "Re-fetch the configuration list from Apple Business.") {
                 await model.loadConfigurations()

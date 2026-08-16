@@ -364,6 +364,8 @@ func (e *Engine) ApplyBlueprints(p *BlueprintPlan, opts Opts, priorWrites int) *
 
 	res := &BlueprintResult{Outcomes: []BlueprintOutcome{}}
 	createdIDs := map[string]string{} // blueprint name → id created this run
+	// What each membership write claimed, checked in one pass at the end.
+	var claims []membershipClaim
 
 	// Members inlined into each blueprint-new create. Apple rejects a member-less
 	// create (409 MISSING_MEMBERS / MISSING_RESOURCES — live-verified 2026-07-05,
@@ -445,6 +447,9 @@ func (e *Engine) ApplyBlueprints(p *BlueprintPlan, opts Opts, priorWrites int) *
 				// separate write (relationships POST merges, so re-attaching would be a
 				// harmless but rate-limited no-op).
 				e.bpDone(res, it, "attached "+it.Config+" (inlined in the blueprint create)")
+				// Reported done on the strength of the create's 2xx, so it is exactly the
+				// kind of claim the verification pass below exists to check.
+				claims = append(claims, membershipClaim{outcome: len(res.Outcomes), bpID: bpID, rel: rel, memberID: it.ConfigID, present: true})
 				continue
 			}
 			if !e.budget(opts, priorWrites+res.Writes) {
@@ -458,6 +463,7 @@ func (e *Engine) ApplyBlueprints(p *BlueprintPlan, opts Opts, priorWrites int) *
 			}
 			res.Writes++
 			e.bpDone(res, it, "attached "+it.Config)
+			claims = append(claims, membershipClaim{outcome: len(res.Outcomes), bpID: bpID, rel: rel, memberID: it.ConfigID, present: true})
 		case it.Action.IsAdopt():
 			// A LOCAL write: it changes gitops/blueprints/<bp>.yml, never the tenant.
 			// So it spends no rate limit, is not counted in res.Writes, and is not
@@ -494,11 +500,95 @@ func (e *Engine) ApplyBlueprints(p *BlueprintPlan, opts Opts, priorWrites int) *
 			}
 			res.Writes++
 			e.bpDone(res, it, "detached "+it.Config)
+			claims = append(claims, membershipClaim{outcome: len(res.Outcomes), bpID: it.BPID, rel: rel, memberID: it.ConfigID, present: false})
 		default: // BlueprintGone — reported, not applied
 			e.bpSkip(res, it, it.Detail)
 		}
 	}
+	e.verifyMembership(res, claims, opts)
 	return res
+}
+
+// membershipClaim is one membership write and what it asserted about the tenant.
+// `outcome` is the 1-based position of the row in res.Outcomes, so a failed check can
+// downgrade the exact row that made the claim.
+type membershipClaim struct {
+	// outcome is the 1-based index of the row this claim belongs to — captured AFTER the
+	// row is appended, so `res.Outcomes[outcome-1]` is that row and not the one before it.
+	outcome  int
+	bpID     string
+	rel      string
+	memberID string
+	present  bool // true for an attach, false for a detach
+}
+
+// verifyMembership re-reads the relationships that were written and confirms the tenant
+// actually holds what each write claimed.
+//
+// The project's rule is that a 2xx is not proof — Apple acknowledges a configuration
+// write and then silently declines to store it, which is why every config write reads
+// back. Membership writes had no such check: `attached` was reported on the response
+// code alone, and a member inlined into a blueprint create was reported attached purely
+// because the create returned 2xx.
+//
+// The cost is deliberately per RELATIONSHIP, not per member: attaching twenty configs to
+// one blueprint is one extra GET, not twenty. Apple rate-limits hard, and a verification
+// that scales with the number of writes would discourage its own use.
+//
+// A read that FAILS downgrades the row to "not verified" rather than failing it — a GET
+// that errored says nothing about the POST, the same posture the config read-back takes.
+func (e *Engine) verifyMembership(res *BlueprintResult, claims []membershipClaim, opts Opts) {
+	if len(claims) == 0 {
+		return
+	}
+	type relKey struct{ bpID, rel string }
+	live := map[relKey]map[string]bool{}
+	unreadable := map[relKey]string{}
+
+	for _, c := range claims {
+		key := relKey{c.bpID, c.rel}
+		if _, done := live[key]; done {
+			continue
+		}
+		if _, failed := unreadable[key]; failed {
+			continue
+		}
+		progress(opts, "verifying blueprint membership: "+c.rel)
+		members, err := e.Client.BlueprintRelationship(c.bpID, c.rel)
+		if err != nil {
+			unreadable[key] = err.Error()
+			continue
+		}
+		set := make(map[string]bool, len(members))
+		for _, m := range members {
+			set[m.ID] = true
+		}
+		live[key] = set
+	}
+
+	for _, c := range claims {
+		if c.outcome <= 0 || c.outcome > len(res.Outcomes) {
+			continue
+		}
+		row := &res.Outcomes[c.outcome-1]
+		key := relKey{c.bpID, c.rel}
+		if reason, failed := unreadable[key]; failed {
+			row.Detail += " — NOT VERIFIED (re-read failed: " + reason + ")"
+			continue
+		}
+		if live[key][c.memberID] == c.present {
+			continue // the tenant holds what the write claimed
+		}
+		verb := "attach"
+		if !c.present {
+			verb = "detach"
+		}
+		row.Status = "error"
+		row.Detail += " — but Apple does not reflect it: the " + verb +
+			" was accepted (2xx) and the membership did not change. Re-run sync; if it repeats, " +
+			"the member or the blueprint may have been changed in the console mid-run."
+		res.Errors++
+	}
 }
 
 // adoptMember records one live member in its blueprint manifest. The existing

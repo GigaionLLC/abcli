@@ -86,6 +86,15 @@ struct ArchiveFileView: View {
     @Environment(\.dismiss) private var dismiss
     let entry: ArchiveEntry
 
+    /// Read ONCE into state, not inside `body`.
+    ///
+    /// The profile was previously loaded by a synchronous `String(contentsOf:)` in the view
+    /// body — up to Apple's 1 MiB cap, on the main actor, re-executed on every body evaluation
+    /// rather than once per file. The same class of mistake as rebuilding the whole transcript
+    /// per log line: work that looks free because it is written as an expression.
+    @State private var contents: String?
+    @State private var failed = false
+
     var body: some View {
         VStack(spacing: 0) {
             HStack {
@@ -95,14 +104,30 @@ struct ArchiveFileView: View {
             }
             .padding()
             Divider()
-            ScrollView([.horizontal, .vertical]) {
-                Text((try? String(contentsOf: entry.fileURL, encoding: .utf8)) ?? "(couldn't read this archived file)")
-                    .font(.system(.footnote, design: .monospaced))
-                    .textSelection(.enabled)
-                    .padding()
-                    .frame(maxWidth: .infinity, alignment: .leading)
+            if let contents {
+                ScrollView([.horizontal, .vertical]) {
+                    Text(contents)
+                        .font(.system(.footnote, design: .monospaced))
+                        .textSelection(.enabled)
+                        .padding()
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+            } else if failed {
+                ContentUnavailableView("Couldn't read this archived file", systemImage: "exclamationmark.triangle",
+                                       description: Text(entry.fileURL.lastPathComponent))
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                ProgressView().frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
         .frame(minWidth: 640, minHeight: 480)
+        .task(id: entry.fileURL) {
+            // Off the main actor: a large archived profile on a slow volume should not
+            // stall the window while the sheet is opening.
+            let url = entry.fileURL
+            let loaded = await Task.detached { try? String(contentsOf: url, encoding: .utf8) }.value
+            contents = loaded
+            failed = loaded == nil
+        }
     }
 }

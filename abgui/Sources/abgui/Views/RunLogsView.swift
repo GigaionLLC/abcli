@@ -42,14 +42,14 @@ struct RunLogsView: View {
                     .toolbarLabel("Show this log file in Finder.")
                     .disabled(selected == nil)
 
-                RefreshButton(help: "Re-scan ~/Library/Logs/abgui for run logs.") { reload() }
+                RefreshButton(help: "Re-scan ~/Library/Logs/abgui for run logs.") { await reload() }
             }
             .fileExporter(isPresented: $showExporter,
                           document: TextDocument(text: contents ?? ""),
                           contentType: .plainText,
                           defaultFilename: selected?.name ?? "abgui.log") { _ in }
-            .task { reload() }
-            .onChange(of: selection) { _, _ in loadSelected() }
+            .task { await reload() }
+            .onChange(of: selection) { _, _ in Task { await loadSelected() } }
     }
 
     @ViewBuilder private var content: some View {
@@ -61,7 +61,7 @@ struct RunLogsView: View {
                      + "abctl printed, how long each step took and how the run ended. "
                      + "Run one from Diff / Drift and it will appear here.")
             } actions: {
-                Button("Refresh") { reload() }
+                Button("Refresh") { Task { await reload() } }
             }
         } else {
             HStack(spacing: 0) {
@@ -173,20 +173,32 @@ struct RunLogsView: View {
         return log.isFailure ? .red : .green
     }
 
-    private func reload() {
-        logs = RunLogIndex.scan()
-        // Keep the current selection if it survived the re-scan; otherwise open the newest, which
-        // is the run someone almost always came here to read.
+    /// Scan and read OFF the main actor.
+    ///
+    /// The directory scan probes the tail of up to fifty files, and opening a run reads a
+    /// transcript that `RunLog` caps at 5 MiB. Doing that synchronously from `.task` put both
+    /// on the main actor — a hitch on a slow volume, and the same "work written as an
+    /// expression looks free" mistake as reading a profile inside a view body.
+    private func reload() async {
+        let scanned = await Task.detached { RunLogIndex.scan() }.value
+        logs = scanned
+        // Keep the current selection if it survived the re-scan; otherwise open the newest,
+        // which is the run someone almost always came here to read.
         if selection == nil || !logs.contains(where: { $0.id == selection }) {
             selection = logs.first?.id
         }
-        loadSelected()
+        await loadSelected()
     }
 
-    private func loadSelected() {
+    private func loadSelected() async {
         guard let selected else { contents = nil; loadFailed = false; return }
-        contents = RunLogIndex.contents(of: selected.url)
-        loadFailed = contents == nil
+        let url = selected.url
+        let loaded = await Task.detached { RunLogIndex.contents(of: url) }.value
+        // The selection can change while a large log is being read; publishing a stale one
+        // would show the wrong transcript under the right filename.
+        guard selected.id == selection else { return }
+        contents = loaded
+        loadFailed = loaded == nil
     }
 
     private func copy(_ text: String, field: String) {

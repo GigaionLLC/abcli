@@ -120,17 +120,24 @@ struct DashboardView: View {
                 loaded.insert(item) // a cache its own screen already filled counts as loaded
                 continue
             }
+            // Each load reports into its OWN pane, so the pass reads back the failure of the
+            // thing it just ran rather than whatever last touched a shared slot. That
+            // misattribution used to need a comment explaining why the error might not be ours.
+            var pane: AppModel.LoadPane
             switch item {
-            case .configurations: await model.loadConfigurations()
-            case .blueprints: await model.loadBlueprints()
+            case .configurations:
+                pane = .configurations
+                await model.loadConfigurations()
+            case .blueprints:
+                pane = .blueprints
+                await model.loadBlueprints()
             default:
                 guard let kind = item.readOnly else { continue }
+                pane = .readOnly(kind)
                 await model.loadReadOnly(kind)
             }
-            // Cancelled mid-call (tile click / navigation): the shared loadError now
-            // belongs to the destination screen's load — don't read or misattribute it.
-            if Task.isCancelled { return }
-            if let error = model.loadError {
+            if Task.isCancelled { return } // navigated away mid-call
+            if let error = model.failure(pane) {
                 loadFailed = error // stop the pass on the first failure (see above)
                 return
             }

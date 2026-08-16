@@ -22,9 +22,10 @@ struct AssignSheet: View {
     @State private var activity: Resource?  // the last polled activity status
     @State private var statusBusy = false
     @State private var statusError: String?
-    // The server-list fetch has its OWN busy/error state (like assign/poll above) —
-    // the shared model.isLoading/loadError belong to the list screens, and a swallowed
-    // failure here would masquerade as "No MDM servers found." on a write-gating picker.
+    // The server-list fetch has its OWN busy/error state (like assign/poll above): this is a
+    // sheet, not a pane, so it has no entry in the model's per-pane load state — and a
+    // swallowed failure here would masquerade as "No MDM servers found." on a write-gating
+    // picker.
     @State private var serversBusy = false
     @State private var serversError: String?
 

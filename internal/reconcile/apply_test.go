@@ -46,6 +46,12 @@ type fakes struct {
 	bpSpecs     map[string]gitops.BlueprintSpec
 	bpSpecErr   bool // LoadBlueprints fails (unreadable/malformed manifest)
 	bpSpecWrErr bool // WriteBlueprintSpec fails (read-only tree)
+	// members is the tenant's actual blueprint membership, keyed "<bpID>/<rel>".
+	members map[string]map[string]bool
+	// dropMembership: Apple answers 2xx to an attach and does not apply it — the
+	// membership analogue of dropWrites, and what the verification pass must catch.
+	dropMembership bool
+	bpRelErr       bool // the verifying re-read itself fails
 }
 
 func newFakes() *fakes {
@@ -53,6 +59,7 @@ func newFakes() *fakes {
 		files:      map[string]string{},
 		stored:     map[string]string{},
 		bpSpecs:    map[string]gitops.BlueprintSpec{},
+		members:    map[string]map[string]bool{},
 		updatedTS:  "ts-server",
 		readBackTS: "ts-server",
 	}
@@ -140,7 +147,21 @@ func (f *fakes) CreateBlueprint(name, description string, members map[string][]s
 		inline += ";" + rel + "=" + strings.Join(members[rel], ",")
 	}
 	f.events = append(f.events, "createbp:"+name+":"+description+inline)
-	return &ab.Resource{Type: "blueprints", ID: "bp-" + name}, nil
+	id := "bp-" + name
+	// Inlined members really are attached by the create, so the fake tenant must hold
+	// them — otherwise the post-apply membership check reads an empty relationship and
+	// correctly reports every inlined member as not applied.
+	if !f.dropMembership {
+		for _, rel := range rels {
+			if f.members[id+"/"+rel] == nil {
+				f.members[id+"/"+rel] = map[string]bool{}
+			}
+			for _, mid := range members[rel] {
+				f.members[id+"/"+rel][mid] = true
+			}
+		}
+	}
+	return &ab.Resource{Type: "blueprints", ID: id}, nil
 }
 
 func (f *fakes) AddBlueprintMembers(bpID, rel, memberType string, ids []string) error {
@@ -149,6 +170,14 @@ func (f *fakes) AddBlueprintMembers(bpID, rel, memberType string, ids []string) 
 	}
 	f.events = append(f.events, "attach:"+bpID+":"+strings.Join(ids, ","))
 	f.relOps = append(f.relOps, "POST:"+rel+":"+memberType)
+	if !f.dropMembership {
+		if f.members[bpID+"/"+rel] == nil {
+			f.members[bpID+"/"+rel] = map[string]bool{}
+		}
+		for _, id := range ids {
+			f.members[bpID+"/"+rel][id] = true
+		}
+	}
 	return nil
 }
 
@@ -158,7 +187,25 @@ func (f *fakes) RemoveBlueprintMembers(bpID, rel, memberType string, ids []strin
 	}
 	f.events = append(f.events, "detach:"+bpID+":"+strings.Join(ids, ","))
 	f.relOps = append(f.relOps, "DELETE:"+rel+":"+memberType)
+	for _, id := range ids {
+		delete(f.members[bpID+"/"+rel], id)
+	}
 	return nil
+}
+
+// BlueprintRelationship is what the post-apply membership check reads. It reports the
+// fake tenant's ACTUAL membership, so `dropMembership` can model Apple accepting a write
+// and not applying it — the membership analogue of dropWrites.
+func (f *fakes) BlueprintRelationship(bpID, rel string) ([]ab.Resource, error) {
+	if f.bpRelErr {
+		return nil, errors.New("relationship read boom")
+	}
+	f.events = append(f.events, "relread:"+bpID+"/"+rel)
+	out := []ab.Resource{}
+	for id := range f.members[bpID+"/"+rel] {
+		out = append(out, ab.Resource{ID: id})
+	}
+	return out, nil
 }
 
 func (f *fakes) LoadBlueprints() (map[string]gitops.BlueprintSpec, error) {
