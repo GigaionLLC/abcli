@@ -52,10 +52,14 @@ asymmetry is the first thing to check.
   dependency and the mark cannot silently rasterise in a fallback typeface.
 - **Keep the merge V open.** Branch origins too close together fuse into a solid wedge below
   ~32 px and stop reading as a merge. The long diagonal run is load-bearing, not styling.
-- **The letterforms are measured, not drawn by eye.** From the original mark: x-height 270,
-  stroke 66 (0.24 of the x-height — much bolder than a normal geometric sans, and the reason it
-  reads as friendly rather than technical), b-ascender 1.37x, letter gap 0.20x. Keep those ratios
-  if the size changes.
+- **The `ab` is the ORIGINAL ARTWORK, not a redraw.** `ab-lettering.png` is the white lettering
+  lifted straight out of `v0.4.27:abgui/Resources/AppIcon.png` (x 228..796, y 313..682) as an
+  alpha mask. Scaling it is fine; redrawing it is not — the original `a` is **double-storey**
+  (scan it row by row: top arch, open sides, a solid junction band, then a second bowl), and
+  every attempt to rebuild it from circles and stems produced a single-storey `a`, which is a
+  different letter and looked wrong beside the original however the ratios were tuned.
+  The SVG embeds the same mask as a data URI, tinted — see the note in `render-icon.py`. If a
+  vector master ever turns up, swap it in there and delete that path.
 
 Rejected directions, recorded so they are not retried: a bare `ab` wordmark filling the tile
 (the two letters read as "alo" with nothing around them to anchor the reading — inside the

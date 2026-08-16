@@ -66,19 +66,23 @@ TITLE_W = 30
 DOTS = ((196, 220), (256, 220), (316, 220))
 DOT_R = 17
 
-# Lowercase "ab", measured off the original mark rather than invented:
-#   x-height 270, stroke ~66 (0.24 of x-height — considerably bolder than a normal
-#   geometric sans, and the reason the original reads as friendly rather than technical),
-#   b-ascender 1.37x the x-height, letter gap 0.20x. Both letters are as wide as the
-#   x-height: a circle with a stem flush to its right edge, and a stem with a circle
-#   flush to its left.
-BASELINE = 580
-X_HEIGHT = 190
-ASCENDER = 260               # 1.37 x the x-height, per the original
-GLYPH_W = 46                 # 0.24 x the x-height
-A_X = 368                    # left edge of the a
-B_X = 596                    # left edge of the b's stem
-PROMPT = ((238, 425), (318, 485), (238, 545))   # the > chevron, centred on the x-height
+# The "ab" lettering is the ORIGINAL ARTWORK, not a reconstruction.
+#
+# It was measured first, and the measurement is why: the original `a` is a
+# DOUBLE-STOREY a — scanning it row by row shows a top arch, open sides, a solid
+# junction band, then a second bowl below. Every attempt to rebuild it from circles
+# and stems produced a single-storey a, which is a different letter and looked
+# wrong next to the original no matter how the ratios were tuned.
+#
+# So `ab-lettering.png` is the white lettering lifted straight out of
+# v0.4.27's AppIcon.png (x 228..796, y 313..682) as an alpha mask. It is the same
+# shapes people already recognise, at any size, with no redrawing error.
+LETTERING = 'ab-lettering.png'
+LETTER_H = 250               # ascender height inside the window
+LETTER_X = 382               # left edge
+LETTER_TOP = 327
+PROMPT = ((256, 425), (336, 485), (256, 545))
+GLYPH_W = 46                 # the > chevron's stroke, matched to the lettering's weight
 
 BRANCH_W = 46
 BRANCH_L = 190               # inset from each window edge — a long diagonal keeps the
@@ -100,24 +104,13 @@ def _stroke(md, pts, w, col=255):
         md.ellipse(k(x - r, y - r, x + r, y + r), fill=col)
 
 
-def _glyph_a(md):
-    """Single-storey geometric a: a full circle with a stem flush to its right edge."""
-    w, x = GLYPH_W, X_HEIGHT
-    cx, cy = A_X + x / 2, BASELINE - x / 2
-    r = x / 2 - w / 2                       # stroke centreline
-    md.ellipse(k(cx - r, cy - r, cx + r, cy + r), outline=255, width=int(w) * SS)
-    md.rounded_rectangle(k(A_X + x - w, BASELINE - x, A_X + x, BASELINE),
-                         radius=int(w / 2) * SS, fill=255)
-
-
-def _glyph_b(md):
-    """b: ascending stem with a full circle flush to its right."""
-    w, x = GLYPH_W, X_HEIGHT
-    md.rounded_rectangle(k(B_X, BASELINE - ASCENDER, B_X + w, BASELINE),
-                         radius=int(w / 2) * SS, fill=255)
-    cx, cy = B_X + x / 2, BASELINE - x / 2
-    r = x / 2 - w / 2
-    md.ellipse(k(cx - r, cy - r, cx + r, cy + r), outline=255, width=int(w) * SS)
+def _lettering(mask):
+    """Paste the original `ab` artwork, scaled, into the ink mask."""
+    art = Image.open(HERE / LETTERING).convert('L')
+    w = round(art.width * (LETTER_H / art.height))
+    art = art.resize((w * SS, LETTER_H * SS), Image.LANCZOS)
+    mask.paste(art, (LETTER_X * SS, LETTER_TOP * SS), art)
+    return w
 
 
 def render_png(path: pathlib.Path) -> None:
@@ -144,8 +137,7 @@ def render_png(path: pathlib.Path) -> None:
         idr.ellipse(k(cx - DOT_R, cy - DOT_R, cx + DOT_R, cy + DOT_R), fill=255)
     _stroke(idr, [PROMPT[0], PROMPT[1]], GLYPH_W)
     _stroke(idr, [PROMPT[1], PROMPT[2]], GLYPH_W)
-    _glyph_a(idr)
-    _glyph_b(idr)
+    _lettering(ink)
 
     amber = Image.new('L', (N, N), 0)
     ad = ImageDraw.Draw(amber)
@@ -170,11 +162,24 @@ def _hex(c):
 
 
 def render_svg(path: pathlib.Path) -> None:
+    import base64, io as _io
     x0, y0, x1, y1 = WIN
-    w, x = GLYPH_W, X_HEIGHT
-    r = x / 2 - w / 2                      # bowl stroke centreline
-    a_cx, a_cy = A_X + x / 2, BASELINE - x / 2
-    b_cx, b_cy = B_X + x / 2, BASELINE - x / 2
+    w = GLYPH_W
+
+    # The lettering is the original raster, tinted to INK and embedded as a data URI.
+    #
+    # Not ideal for a logo SVG, and deliberate: the original `a` is double-storey, there
+    # is no vector master for it, and a hand-traced approximation is exactly what looked
+    # wrong. An embedded mask is faithful at every size and self-contained, which is what
+    # a README and a GitHub page actually need. If a vector master ever exists, swap it in
+    # here and delete this.
+    art = Image.open(HERE / LETTERING).convert('L')
+    tinted = Image.new('RGBA', art.size, INK + (0,))
+    tinted.putalpha(art)
+    buf = _io.BytesIO()
+    tinted.save(buf, format='PNG')
+    b64 = base64.b64encode(buf.getvalue()).decode('ascii')
+    letter_w = round(art.width * (LETTER_H / art.height))
 
     svg = f'''<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {S} {S}" width="{S}" height="{S}"
      role="img" aria-label="abcli">
@@ -220,16 +225,14 @@ def render_svg(path: pathlib.Path) -> None:
       <!-- > prompt -->
       <path d="M{PROMPT[0][0]},{PROMPT[0][1]} L{PROMPT[1][0]},{PROMPT[1][1]} L{PROMPT[2][0]},{PROMPT[2][1]}"
             stroke-width="{w}"/>
+    </g>
 
-      <!-- a — a full circle with a stem flush to its right edge -->
-      <circle cx="{a_cx}" cy="{a_cy}" r="{r}" stroke-width="{w}"/>
-      <rect x="{A_X + x - w}" y="{BASELINE - x}" width="{w}" height="{x}"
-            rx="{w / 2}" fill="{_hex(INK)}" stroke="none"/>
+    <!-- ab — the original lettering, embedded (see render-icon.py for why) -->
+    <image x="{LETTER_X}" y="{LETTER_TOP}" width="{letter_w}" height="{LETTER_H}"
+           href="data:image/png;base64,{b64}"/>
 
-      <!-- b — ascending stem with a full circle flush to its right -->
-      <rect x="{B_X}" y="{BASELINE - ASCENDER}" width="{w}" height="{ASCENDER}"
-            rx="{w / 2}" fill="{_hex(INK)}" stroke="none"/>
-      <circle cx="{b_cx}" cy="{b_cy}" r="{r}" stroke-width="{w}"/>
+    <g>
+
     </g>
 
     <!-- title-bar dots, in ink: the title bar is a RULE, not a filled bar, so knocking
