@@ -337,8 +337,30 @@ cmd_windows() {
   cp -R "$bundle"/. "$stage/"
   local zip="$OUT/$APPNAME-$VERSION-windows-x64.zip"
   rm -f "$zip"
-  ( cd "$OUT" && powershell -NoProfile -Command \
-      "Compress-Archive -Path '$APPNAME-$VERSION-windows/*' -DestinationPath '$(basename "$zip")' -Force" )
+
+  # bsdtar, NOT PowerShell's Compress-Archive.
+  #
+  # Compress-Archive on Windows PowerShell 5.1 stores entry names with BACKSLASH separators,
+  # which the ZIP spec does not allow (APPNOTE 4.4.17.1: forward slashes only). Explorer and
+  # Expand-Archive are lenient, so the v0.4.29 artifact did extract correctly on Windows — but
+  # `unzip` reads those names as literal filenames, so `data/flutter_assets/` arrives as a pile
+  # of files called `data\flutter_assets\…` and the app cannot find its assets.
+  #
+  # bsdtar ships in System32 on Windows 10 1803+ and on the CI runner, and writes compliant
+  # names. Git Bash's own `tar` is GNU tar, which has no `-a`, so the System32 one is named
+  # explicitly rather than relying on PATH order.
+  local wintar
+  wintar="$(cygpath -u "${SYSTEMROOT:-C:\\Windows}\\System32\\tar.exe" 2>/dev/null || echo '/c/Windows/System32/tar.exe')"
+  if [ -x "$wintar" ] && "$wintar" --version 2>/dev/null | grep -q bsdtar; then
+    # `*` rather than `./*`: the latter stores every entry with a leading "./", which is legal
+    # but shows up as a stray "." folder in some extractors.
+    ( cd "$stage" && "$wintar" -a -c -f "$zip" * )
+  else
+    warn "bsdtar not found — falling back to Compress-Archive, which writes non-standard"
+    warn "backslash paths. The zip will work on Windows but not with strict extractors."
+    ( cd "$OUT" && powershell -NoProfile -Command \
+        "Compress-Archive -Path '$APPNAME-$VERSION-windows/*' -DestinationPath '$(basename "$zip")' -Force" )
+  fi
   rm -rf "$stage"
   log "packaged $zip"
   warn "unsigned: Windows has no free notarization equivalent, so SmartScreen will warn until an"
