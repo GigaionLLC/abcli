@@ -20,7 +20,7 @@ struct BlueprintsView: View {
             openDetail(ids.first)
         }
         .overlay {
-            ListStateOverlay(isLoading: model.isLoading, error: model.loadError,
+            ListStateOverlay(isLoading: model.loading(.blueprints), error: model.failure(.blueprints),
                              isEmpty: model.blueprints.isEmpty,
                              emptyTitle: "No blueprints", emptySymbol: "square.stack.3d.up")
         }

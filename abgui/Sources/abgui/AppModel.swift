@@ -50,7 +50,7 @@ final class AppModel {
     /// fetch was still running. It is also called from inside a device detail sheet, so its
     /// failures were landing on whatever list happened to be behind that sheet.
     func loadOSReleases() async {
-        await run { self.osReleases = try await $0.osReleases() }
+        await run(.osReleases) { self.osReleases = try await $0.osReleases() }
     }
 
     // Apps & Books (VPP) — a separate service; the content token is held in-memory only.
@@ -121,7 +121,11 @@ final class AppModel {
     }
 
     // Per-screen UI state
-    var isLoading = false
+    //
+    // `loadError` belongs to the PLAN (DiffView renders it); every list screen owns its own via
+    // `failure(_:)`. The old shared `isLoading` is gone — the plan has `isPlanning`, the seed has
+    // `isSeeding`, and each list pane answers `loading(_:)` for itself, so no screen can spin or
+    // stop spinning because of work it did not start.
     var loadError: String?
     var progressLog: [String] = [] // live stderr narration from abctl during diff/seed
     var applyProgressLog: [String] = [] // live sync/apply progress, separate from final outcomes
@@ -757,8 +761,8 @@ final class AppModel {
 
     // MARK: loads (each spawns a fresh abctl; errors surface in loadError)
 
-    func loadConfigurations() async { await run { self.configurations = try await $0.configurations() } }
-    func loadBlueprints() async { await run { self.blueprints = try await $0.blueprints() } }
+    func loadConfigurations() async { await run(.configurations) { self.configurations = try await $0.configurations() } }
+    func loadBlueprints() async { await run(.blueprints) { self.blueprints = try await $0.blueprints() } }
 
     /// Compute the 3-way plan. `resetLog: false` keeps whatever is already in `progressLog` and
     /// appends this run's transcript underneath it — the seed → diff hand-off, where wiping the
@@ -970,7 +974,7 @@ final class AppModel {
 
     /// Load a read-only resource (a live GET; never writes).
     func loadReadOnly(_ kind: ReadOnlyKind) async {
-        await run { client in
+        await run(.readOnly(kind)) { client in
             switch kind {
             case .devices: self.devices = try await client.devices()
             case .mdmDevices: self.mdmDevices = try await client.mdmDevices()
@@ -1267,31 +1271,58 @@ final class AppModel {
     /// unrecoverable without relaunching. Two independent concerns need two independent tokens.
     private var workGeneration = 0
 
-    /// Shared load wrapper: toggles isLoading, clears/sets loadError, runs `body`.
-    /// Cancellation (navigating away terminates the abctl child) is swallowed like
-    /// loadPlan's — never shown as an error — and only the LATEST run may write the
-    /// shared isLoading/loadError, so an overlapping older run can't clear a live
-    /// load's spinner or overwrite its error with a stale one.
-    private func run(_ body: (AbctlClient) async throws -> Void) async {
+    // MARK: per-pane load state
+    //
+    // One `isLoading`/`loadError` shared by every screen meant one screen's fetch was another
+    // screen's spinner and another screen's error. Concretely: a slow Devices fetch spun
+    // Configurations; an OS Releases failure — which can be raised from inside a device detail
+    // SHEET — rendered on whatever list was behind it; and a generation counter existed purely
+    // to stop two overlapping reads clobbering each other's message. A pane owns its own state
+    // instead, so "is this screen busy" is a question about that screen.
+
+    /// Which screen a load belongs to.
+    enum LoadPane: Hashable {
+        case configurations, blueprints, osReleases, contexts
+        case readOnly(ReadOnlyKind)
+    }
+
+    private var loadingPanes: Set<LoadPane> = []
+    private var paneErrors: [LoadPane: String] = [:]
+
+    /// Named `loading(_:)`/`failure(_:)` rather than overloading the existing `isLoading` and
+    /// `loadError` properties: those still belong to the Diff screen's plan, and two things with
+    /// one name is how this state got confusing in the first place.
+    func loading(_ pane: LoadPane) -> Bool { loadingPanes.contains(pane) }
+    func failure(_ pane: LoadPane) -> String? { paneErrors[pane] }
+
+    /// Per-pane load wrapper. Cancellation (navigating away terminates the abctl child) is
+    /// swallowed — never shown as an error — and a pane's state is only ever written by a load
+    /// of that pane, so two screens loading at once cannot interfere at all.
+    private func run(_ pane: LoadPane, _ body: (AbctlClient) async throws -> Void) async {
         guard let client = makeClient() else {
-            loadError = "abctl was not found in the app bundle."
+            paneErrors[pane] = "abctl was not found in the app bundle."
             return
         }
+        // Still a generation, but scoped to THIS pane: re-entering a screen while its own
+        // previous fetch is in flight should not have the older one clear the newer's spinner.
         loadGeneration += 1
         let generation = loadGeneration
-        isLoading = true
-        loadError = nil
+        paneGeneration[pane] = generation
+        loadingPanes.insert(pane)
+        paneErrors[pane] = nil
         do {
             try await body(client)
         } catch is CancellationError {
-            // user navigated away / cancelled — clear the in-flight state, no error shown
+            // user navigated away / cancelled — no error shown
         } catch {
-            if !Task.isCancelled, generation == loadGeneration {
-                loadError = error.localizedDescription
+            if !Task.isCancelled, paneGeneration[pane] == generation {
+                paneErrors[pane] = error.localizedDescription
             }
         }
-        if generation == loadGeneration { isLoading = false }
+        if paneGeneration[pane] == generation { loadingPanes.remove(pane) }
     }
+
+    private var paneGeneration: [LoadPane: Int] = [:]
 }
 
 /// The model owns the notice type; the banner that renders it spells it plainly.

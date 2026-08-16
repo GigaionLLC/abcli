@@ -299,9 +299,20 @@ func getBlueprint(nameOrID string, asJSON bool) error {
 	if err != nil {
 		return err
 	}
+	// Propagate relationship errors rather than rendering a failure as an empty collection.
+	// A swallowed 429 or 403 shows up as "0 members" in the table AND in the --json document
+	// abgui's blueprint inspector consumes — an affirmatively false answer, from the one screen
+	// an operator opens to check what a blueprint actually carries. `ListPackages` is
+	// permission-gated and legitimately 403s, so this fires on a real, expected condition
+	// rather than a hypothetical one. (`status config`, `status device` and `apply -f` already
+	// learned this; this was the last caller still discarding the error.)
 	rels := make(map[string][]ab.Resource, len(blueprintRels))
 	for _, rel := range blueprintRels {
-		rels[rel], _ = c.BlueprintRelationship(r.ID, rel)
+		members, relErr := c.BlueprintRelationship(r.ID, rel)
+		if relErr != nil {
+			return fmt.Errorf("reading %s membership of blueprint %q: %w", rel, r.AttrStr("name"), relErr)
+		}
+		rels[rel] = members
 	}
 	configs, apps, devices := rels["configurations"], rels["apps"], rels["orgDevices"]
 	deficient, _ := r.Attr()["appLicenseDeficient"].(bool) // built-in-MDM Apps & Books signal

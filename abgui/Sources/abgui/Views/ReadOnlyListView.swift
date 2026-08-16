@@ -57,7 +57,7 @@ struct ReadOnlyListView: View {
                 openDetail(ids.first)
             }
             .overlay {
-                ListStateOverlay(isLoading: model.isLoading, error: model.loadError,
+                ListStateOverlay(isLoading: model.loading(.readOnly(kind)), error: model.failure(.readOnly(kind)),
                                  isEmpty: displayedRows.isEmpty,
                                  emptyTitle: searchText.isEmpty ? "No \(kind.title.lowercased())" : "No matches",
                                  emptySymbol: kind.symbol)

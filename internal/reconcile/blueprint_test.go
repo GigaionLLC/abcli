@@ -433,8 +433,11 @@ func TestApplyBlueprintsCreateThenAttach(t *testing.T) {
 		t.Fatalf("create-with-inline = errors %d writes %d skipped %d, want 0/1/0: %+v", res.Errors, res.Writes, res.Skipped, res.Outcomes)
 	}
 	wantCreate := "createbp:NewBP:fresh from git;configurations=c-wifi;orgDevices=d-aaa"
-	if len(f.events) != 1 || f.events[0] != wantCreate {
-		t.Errorf("events = %v, want exactly [%s]", f.events, wantCreate)
+	// WRITES only: the post-apply membership check also reads each touched relationship
+	// back (`relread:…`), which is what confirms the inlined members really landed rather
+	// than trusting the create's 2xx. Reads spend no --limit-writes budget.
+	if got := writeEvents(f.events); len(got) != 1 || got[0] != wantCreate {
+		t.Errorf("write events = %v, want exactly [%s]", got, wantCreate)
 	}
 	if len(f.relOps) != 0 {
 		t.Errorf("inlined members must not also POST relationships: %v", f.relOps)
@@ -452,8 +455,8 @@ func TestApplyBlueprintsCreateThenAttach(t *testing.T) {
 	if res.Writes != 1 || res.Skipped != 0 || res.Errors != 0 {
 		t.Errorf("budget=1 → writes=%d skipped=%d errors=%d, want 1/0/0", res.Writes, res.Skipped, res.Errors)
 	}
-	if indexOf(f.events, wantCreate) != 0 || len(f.events) != 1 {
-		t.Errorf("budget=1 must spend the only write on the inlining create: %v", f.events)
+	if got := writeEvents(f.events); len(got) != 1 || got[0] != wantCreate {
+		t.Errorf("budget=1 must spend the only write on the inlining create: %v", got)
 	}
 
 	// Budget already exhausted by phase 1 → the create skips, and the attaches
@@ -660,4 +663,94 @@ func TestApplyBlueprintsAdoptUnmanagedCollection(t *testing.T) {
 	if f.bpSpecs["Sales"].Apps != nil {
 		t.Errorf("an unmanaged collection must stay unmanaged, got %v", *f.bpSpecs["Sales"].Apps)
 	}
+}
+
+// A membership write Apple ACKNOWLEDGES but does not apply must not be reported as done.
+//
+// The project's rule is that a 2xx is not proof — every configuration write reads back
+// because Apple accepts an out-of-spec profile and silently drops it. Membership writes had
+// no such check: "attached" was reported on the response code alone.
+func TestApplyBlueprintsCatchesAMembershipWriteAppleDidNotApply(t *testing.T) {
+	f := newFakes()
+	f.dropMembership = true // 2xx, membership unchanged
+	plan := &BlueprintPlan{Items: []BlueprintItem{
+		{Blueprint: "Sales", BPID: "bp-sales", Action: Attach, Collection: ab.CollectionConfigurations,
+			Config: "wifi.mobileconfig", ConfigID: "c-wifi"},
+	}}
+	res := engineWith(f).ApplyBlueprints(plan, Opts{}, 0)
+	if res.Errors != 1 {
+		t.Fatalf("errors = %d, want 1 — an unapplied attach must not read as done: %+v", res.Errors, res.Outcomes)
+	}
+	if res.Outcomes[0].Status != "error" {
+		t.Errorf("status = %q, want error", res.Outcomes[0].Status)
+	}
+	if !strings.Contains(res.Outcomes[0].Detail, "does not reflect it") {
+		t.Errorf("detail should say the tenant disagrees, got: %q", res.Outcomes[0].Detail)
+	}
+}
+
+// The check is per RELATIONSHIP, not per member: attaching many configs to one blueprint
+// costs ONE extra read. A verification whose cost scales with the number of writes would
+// discourage its own use on a rate-limited API.
+func TestMembershipVerificationCostsOneReadPerRelationship(t *testing.T) {
+	f := newFakes()
+	items := []BlueprintItem{}
+	for _, name := range []string{"a", "b", "c", "d", "e"} {
+		items = append(items, BlueprintItem{
+			Blueprint: "Sales", BPID: "bp-sales", Action: Attach,
+			Collection: ab.CollectionConfigurations, Config: name, ConfigID: "c-" + name,
+		})
+	}
+	res := engineWith(f).ApplyBlueprints(&BlueprintPlan{Items: items}, Opts{}, 0)
+	if res.Errors != 0 {
+		t.Fatalf("errors = %d, want 0: %+v", res.Errors, res.Outcomes)
+	}
+	if res.Writes != 5 {
+		t.Errorf("writes = %d, want 5", res.Writes)
+	}
+	// One relationship touched → exactly one verifying read, regardless of member count.
+	reads := 0
+	for _, e := range f.events {
+		if strings.HasPrefix(e, "relread:") {
+			reads++
+		}
+	}
+	if reads > 1 {
+		t.Errorf("verification made %d reads for one relationship; it must batch", reads)
+	}
+}
+
+// A verifying read that FAILS is "not verified", never "failed": a GET that errored says
+// nothing about the POST. Same posture the configuration read-back takes.
+func TestMembershipVerificationReadFailureIsNotAWriteFailure(t *testing.T) {
+	f := newFakes()
+	f.bpRelErr = true
+	plan := &BlueprintPlan{Items: []BlueprintItem{
+		{Blueprint: "Sales", BPID: "bp-sales", Action: Attach, Collection: ab.CollectionConfigurations,
+			Config: "wifi.mobileconfig", ConfigID: "c-wifi"},
+	}}
+	res := engineWith(f).ApplyBlueprints(plan, Opts{}, 0)
+	if res.Errors != 0 {
+		t.Errorf("a failed re-read must not fail the write: errors = %d", res.Errors)
+	}
+	if res.Outcomes[0].Status != "done" {
+		t.Errorf("status = %q, want done", res.Outcomes[0].Status)
+	}
+	if !strings.Contains(res.Outcomes[0].Detail, "NOT VERIFIED") {
+		t.Errorf("detail should say it could not be verified, got: %q", res.Outcomes[0].Detail)
+	}
+}
+
+// writeEvents filters the fake's event log down to tenant WRITES, dropping the
+// post-apply verifying reads. Tests that assert "this run made exactly one write" are
+// about rate limit and --limit-writes, and a read must not disturb them.
+func writeEvents(events []string) []string {
+	out := []string{}
+	for _, e := range events {
+		if strings.HasPrefix(e, "relread:") {
+			continue
+		}
+		out = append(out, e)
+	}
+	return out
 }

@@ -32,8 +32,8 @@ struct OSReleasesView: View {
                 TableColumn("Devices") { Text(String($0.supportedDevices?.count ?? 0)) }
             }
             .overlay {
-                if model.isLoading { ProgressView() }
-                else if let error = model.loadError { ContentUnavailableView("Couldn't load releases", systemImage: "exclamationmark.triangle", description: Text(error)) }
+                if model.loading(.osReleases) { ProgressView() }
+                else if let error = model.failure(.osReleases) { ContentUnavailableView("Couldn't load releases", systemImage: "exclamationmark.triangle", description: Text(error)) }
                 else if rows.isEmpty { ContentUnavailableView.search(text: search) }
             }
         }

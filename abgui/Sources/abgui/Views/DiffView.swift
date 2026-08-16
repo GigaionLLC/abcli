@@ -48,18 +48,19 @@ struct DiffView: View {
                     GitSourceOfTruthControl(layout: .toolbar,
                                             isOn: model.gitSourceOfTruth,
                                             pending: $pendingGitSourceOfTruth)
-                    // These four SHOW THEIR TITLES. A macOS toolbar renders a bare `Label` as
-                    // its icon alone, and with no `.help` there is not even a tooltip to fall
-                    // back on — the row read as four anonymous glyphs, two of which
-                    // (checkmark.shield / checkmark.circle) are near-identical at toolbar size
-                    // while doing very different things: one only reads local files, the other
-                    // writes the live tenant. The word is the affordance, exactly as it is on
-                    // the Git-source-of-truth control sitting beside them.
+                    // Titles go to the two controls a glyph cannot tell apart: `checkmark.shield`
+                    // (reads local files) and `checkmark.circle` (writes the live tenant) are
+                    // near-identical at toolbar size while doing very different things. Refresh
+                    // and Workspace keep their universally-legible glyph plus a tooltip — giving
+                    // every control a title is what made this toolbar outgrow the window and clip
+                    // its last item at ~1090px.
                     Button { sheet = .validate } label: { Label("Verify Configs", systemImage: "checkmark.shield") }
-                        .toolbarLabel("Check the profiles in gitops/lib against Apple's schema. Reads local files only — no tenant change.")
+                        .toolbarLabel("Check the profiles in gitops/lib against Apple's schema. Reads local files only — no tenant change.",
+                                      weight: .titled)
                         .disabled(model.isSeeding)
                     Button { sheet = .apply } label: { Label("Apply…", systemImage: "checkmark.circle") }
-                        .toolbarLabel("Reconcile Apple Business with this plan. Opens a sheet that previews the exact abctl command and asks you to confirm before anything is written.")
+                        .toolbarLabel("Reconcile Apple Business with this plan. Opens a sheet that previews the exact abctl command and asks you to confirm before anything is written.",
+                                      weight: .titled)
                         .disabled((model.plan?.actionableChangeCount ?? 0) == 0)
                     Button { model.refreshPlan() } label: { Label("Refresh", systemImage: "arrow.clockwise") }
                         .toolbarLabel("Recompute the plan: re-read gitops/ and re-fetch the live tenant.")
