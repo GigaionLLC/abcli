@@ -74,6 +74,14 @@ jobs:
           channel: stable
           flutter-version: 3.47.0 # keep in step with .github/workflows/gui-flutter.yml
           cache: true
+      - name: pin the artifact version for this job
+        shell: bash
+        # `git describe --dirty` is NOT stable across two calls in one job: `flutter build`
+        # rewrites tracked files, so the tree is clean on the first and dirty on the second.
+        # Computing it once here is what makes the notarize step able to find what the build step
+        # produced. (v0.4.28 shipped without notarized macOS assets for exactly this reason.)
+        run: echo "ABGUI_VERSION=$(git describe --tags --always 2>/dev/null || echo dev)" >> "$GITHUB_ENV"
+
       - name: import Developer ID certificate
         if: ${{ env.HAS_APPLE_SIGNING_CERT == 'true' }}
         env:
@@ -160,6 +168,14 @@ jobs:
           channel: stable
           flutter-version: 3.47.0
           cache: true
+      - name: pin the artifact version for this job
+        shell: bash
+        # `git describe --dirty` is NOT stable across two calls in one job: `flutter build`
+        # rewrites tracked files, so the tree is clean on the first and dirty on the second.
+        # Computing it once here is what makes the notarize step able to find what the build step
+        # produced. (v0.4.28 shipped without notarized macOS assets for exactly this reason.)
+        run: echo "ABGUI_VERSION=$(git describe --tags --always 2>/dev/null || echo dev)" >> "$GITHUB_ENV"
+
       - name: build + package abgui (Windows x64)
         shell: bash
         run: ./scripts/build-gui-flutter.sh windows
@@ -191,6 +207,14 @@ jobs:
           channel: stable
           flutter-version: 3.47.0
           cache: true
+      - name: pin the artifact version for this job
+        shell: bash
+        # `git describe --dirty` is NOT stable across two calls in one job: `flutter build`
+        # rewrites tracked files, so the tree is clean on the first and dirty on the second.
+        # Computing it once here is what makes the notarize step able to find what the build step
+        # produced. (v0.4.28 shipped without notarized macOS assets for exactly this reason.)
+        run: echo "ABGUI_VERSION=$(git describe --tags --always 2>/dev/null || echo dev)" >> "$GITHUB_ENV"
+
       - name: install Linux desktop build deps
         run: |
           sudo apt-get update

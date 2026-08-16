@@ -41,7 +41,16 @@ APPNAME="abgui"
 OUT="$repo/bin"
 
 # The full descriptive version, injected into abctl and used in artifact filenames.
-VERSION="$(git describe --tags --always --dirty 2>/dev/null || echo dev)"
+#
+# ABGUI_VERSION pins it, and CI MUST set it. `git describe --dirty` is not stable across two
+# invocations in the same job: `flutter build` rewrites tracked files (GeneratedPluginRegistrant,
+# pubspec.lock), so the tree is clean on the first call and dirty on the second. That bit the
+# v0.4.28 release — `macos` produced abgui-v0.4.28-macos.zip, then `macos-notarize` looked for
+# abgui-v0.4.28-DIRTY-macos.zip, found nothing, and the notarized assets never shipped.
+#
+# Keep `--dirty` for local builds: there it is a genuine warning that the artifact does not
+# correspond to any commit.
+VERSION="${ABGUI_VERSION:-$(git describe --tags --always --dirty 2>/dev/null || echo dev)}"
 LDFLAGS="-s -w -X github.com/GigaionLLC/abcli/internal/cli.version=$VERSION"
 
 # Flutter's --build-name becomes CFBundleShortVersionString on macOS, which Apple requires to
@@ -273,11 +282,21 @@ cmd_macos_notarize() {
   require_host macos
   require_notary_creds
   local app="$OUT/$APPNAME.app"
-  local zip="$OUT/$APPNAME-$VERSION-macos.zip"
-  local dmg="$OUT/$APPNAME-$VERSION-macos.dmg"
   [ -d "$app" ] || die "no $app — run './scripts/build-gui-flutter.sh macos' first"
-  [ -f "$zip" ] || die "no $zip — run './scripts/build-gui-flutter.sh macos' first"
-  [ -f "$dmg" ] || die "no $dmg — run './scripts/build-gui-flutter.sh macos' first"
+
+  # Resolve what `macos` ACTUALLY produced rather than reconstructing the name from VERSION.
+  # Belt and braces alongside ABGUI_VERSION: if the two invocations ever disagree again, this
+  # notarizes the real artifacts instead of failing, and a mismatch is reported loudly rather
+  # than looking like "there was nothing to do".
+  local zip dmg
+  zip="$(ls -1t "$OUT/$APPNAME-"*-macos.zip 2>/dev/null | head -1 || true)"
+  dmg="$(ls -1t "$OUT/$APPNAME-"*-macos.dmg 2>/dev/null | head -1 || true)"
+  [ -n "$zip" ] || die "no $OUT/$APPNAME-*-macos.zip — run './scripts/build-gui-flutter.sh macos' first"
+  [ -n "$dmg" ] || die "no $OUT/$APPNAME-*-macos.dmg — run './scripts/build-gui-flutter.sh macos' first"
+  if [ "$zip" != "$OUT/$APPNAME-$VERSION-macos.zip" ]; then
+    warn "notarizing $(basename "$zip"), but this run computed VERSION=$VERSION."
+    warn "Set ABGUI_VERSION so both invocations agree — see the note at the top of this script."
+  fi
 
   # Submit both CONCURRENTLY so the release waits on Apple roughly once rather than twice.
   log "submitting app zip + DMG for notarization"
