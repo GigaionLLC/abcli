@@ -51,6 +51,13 @@ dev_dependencies:
   # dependency graph for no reason.
   msix: ^3.18.0
 
+  # Generates the macOS .icns set and the Windows .ico from ONE master PNG. DEV-ONLY.
+  # Without it both platforms keep the stock `flutter create` Flutter logo — which is
+  # exactly what shipped through v0.4.30: the AppImage and the MSIX tiles had the real
+  # mark (both take a plain PNG), while the macOS .app and the Windows .exe did not,
+  # because those need generated multi-size icon containers nobody had produced.
+  flutter_launcher_icons: ^0.14.1
+
 flutter:
   uses-material-design: true
 
@@ -158,3 +165,23 @@ msix_config:
   # Local builds are test-signed and installable; CI passes `--store` on the command line
   # for the Partner-Center-ready, Microsoft-signed-on-ingestion package.
   store: false
+
+# --- launcher icons -------------------------------------------------------------------
+# Regenerate after changing the brand master:
+#     cd abgui-flutter && dart run flutter_launcher_icons
+# The master itself is generated — see docs/brand/render-icon.py, which emits both the
+# SVG and this PNG from one set of constants so they cannot drift.
+#
+# Linux is absent because flutter_launcher_icons does not support it: the Linux icon is
+# assets/icon/abgui.png, copied into the AppImage's AppDir by scripts/build-gui-flutter.sh,
+# and the same file is the MSIX logo. Keep all three in step by regenerating from the
+# brand master rather than editing any of them by hand.
+flutter_launcher_icons:
+  image_path: "../docs/brand/abcli-icon-1024.png"
+  macos:
+    generate: true
+    image_path: "../docs/brand/abcli-icon-1024.png"
+  windows:
+    generate: true
+    image_path: "../docs/brand/abcli-icon-1024.png"
+    icon_size: 256

@@ -1,4 +1,4 @@
-<img src="docs/assets/abgui-icon.png" alt="ab" width="116" align="right"/>
+<img src="docs/brand/abcli-icon.svg" alt="abcli" width="116" align="right"/>
 
 # abcli
 
@@ -66,7 +66,7 @@ them, so your MDM profiles and blueprint membership live in version control like
 
 ## abgui — desktop app
 
-![abgui — the read-only Users view with roles (UI preview)](docs/assets/abgui-screenshot.png)
+![abgui — the dashboard, running on Windows against a live Apple Business tenant](docs/assets/abgui-screenshot.png)
 
 **[abgui](abgui-flutter/)** puts a **Flutter** control plane on top of `abctl`, for **macOS, Windows and Linux**.
 It ships as one self-contained bundle with `abctl` **embedded inside it** (no separate install, no `PATH`),
@@ -122,7 +122,8 @@ CLI, decodes its JSON, and renders it.
 See the port plan in **[docs/abgui-flutter-port.md](docs/abgui-flutter-port.md)** and the original design in
 **[docs/abgui-design.md](docs/abgui-design.md)**.
 
-> The image above is a UI preview of the previous SwiftUI build, kept until a new screenshot is taken.
+> Captured from the Flutter build on Windows. The same app runs on macOS and Linux — abgui is one
+> codebase across all three, with `abctl` embedded inside each bundle.
 
 ## Install & build
 
