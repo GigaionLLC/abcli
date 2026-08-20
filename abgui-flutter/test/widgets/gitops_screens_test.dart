@@ -24,6 +24,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import 'package:abgui/src/abctl/abctl_args.dart';
 import 'package:abgui/src/abctl/abctl_error.dart';
 import 'package:abgui/src/abctl/command_formatter.dart';
 import 'package:abgui/src/abctl/process_runner.dart';
@@ -577,6 +578,76 @@ void main() {
 
       expect(find.text('Applied 1 change(s)'), findsOneWidget);
       expect(find.text('Close'), findsOneWidget);
+    });
+
+    testWidgets('a recompute re-arms Apply; the spent plan does not', (
+      WidgetTester tester,
+    ) async {
+      // The session-ending bug: `canApply` was gated on `ApplyState.isTerminal`, and that state
+      // lives in the STORE. So the first apply of a session disabled Apply permanently — a
+      // refresh did not clear it, and neither did closing and reopening the dialog, because the
+      // widget was never where the flag was. The operator was left with a plan on screen, a
+      // disabled button, and a green banner about a run that had already been superseded.
+      //
+      // Additive mode so the typed gate is not part of what is being measured here.
+      final _ApplyHarness harness = await _pumpApply(
+        tester,
+        planJson: _additivePlanJson,
+        gitSourceOfTruth: false,
+      );
+      expect(_applyEnabled(tester), isTrue);
+
+      await _applyNow(tester, harness);
+      expect(find.text('Applied 1 change(s)'), findsOneWidget);
+      // Still the rule: these counts describe a tenant that has since changed.
+      expect(
+        _applyEnabled(tester),
+        isFalse,
+        reason: 'one apply per plan — the approved counts are no longer true',
+      );
+
+      await harness.container.read(gitopsProvider.notifier).refreshPlan();
+      await tester.pumpAndSettle();
+
+      expect(
+        _applyEnabled(tester),
+        isTrue,
+        reason:
+            'a recompute publishes a new plan, and the receipt above described the old one',
+      );
+      expect(
+        find.text('Applied 1 change(s)'),
+        findsNothing,
+        reason:
+            'a verdict banner over rows that run never saw is how the stale receipt read as the '
+            'current one',
+      );
+    });
+
+    testWidgets('a refusal that never ran abctl leaves Apply usable', (
+      WidgetTester tester,
+    ) async {
+      // A pre-flight refusal reaches a terminal verdict without spawning anything. The store has
+      // always known the difference (`didRun`); the dialog did not, so one refusal disabled Apply
+      // AND hid the confirmation field under it — no way back inside the sheet.
+      final _ApplyHarness harness = await _pumpApply(
+        tester,
+        planJson: _additivePlanJson,
+        gitSourceOfTruth: false,
+      );
+      final GitopsStore store = harness.container.read(gitopsProvider.notifier);
+      // Refuse it the way the store does: a plan in flight is another command running.
+      unawaited(store.refreshPlan());
+      await store.applyPlan(
+        ApplyOptions.additive(
+          refresh: AbctlRefresh.smart,
+          verify: AbctlVerify.targeted,
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(harness.container.read(gitopsProvider).apply.didRun, isFalse);
+      expect(_applyEnabled(tester), isTrue);
     });
   });
 

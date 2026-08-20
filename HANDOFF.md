@@ -38,6 +38,13 @@ most likely to be broken by a well-meaning edit:
   `flush`, `close` or `done`. What actually guards `create config -f -` is abctl rejecting a
   profile it could not parse and exiting non-zero. Do not "fix" `_writeStdin` believing it covers
   macOS — it never did, and neither did the Swift original.
+- **An apply is spent per PLAN, never per session** (v0.4.33). `ApplyState` carries the `Plan`
+  object it ran against; `describes()` scopes it to the plan a screen is showing, and `spent`
+  (`didRun && isTerminal`) is the only thing allowed to disable Apply. Gating on `isTerminal`
+  alone is the bug this replaced: that state lives in the store, so the first apply of a session
+  disabled Apply permanently — a recompute did not clear it and neither did reopening the dialog,
+  because the flag was never in the widget. `didRun` is the other half: a pre-flight refusal
+  reaches a terminal verdict without abctl ever being spawned, and nothing spent may lock nothing.
 
 Build: `make gui-check` / `gui-test` (anywhere, or `./tool/flutter.sh` in Docker) and
 `make gui-macos|gui-windows|gui-linux`, each on its own platform — Flutter does not cross-compile

@@ -267,7 +267,17 @@ class _ApplyDialogState extends ConsumerState<ApplyDialog> {
     // Selected, not watched whole: an apply publishes a new `GitopsState` on every transition,
     // and the plan table behind this dialog must not re-sort itself because a spinner moved.
     final PlanState plan = ref.watch(gitopsProvider.select((s) => s.plan));
-    final ApplyState apply = ref.watch(gitopsProvider.select((s) => s.apply));
+    // The receipt belongs to the plan it ran against, and this dialog outlives neither. A run
+    // that finished against an EARLIER plan is history the moment a recompute publishes a new
+    // one: read whole, its terminal verdict banner would sit on top of rows it never saw, and —
+    // because `canApply` is gated on `isTerminal` — Apply stayed dead for the rest of the
+    // session, no matter how many times the plan was refreshed. Reopening the dialog did not
+    // help either: this state lives in the store, not in the widget. So a stale run reads as
+    // what it now is: nothing has been applied to what is on screen.
+    final ApplyState stored = ref.watch(gitopsProvider.select((s) => s.apply));
+    final ApplyState apply = stored.describes(plan.plan)
+        ? stored
+        : const ApplyState();
     final bool gitSourceOfTruth = ref.watch(
       gitopsProvider.select((s) => s.gitSourceOfTruth),
     );
@@ -453,12 +463,19 @@ class _ApplyDialogState extends ConsumerState<ApplyDialog> {
         (phrase.isNotEmpty &&
             _typed.trim() == phrase &&
             _confirmedFor == subject);
-    // One apply per dialog. After a terminal outcome the counts above describe a tenant that has
+    // One apply per PLAN. After a terminal outcome the counts above describe a tenant that has
     // since changed, so a second press would be approving numbers that are no longer true; the
-    // way back is the recompute, which is what the button beside it does.
+    // way back is the recompute, which is what the button beside it does — and `apply` is scoped
+    // to the plan on screen, so the recompute genuinely re-arms this.
+    //
+    // `didRun` is the other half, and the store learned it first: a pre-flight refusal (no
+    // workspace chosen, another command running) reaches a terminal verdict without abctl ever
+    // being spawned. Nothing was spent, so nothing may be locked — without this, one refusal
+    // disabled Apply and hid the confirmation field beneath it, leaving no way back at all.
+    final bool spent = apply.spent;
     final bool canApply =
         !apply.isRunning &&
-        !apply.isTerminal &&
+        !spent &&
         workspace != null &&
         rows.isNotEmpty &&
         confirmed;
@@ -474,7 +491,10 @@ class _ApplyDialogState extends ConsumerState<ApplyDialog> {
         crossAxisAlignment: CrossAxisAlignment.stretch,
         mainAxisSize: MainAxisSize.min,
         children: <Widget>[
-          if (gated && !apply.isTerminal) ...<Widget>[
+          // `spent`, not `isTerminal`: a refusal that never spawned abctl must leave the gate it
+          // hides behind reachable, or the operator is left with a disabled button and no field
+          // to satisfy it.
+          if (gated && !spent) ...<Widget>[
             // `confirmed` rather than a second `_typed == phrase` here: the tick and the green
             // border must agree with the button, and a field that reads "Confirmed" beside a
             // disabled Apply is a bug report waiting to be filed.
@@ -488,7 +508,9 @@ class _ApplyDialogState extends ConsumerState<ApplyDialog> {
           ],
           Row(
             children: <Widget>[
-              if (rows.isEmpty && !apply.isTerminal)
+              // Pairs with the disabled button: whenever Apply is off because there is nothing to
+              // apply, this is the sentence that says so.
+              if (rows.isEmpty && !spent)
                 Expanded(
                   child: Text(
                     'Nothing is pending — there is no plan to apply.',
@@ -663,7 +685,9 @@ class _ApplyDialogState extends ConsumerState<ApplyDialog> {
             gitSourceOfTruth: gitSourceOfTruth,
           ),
         ],
-        if (!apply.isTerminal && !apply.isRunning) ...<Widget>[
+        // `spent` for the same reason the confirmation field uses it: a refusal changed nothing,
+        // and the options it refused are what the operator is most likely to want to adjust.
+        if (!apply.spent && !apply.isRunning) ...<Widget>[
           const SizedBox(height: AbSpace.lg),
           _optionsSection(ab, gitSourceOfTruth, refresh),
         ],

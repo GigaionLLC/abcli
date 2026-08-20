@@ -304,6 +304,7 @@ enum ApplyVerdict {
 class ApplyState {
   const ApplyState({
     this.isRunning = false,
+    this.plan,
     this.startedAt,
     this.finishedAt,
     this.result,
@@ -314,6 +315,15 @@ class ApplyState {
   });
 
   final bool isRunning;
+
+  /// The [Plan] document this run was started against — the rows the operator approved.
+  ///
+  /// Held by IDENTITY, not by value, and it is what makes a receipt attributable. A receipt
+  /// describes the tenant as it was before that plan was applied, so the moment `refreshPlan`
+  /// publishes a NEW `Plan` the verdict, the outcome rows and the transcript below stop being
+  /// an answer to "what is pending" — see [describes]. Null for a state nothing ran from: the
+  /// initial value, and a pre-flight refusal built from `const ApplyState()`.
+  final Plan? plan;
 
   /// When Apply was pressed — what the dialog's live elapsed reading counts from.
   final DateTime? startedAt;
@@ -351,9 +361,15 @@ class ApplyState {
   final List<String> transcript;
 
   /// Spinner up, and NOTHING from the previous run survives — an earlier receipt sitting under a
-  /// running apply is a table of outcomes that belongs to a different tenant state.
-  ApplyState started(DateTime at) =>
-      ApplyState(isRunning: true, startedAt: at, transcript: const <String>[]);
+  /// running apply is a table of outcomes that belongs to a different tenant state. [plan] is the
+  /// document being applied, carried through every transition below so the receipt can say which
+  /// rows it is about.
+  ApplyState started(DateTime at, {Plan? plan}) => ApplyState(
+    isRunning: true,
+    plan: plan,
+    startedAt: at,
+    transcript: const <String>[],
+  );
 
   /// abctl printed a receipt. [failure] is null only for a run that was clean end to end.
   ApplyState finished({
@@ -363,6 +379,7 @@ class ApplyState {
     required List<String> transcript,
     required DateTime at,
   }) => ApplyState(
+    plan: plan,
     startedAt: startedAt,
     finishedAt: at,
     result: applied,
@@ -377,6 +394,7 @@ class ApplyState {
     List<String> transcript = const <String>[],
     DateTime? at,
   }) => ApplyState(
+    plan: plan,
     startedAt: startedAt,
     finishedAt: at,
     failure: failure,
@@ -389,12 +407,25 @@ class ApplyState {
     required List<String> transcript,
     required DateTime at,
   }) => ApplyState(
+    plan: plan,
     startedAt: startedAt,
     finishedAt: at,
     failure: failure,
     interrupted: true,
     transcript: transcript,
   );
+
+  /// Whether this state is about [current] — the plan a screen is showing right now.
+  ///
+  /// True for a run in flight (an apply cannot be outlived by a recompute: `refreshPlan` refuses
+  /// to start during one), for a pre-flight refusal (it never ran, so its message belongs to
+  /// whatever is on screen), and for a finished run whose plan is still the one displayed.
+  /// False once a recompute has published a new `Plan` — at which point this receipt is history
+  /// and no control should be gated on it. Same identity test as [GitopsStore.applyPlan]'s
+  /// one-apply-per-plan guard, deliberately: the button and the store must not disagree about
+  /// whether a plan has been spent.
+  bool describes(Plan? current) =>
+      isRunning || !didRun || identical(plan, current);
 
   /// True when abctl positively established that a write did not reach Apple. Distinct from "not
   /// everything was checked": `--verify=none` checks nothing and is not a failure.
@@ -455,10 +486,22 @@ class ApplyState {
   /// one refusal (no workspace chosen, say) would lock the button for the rest of the session.
   bool get didRun => startedAt != null;
 
+  /// A real run reached a real outcome — the approval that started it has been spent.
+  ///
+  /// The one thing that may disable Apply, and it is deliberately narrower than [isTerminal]:
+  /// a refusal is terminal too, and locking the button on one would end the session's ability
+  /// to apply anything over a run that never happened. Scope it with [describes] before using
+  /// it — "spent" is a fact about a PLAN, not about the session.
+  bool get spent => didRun && isTerminal;
+
   @override
   bool operator ==(Object other) =>
       other is ApplyState &&
       other.isRunning == isRunning &&
+      // By identity, like everything else that reads this field: two value-equal plans are
+      // still two different approvals, and a rebuild skipped here would leave a re-armed
+      // button drawn as if it were still spent.
+      identical(other.plan, plan) &&
       other.startedAt == startedAt &&
       other.finishedAt == finishedAt &&
       other.result == result &&
@@ -1122,11 +1165,10 @@ class GitopsStore extends Notifier<GitopsState> {
     // The identity of the `Plan` object is what makes "again" checkable without erasing the
     // receipt the operator is still reading: `refreshPlan` publishes a NEW `Plan`, so a
     // recompute re-arms the button by itself, while `supersededByApply()` only sets a flag on
-    // `PlanState` and leaves the plan it describes the same object. `didRun` keeps a pre-flight
-    // refusal — which never touched `_appliedPlan` — from counting as an apply.
-    if (state.apply.didRun &&
-        state.apply.isTerminal &&
-        identical(_appliedPlan, state.plan.plan)) {
+    // `PlanState` and leaves the plan it describes the same object. `spent` (via `didRun`) keeps
+    // a pre-flight refusal — which never touched `_appliedPlan` — from counting as an apply.
+    // `ApplyDialog` gates its button on the same two facts, so the two cannot disagree.
+    if (state.apply.spent && identical(_appliedPlan, state.plan.plan)) {
       _refuseApply(
         'This plan has already been applied. The counts you approved describe the tenant as it '
         'was BEFORE that run, so applying them again would execute numbers that are no longer '
@@ -1146,7 +1188,9 @@ class GitopsStore extends Notifier<GitopsState> {
     // `$ abctl sync --apply …` from inside the call below, and a clear afterwards would wipe the
     // one line on screen that says what is being run.
     sink.clear();
-    state = state.copyWith(apply: state.apply.started(DateTime.now()));
+    state = state.copyWith(
+      apply: state.apply.started(DateTime.now(), plan: _appliedPlan),
+    );
 
     final log = await _openRunLog(
       workspace,
