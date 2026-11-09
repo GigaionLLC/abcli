@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 )
@@ -67,6 +68,41 @@ func TestAPIError403Hint(t *testing.T) {
 	}
 	if ae, ok := err.(*APIError); !ok || ae.Status != 403 {
 		t.Fatalf("want *APIError 403, got %T %v", err, err)
+	}
+}
+
+// TestAPIError403RemediationByCode checks that Apple's 403 body code selects the
+// right remediation. A generic "grant permissions" hint on a pending-terms or
+// Included-MDM failure sends operators down the wrong path.
+func TestAPIError403RemediationByCode(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+		want string
+	}{
+		{
+			name: "terms not accepted",
+			body: `{"errors":[{"status":"403","code":"FORBIDDEN_ERROR.TERMS_AND_CONDITIONS_NOT_ACCEPTED","title":"Terms & Conditions have not been accepted"}]}`,
+			want: "accept the pending Terms & Conditions",
+		},
+		{
+			name: "included MDM not enabled",
+			body: `{"errors":[{"status":"403","code":"FORBIDDEN_ERROR.INCLUDED_MDM_NOT_ENABLED"}]}`,
+			want: "built-in (Included) MDM is not enabled",
+		},
+		{
+			name: "missing key permissions",
+			body: `{"errors":[{"status":"403"}]}`,
+			want: "View/Manage Blueprints",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := (&APIError{Status: 403, Body: tc.body}).Error()
+			if !strings.Contains(got, tc.want) {
+				t.Fatalf("error = %q, want it to contain %q", got, tc.want)
+			}
+		})
 	}
 }
 

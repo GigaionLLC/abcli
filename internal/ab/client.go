@@ -44,8 +44,8 @@ type APIError struct {
 
 func (e *APIError) Error() string {
 	msg := fmt.Sprintf("API %d", e.Status)
-	if e.Status == 403 {
-		msg += " (forbidden — grant 'View/Manage Blueprints' + 'View/Create device configurations' to the API account, then regenerate the key)"
+	if hint := e.hint(); hint != "" {
+		msg += " (" + hint + ")"
 	}
 	if e.Body != "" {
 		b := e.Body
@@ -55,6 +55,31 @@ func (e *APIError) Error() string {
 		msg += ": " + b
 	}
 	return msg
+}
+
+// hint turns Apple's error code into an actionable remediation. Apple reuses
+// 403 for several unrelated problems (terms, org capability, key permissions),
+// so the body's code — not the status alone — decides what to tell the user.
+func (e *APIError) hint() string {
+	if e.Status != 403 {
+		return ""
+	}
+	var envelope struct {
+		Errors []struct {
+			Code string `json:"code"`
+		} `json:"errors"`
+	}
+	if json.Unmarshal([]byte(e.Body), &envelope) == nil {
+		for _, apiErr := range envelope.Errors {
+			switch apiErr.Code {
+			case "FORBIDDEN_ERROR.TERMS_AND_CONDITIONS_NOT_ACCEPTED":
+				return "Apple Business terms have not been accepted — sign in to Apple Business Manager as an admin, accept the pending Terms & Conditions, then retry"
+			case "FORBIDDEN_ERROR.INCLUDED_MDM_NOT_ENABLED":
+				return "built-in (Included) MDM is not enabled — enable it in Apple Business Manager settings"
+			}
+		}
+	}
+	return "forbidden — grant 'View/Manage Blueprints' + 'View/Create device configurations' to the API account, then regenerate the key"
 }
 
 // Raw issues an authenticated request. For replayable (nil-body) requests it

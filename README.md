@@ -140,12 +140,14 @@ No production credentials are needed to build or test — the unit suite mocks t
 
 ## Prerequisites (Apple Business)
 
-1. **Enable built-in ("Included") MDM** for your organization in **Apple Business → Settings**. Without it,
+1. **Accept any pending Terms & Conditions** in **Apple Business** as an organization admin. Until they are
+   accepted, API calls fail with `403 FORBIDDEN_ERROR.TERMS_AND_CONDITIONS_NOT_ACCEPTED`.
+2. **Enable built-in ("Included") MDM** for your organization in **Apple Business → Settings**. Without it,
    every `/configurations` and `/blueprints` request returns `403 INCLUDED_MDM_NOT_ENABLED` — this is an org
    capability toggle, not a key permission (verified live).
-2. **Create an API account:** Apple Business → **Settings → Integrations → API** → create an account and
+3. **Create an API account:** Apple Business → **Settings → Integrations → API** → create an account and
    **download the private key once** (it cannot be re-downloaded). SEC1 or PKCS#8 EC P-256 both work.
-3. If the account was migrated from ABM/Essentials, grant it **Manage Blueprints** + **Create/edit device
+4. If the account was migrated from ABM/Essentials, grant it **Manage Blueprints** + **Create/edit device
    configurations** and regenerate the key (otherwise `403`).
 
 > Users and user groups are **read-only** via the API (create/edit only in the console or via
