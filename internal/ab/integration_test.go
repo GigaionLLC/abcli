@@ -18,8 +18,10 @@ import (
 // and only when AB_CLIENT_ID + AB_PRIVATE_KEY are set; otherwise it skips.
 //
 // It reads `/v1/users`, which is an *implicit* permission on every API account
-// (cannot be revoked), so it is the most portable endpoint to smoke-test and is
-// unaffected by Included-MDM / Terms-&-Conditions gating on other resources.
+// (cannot be revoked), so it is the most portable endpoint to smoke-test. It is
+// still gated by organization-wide prerequisites such as pending Terms &
+// Conditions (observed live 2026-11-09), so a non-200 prints the API's own
+// remediation instead of a bare status code.
 func TestLiveReadOnly(t *testing.T) {
 	clientID, keyPath := os.Getenv("AB_CLIENT_ID"), os.Getenv("AB_PRIVATE_KEY")
 	if clientID == "" || keyPath == "" {
@@ -41,12 +43,12 @@ func TestLiveReadOnly(t *testing.T) {
 		t.Fatalf("token mint failed (auth chain): %v", err)
 	}
 
-	status, _, err := c.Raw("GET", "users?limit=1", nil)
+	status, body, err := c.Raw("GET", "users?limit=1", nil)
 	if err != nil {
 		t.Fatalf("live read (GET users) failed: %v", err)
 	}
 	if status != 200 {
-		t.Fatalf("live read (GET users): got HTTP %d, want 200", status)
+		t.Fatalf("live read (GET users): %s", (&APIError{Status: status, Body: string(body)}).Error())
 	}
 	t.Logf("live read-only smoke OK (auth + GET users -> %d)", status)
 }
